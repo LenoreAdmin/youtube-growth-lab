@@ -150,6 +150,7 @@ def refresh(session, now, budget=None, force=False):
     today = pacific_day(now)
     predictors = {}
     created, advised = 0, 0
+    contexts = []
     for history in histories:
         if budget:
             budget.check()
@@ -199,9 +200,17 @@ def refresh(session, now, budget=None, force=False):
                   "forecast_ids": statement.excluded.forecast_ids, "decision_ids": statement.excluded.decision_ids,
                   "created_at": statement.excluded.created_at}))
         advised += 1
+        todays = [{"horizon_hours": p.horizon_hours, "predicted_views": p.predicted_views, "baseline_views": p.baseline_views,
+                   "lower_views": p.lower_views, "upper_views": p.upper_views} for p in session.scalars(select(AnalyticsForecast).where(
+                   AnalyticsForecast.video_id == history.video.id, AnalyticsForecast.origin_day == today))]
+        contexts.append({"video": history.video, "history": history, "features": f, "regime": regime, "forecasts": todays,
+                         "experiments": experiments, "recommendation": recommendation})
     session.commit()
+    # V5: rank, decide and plan from the same leakage-safe context; read-only towards YouTube.
+    from .growth_engine import run as growth_run
+    growth = growth_run(session, now, contexts, base, budget)
     return {"status": "ok", "scored": scored, "forecasts_created": created, "videos_advised": advised,
-            "dataset": dataset.signature if dataset else None}
+            "dataset": dataset.signature if dataset else None, "growth": growth}
 
 
 def overview(session, now=None):

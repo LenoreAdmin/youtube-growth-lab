@@ -334,3 +334,52 @@ class StrategyRecommendation(Base):
     recommendation: Mapped[dict] = mapped_column(JSON)
     forecast_ids: Mapped[list] = mapped_column(JSON, default=list)
     decision_ids: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class GrowthScore(Base):
+    """V5 daily relative priority scores per video with explained components; no probabilities."""
+    __tablename__ = "growth_scores"
+    __table_args__ = (UniqueConstraint("video_id", "day", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+    version: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    state: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(32))
+    opportunity: Mapped[dict] = mapped_column(JSON)
+    viewer: Mapped[dict] = mapped_column(JSON)
+    subscriber: Mapped[dict] = mapped_column(JSON)
+    revival: Mapped[dict] = mapped_column(JSON)
+    momentum: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class GrowthAction(Base):
+    """One recommended action per video at a time; scored later against observed analytics."""
+    __tablename__ = "growth_actions"
+    __table_args__ = (UniqueConstraint("video_id", "created_day"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    created_day: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    version: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(32))
+    target_metric: Mapped[str] = mapped_column(String(32))
+    window_days: Mapped[int] = mapped_column(Integer)
+    evaluate_after: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    outcome: Mapped[str | None] = mapped_column(String(32))
+    payload: Mapped[dict] = mapped_column(JSON)
+    evaluation: Mapped[dict | None] = mapped_column(JSON)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GrowthPlan(Base):
+    __tablename__ = "growth_plans"
+    __table_args__ = (UniqueConstraint("day", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    version: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    plan: Mapped[dict] = mapped_column(JSON)

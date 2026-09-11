@@ -1,13 +1,18 @@
 <!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>YouTube Growth Lab</title><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>
-<body><header><a href="/" class="brand"><span class="mark">▶</span> GROWTH LAB <small>YOUTUBE / V4</small></a><span id="connection">Nicht verbunden</span></header>
+<body><header><a href="/" class="brand"><span class="mark">▶</span> GROWTH LAB <small>YOUTUBE / V5</small></a><span id="connection">Nicht verbunden</span></header>
 <main>
 <section id="login"><h1>Dein Kanal. Mit jedem Video klüger.</h1><p>Mit deinem lokalen Zugangstoken öffnen. YouTube-Zugangsdaten bleiben auf dem Server.</p>
 <form id="loginForm"><label for="token">Dashboard-Token</label><div class="inline"><input id="token" type="password" required autocomplete="off"><button>Öffnen</button></div></form></section>
 <div id="workspace" hidden>
 <div class="heading"><div><p class="eyebrow">KANALÜBERSICHT</p><h1>Was wächst — und warum?</h1></div><button id="refresh" class="secondary">Aktualisieren</button></div>
 <p id="banner" class="notice"></p>
+<section id="growthCard" class="card"><div class="section-heading"><div><p class="eyebrow">GROWTH PLAN HEUTE · V5</p><h2 id="growthTitle">Noch kein Growth Plan</h2></div><span id="growthDay"></span></div>
+<div id="growthTop" class="kpis"></div>
+<div id="growthDetail"></div>
+<div class="table-scroll"><table><thead><tr><th>#</th><th>Video</th><th>Growth Opportunity</th><th>Viewer</th><th>Subscriber</th><th>Zustand</th><th>Breakout</th><th>Aktion</th><th>Messfenster · nächste Auswertung</th><th>Bilanz</th></tr></thead><tbody id="growthRanking"></tbody></table></div>
+<p class="muted">Scores sind relative Prioritäten für diesen Kanal (0–100), keine Wahrscheinlichkeiten. Das System ändert nichts auf YouTube – jede Aktion ist eine Empfehlung mit Erfolgs- und Stop-Kriterium.</p></section>
 <section id="backfillCard" class="card"><div class="section-heading"><div><p class="eyebrow">HISTORISCHER BACKFILL</p><h3>Vorhandene YouTube-Historie nachladen</h3></div><button id="backfillRun" class="secondary">Historie nachladen</button></div><p id="backfillStatus" class="muted"></p><p id="backfillCoverage" class="muted"></p><details><summary>Was die APIs rückwirkend liefern</summary><ul id="backfillLimits" class="muted"></ul></details></section>
 <section id="learningCard" class="card"><div class="section-heading"><div><p class="eyebrow">HISTORISCHES LERNEN · V4</p><h3>Backtests, Modellwahl und Datenbasis</h3></div><button id="learningRun" class="secondary">Lernlauf jetzt ausführen</button></div><p id="learningStatus" class="muted"></p><p id="learningScope" class="notice"></p><div class="table-scroll"><table><thead><tr><th>Horizont</th><th>Modell (zeitlich, bestehende Videos)</th><th>Baseline MAE</th><th>Modell MAE (balanciert)</th><th>n_rows · n_origins · n_videos · Folds</th><th>Intervall</th><th>Live n · Modell/Baseline</th><th>Neue Videos</th></tr></thead><tbody id="learningTable"></tbody></table></div><p id="learningSignals" class="muted"></p><details><summary>Datenaudit und Grenzen</summary><div id="learningAudit" class="muted"></div></details></section>
 <section class="kpis"><article><span>Abonnenten</span><strong id="subscribers">—</strong><small>Aktueller Kanalstand</small></article><article><span>Views gesamt</span><strong id="views">—</strong><small>Aktive Videos mit Snapshots</small></article><article><span>Gewinnen Momentum</span><strong id="winners">—</strong><small>Im letzten Vergleichsfenster</small></article><article><span>Ausgewertete Prognosen</span><strong id="learned">—</strong><small>Gespeicherte Soll-Ist-Vergleiche</small></article></section>

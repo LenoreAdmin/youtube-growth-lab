@@ -16,6 +16,7 @@ from .pipeline import dashboard_rows, collect
 from .memory import DecisionInput, create_decision, activate, evidence
 from . import backfill as backfill_module
 from . import learning as learning_module
+from . import growth_engine as growth_module
 
 app = FastAPI(title="YouTube Growth Lab", version="0.1.0")
 security = HTTPBearer(auto_error=False)
@@ -127,6 +128,11 @@ def learning_overview(s=Depends(db)):
     return jsonable_encoder(learning_module.overview(s))
 
 
+@app.get("/api/growth", dependencies=[Depends(authenticate)])
+def growth_overview(s=Depends(db)):
+    return jsonable_encoder(growth_module.overview(s))
+
+
 @app.post("/api/learning/rebuild", dependencies=[Depends(authenticate)])
 def learning_rebuild(s=Depends(db)):
     if settings.vercel_env == "preview":
@@ -149,6 +155,7 @@ def dashboard(s=Depends(db)):
             "sync": jsonable_encoder(run), "demo": any(c.id.startswith("DEMO") for c in channels),
             "backfill": jsonable_encoder(backfill_module.summary(s)),
             "learning_v4": jsonable_encoder(learning_module.overview(s)),
+            "growth_v5": jsonable_encoder(growth_module.overview(s)),
             "learning": {"evaluated_forecasts": len(evaluated),
                          "mae": sum(r.absolute_error for r in evaluated)/len(evaluated) if evaluated else None},
             "availability": {"returning_viewers": "Nicht Ã¼ber die verwendeten APIs verfÃ¼gbar",
@@ -179,6 +186,8 @@ def video_detail(video_id: str, s=Depends(db)):
             "reports": latest, "monetization": monetization,
             "history": jsonable_encoder(backfill_module.video_history(s, video_id)),
             "strategy": jsonable_encoder(learning_module.overview(s)["videos"].get(video_id)),
+            "growth": jsonable_encoder({**growth_module.overview(s)["scores"].get(video_id, {}),
+                                        "actions": growth_module.overview(s)["actions"].get(video_id, [])}),
             "growth_history": jsonable_encoder(list(s.scalars(select(GrowthAssessment)
                 .where(GrowthAssessment.video_id == video_id).order_by(GrowthAssessment.origin_at.desc()).limit(168))))}
 

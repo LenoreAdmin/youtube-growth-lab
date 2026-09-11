@@ -17,6 +17,7 @@ app/
   regimes.py       V4 quantilbasierte Growth-Regime
   strategy.py      V4 Strategy Engine und Experiment-Kontext
   learning.py      V4 Orchestrierung, Feedback-Loop, Dashboard-Overview
+  growth_engine.py V5 Opportunity-/Viewer-/Subscriber-Scoring, States, Revival, Action Engine, Feedback, Daily Growth Plan
   metrics.py       Velocity, Acceleration, Momentum, Conversion
   prediction.py    Baseline, RÃ¼ckkopplung, Ridge und Kalibrierung
   memory.py        Vorregistrierung, Auswertung, Strategieevidenz
@@ -49,6 +50,7 @@ Keine zusÃ¤tzliche Node-Laufzeit im Betrieb. Diese Entscheidung hÃ¤lt eine i
 | learning_datasets / learning_backtests | V4: signierte historische Datensätze, Audit, Walk-forward-Backtests je Horizont ([V4.md](V4.md)) |
 | analytics_forecasts | V4: Analytics-Prognosen mit damaligen Features, Baseline, Intervall und späterem Ausgang |
 | strategy_recommendations | V4: versionierte Handlungsempfehlungen je Video/Tag mit Forecast-/Experiment-Links |
+| growth_scores / growth_actions / growth_plans | V5: relative Prioritätsscores mit Komponenten, je eine Aktion je Video mit Erfolgs-/Stop-Kriterium und späterer Auswertung, Daily Growth Plan ([V5.md](V5.md)) |
 | forecasts | UnverÃ¤nderliche Vorhersage, Features, Modell, tatsÃ¤chliches Ergebnis |
 | model_runs | Validierung, Modellparameter, Trainings-IDs, Koeffizienten/Skalierung |
 | decisions | VollstÃ¤ndiges Experiment Memory, vorab definierte Strategie |

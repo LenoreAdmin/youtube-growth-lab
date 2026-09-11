@@ -24,7 +24,8 @@ def baselines(rows):
     ratios, ratio_weights = _weighted(rows, "ratio_7_28")
     accels, accel_weights = _weighted(rows, "accel_7d")
     medians = {}
-    for key in ("retention_avg", "subscriber_conversion_7d", "pct_7d", "ctr_7d", "traffic_search", "traffic_suggested", "traffic_external", "like_rate_7d"):
+    for key in ("retention_avg", "subscriber_conversion_7d", "pct_7d", "ctr_7d", "traffic_search", "traffic_suggested", "traffic_external",
+                "traffic_browse", "traffic_shorts", "like_rate_7d", "velocity_7d"):
         values, weights = _weighted(rows, key)
         kept = [r for r in rows if r["features"].get(key) is not None]
         medians[key] = {"median": weighted_quantile(values, weights, .5), "n": len(values),
