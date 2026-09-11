@@ -67,3 +67,64 @@ def test_model_audit_requires_authentication(client,session):
     response=client.get(f"/api/models/{run.id}",headers={"Authorization":"Bearer test-token-only"})
     assert response.status_code==200
     assert response.json()["parameters"]["version"]=="test"
+
+
+@pytest.mark.parametrize("authorization",[None,"Bearer wrong","Bearer cron-test-secret"])
+def test_manual_sync_requires_app_token(client,monkeypatch,authorization):
+    from unittest.mock import Mock
+    import app.main as main
+    collect=Mock()
+    monkeypatch.setattr(main,"collect",collect)
+    monkeypatch.setattr(settings,"cron_secret","cron-test-secret")
+    response=client.post("/api/sync",headers={"Authorization":authorization} if authorization else {})
+    assert response.status_code==401
+    collect.assert_not_called()
+
+
+@pytest.mark.parametrize("status,code",[("ok",200),("deferred",200),("already_running",409),("partial",503),("failed",503)])
+def test_manual_sync_shared_pipeline_statuses(client,monkeypatch,status,code):
+    from unittest.mock import Mock
+    import app.main as main
+    collect=Mock(return_value={"status":status})
+    monkeypatch.setattr(main,"collect",collect)
+    response=client.post("/api/sync",headers={"Authorization":"Bearer test-token-only"})
+    assert response.status_code==code
+    collect.assert_called_once_with()
+    assert response.headers["Cache-Control"]=="no-store"
+
+
+def test_manual_sync_preview_and_exception_redaction(client,monkeypatch):
+    from unittest.mock import Mock
+    import app.main as main
+    collect=Mock(side_effect=RuntimeError("private-token-must-not-appear"))
+    monkeypatch.setattr(main,"collect",collect)
+    headers={"Authorization":"Bearer test-token-only"}
+    monkeypatch.setattr(settings,"vercel_env","preview")
+    assert client.post("/api/sync",headers=headers).status_code==403
+    collect.assert_not_called()
+    monkeypatch.setattr(settings,"vercel_env","production")
+    response=client.post("/api/sync",headers=headers)
+    assert response.status_code==503
+    assert "private-token" not in response.text
+    assert client.get("/api/sync",headers=headers).status_code==405
+
+
+def test_manual_sync_honors_real_lease_and_updates_import_timestamp(client,session,monkeypatch):
+    from app import pipeline, jobs
+    import app.main as main
+    from test_import_loop import FakeYouTube, wire
+    wire(monkeypatch,session)
+    monkeypatch.setattr(main,"collect",lambda:pipeline.collect(FakeYouTube()))
+    headers={"Authorization":"Bearer test-token-only"}
+    owner,_=jobs.acquire(pipeline.Session,"cron-hour")
+    try:
+        assert client.post("/api/sync",headers=headers).status_code==409
+        assert client.get("/api/dashboard",headers=headers).json()["sync"] is None
+    finally:
+        jobs.release(pipeline.Session,owner,"cron-hour")
+    assert client.post("/api/sync",headers=headers).status_code==200
+    session.expire_all()
+    dashboard=client.get("/api/dashboard",headers=headers).json()
+    assert dashboard["sync"]["finished_at"] is not None
+    assert dashboard["sync"]["status"]=="ok"
+    assert dashboard["videos"][0]["views"]==20000

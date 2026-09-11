@@ -13,8 +13,24 @@ async function api(url, data) {
  return body;
 }
 async function guarded(action){$("error").textContent="";try{await action()}catch(e){$("error").textContent=e.message}}
+async function manualSync(){
+ const button=$("refresh");
+ if(button.disabled)return;
+ const label=button.textContent;
+ button.disabled=true;button.textContent="Synchronisiere…";
+ try{
+  let failure=null;
+  try{
+   const result=await api("/api/sync",{});
+   if(result.status==="deferred")failure=new Error(result.detail);
+  }catch(error){failure=error}
+  // Reload even after partial failure so the persisted import status is visible.
+  try{await load()}catch(error){failure=failure?new Error(failure.message+" Dashboard: "+error.message):error}
+  if(failure)throw failure;
+ }finally{button.disabled=false;button.textContent=label}
+}
 $("loginForm").addEventListener("submit",e=>{e.preventDefault();token=$("token").value;guarded(load)});
-$("refresh").onclick=()=>guarded(load);
+$("refresh").onclick=()=>guarded(manualSync);
 async function load(){
  state=await api("/api/dashboard");$("login").hidden=true;$("workspace").hidden=false;$("token").value="";
  $("connection").textContent=state.channels.map(c=>c.title).join(" · ")||"Wartet auf erste Synchronisierung";

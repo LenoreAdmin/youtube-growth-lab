@@ -74,6 +74,26 @@ def cron_sync():
     return JSONResponse(result, status_code=code)
 
 
+@app.post("/api/sync", dependencies=[Depends(authenticate)])
+def manual_sync():
+    if settings.vercel_env == "preview":
+        raise HTTPException(403, "Manueller Sync ist in Preview-Deployments deaktiviert.")
+    try:
+        # No hourly bucket: an explicit refresh may run again within the same hour.
+        # collect() still acquires the shared database lease used by Cron.
+        result = collect()
+    except Exception:
+        raise HTTPException(503, "Synchronisierung fehlgeschlagen. Serverkonfiguration und Importstatus prüfen.") from None
+    status = result["status"]
+    if status == "already_running":
+        raise HTTPException(409, "Ein Sync läuft bereits. Bitte nach dessen Abschluss erneut versuchen.")
+    if status in ("failed", "partial"):
+        raise HTTPException(503, "Synchronisierung fehlgeschlagen oder nur teilweise abgeschlossen. Details stehen beim letzten Import.")
+    if status == "deferred":
+        return {"status": status, "detail": "Zeitbudget erreicht. Fortschritt gespeichert; der nächste Sync setzt die Verarbeitung fort."}
+    return {"status": status}
+
+
 @app.get("/api/dashboard", dependencies=[Depends(authenticate)])
 def dashboard(s=Depends(db)):
     channels = list(s.scalars(select(Channel)))
