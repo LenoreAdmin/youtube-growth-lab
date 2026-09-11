@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-growth"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "sqlalchemy>=2.0,<3", "psycopg[binary]>=3.2,<4", "alembic>=1.14,<2", "pydantic-settings>=2.7,<3", "google-api-python-client>=2.160,<3", "google-auth-oauthlib>=1.2,<2", "isodate>=0.7,<1", "scikit-learn>=1.6,<2", "numpy>=2,<3", "httpx>=0.28,<1", "scipy>=1.15,<2", "tzdata>=2025"]
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+ml = ["xgboost>=2.1,<4"]
+[tool.setuptools.packages.find]
+include = ["app*"]
+[tool.setuptools.package-data]
+app = ["static/*"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]

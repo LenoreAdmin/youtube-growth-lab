@@ -1,0 +1,29 @@
+name: V1 checks
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: growth_test
+          POSTGRES_USER: growth
+          POSTGRES_PASSWORD: test_only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U growth -d growth_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://growth:test_only@localhost:5432/growth_test
+      APP_TOKEN: ci-test-token-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -c constraints.txt ".[dev]"
+      - run: alembic upgrade head
+      - run: python -m app.cli demo
+      - run: python -m pytest -q
+      - run: alembic downgrade base
+      - run: alembic upgrade head
