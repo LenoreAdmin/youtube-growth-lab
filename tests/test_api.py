@@ -57,3 +57,13 @@ def test_experiment_changes_are_authenticated_append_only(client,session):
     assert result["decision"]["hypothesis"] == row.hypothesis
     assert result["changes"][0]["after_value"] == "Updated"
     assert client.put(path,json=data,headers=headers).status_code == 405
+
+
+def test_model_audit_requires_authentication(client,session):
+    from app.models import ModelRun
+    run=ModelRun(horizon_hours=24,training_rows=0,parameters={"version":"test"},metrics={"status":"insufficient_data"})
+    session.add(run);session.commit()
+    assert client.get(f"/api/models/{run.id}").status_code==401
+    response=client.get(f"/api/models/{run.id}",headers={"Authorization":"Bearer test-token-only"})
+    assert response.status_code==200
+    assert response.json()["parameters"]["version"]=="test"

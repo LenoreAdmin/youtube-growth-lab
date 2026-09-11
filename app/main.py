@@ -11,7 +11,7 @@ from typing import Literal
 from sqlalchemy import select, text
 from .db import Session
 from .config import settings
-from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview, GrowthAssessment, ExperimentChange, utcnow
+from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview, GrowthAssessment, ExperimentChange, PredictionAudit, ModelRun, utcnow
 from .pipeline import dashboard_rows, collect
 from .memory import DecisionInput, create_decision, activate, evidence
 
@@ -117,6 +117,8 @@ def video_detail(video_id: str, s=Depends(db)):
 def memory(s=Depends(db)):
     rows = list(s.scalars(select(Decision).order_by(Decision.id.desc())))
     return [{"decision": jsonable_encoder(r), "evidence": evidence(s, r.strategy_key),
+             "prediction_outcomes": [{"forecast_id":p.id,"predicted_views":p.predicted_views,"actual_views":p.actual_views,"absolute_error":p.absolute_error}
+                for p in s.scalars(select(Forecast).where(Forecast.id.in_((r.measurement or {}).get("forecast_ids",[]))))],
              "changes": jsonable_encoder(list(s.scalars(select(ExperimentChange).where(ExperimentChange.decision_id == r.id).order_by(ExperimentChange.recorded_at)))) ,
              "reviews": jsonable_encoder(list(s.scalars(select(MemoryReview).where(MemoryReview.decision_id == r.id))))} for r in rows]
 
@@ -190,3 +192,11 @@ def record_change(decision_id: int, data: ChangeInput, s=Depends(db)):
     s.add(row)
     s.commit()
     return jsonable_encoder(row)
+
+
+@app.get("/api/models/{run_id}", dependencies=[Depends(authenticate)])
+def model_detail(run_id: int, s=Depends(db)):
+    run=s.get(ModelRun,run_id)
+    if run is None:
+        raise HTTPException(404,"Model run not found")
+    return jsonable_encoder(run)

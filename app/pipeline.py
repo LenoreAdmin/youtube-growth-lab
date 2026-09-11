@@ -6,10 +6,10 @@ from sqlalchemy import select, func, text, delete
 import isodate
 from .config import settings
 from .db import Session, engine
-from .models import Channel, Video, Snapshot, Daily, Report, Reach, SyncRun, Forecast, IngestCursor, ImportedReport, GrowthAssessment, utcnow
+from .models import Channel, Video, Snapshot, Daily, Report, Reach, SyncRun, Forecast, IngestCursor, ImportedReport, GrowthAssessment, PredictionAudit, utcnow
 from .metrics import features, aware
 from .growth import enrich, assess, VERSION
-from .prediction import mature, predict
+from .prediction_v3 import feedback, predict
 from .youtube import YouTube
 from .budget import Budget, SyncBudgetExceeded
 from .jobs import acquire, release
@@ -52,6 +52,18 @@ def latest_features(session, now=None, budget=None):
             if row["insightTrafficSourceType"] != "ADVERTISING") if traffic and traffic.rows else None
         f["advertising_views_reported"] = sum(row["views"] for row in traffic.rows
             if row["insightTrafficSourceType"] == "ADVERTISING") if traffic and traffic.rows else None
+        traffic_total = sum(row.get("views",0) for row in traffic.rows) if traffic else 0
+        for key, source in (("traffic_search","YT_SEARCH"),("traffic_suggested","RELATED_VIDEO"),("traffic_external","EXT_URL")):
+            f[key] = sum(row.get("views",0) for row in traffic.rows if row.get("insightTrafficSourceType")==source)/traffic_total if traffic_total and (now.date()-traffic.end).days<=7 else None
+        retention = session.scalar(select(Report).where(Report.video_id==v.id,Report.kind=="retention",Report.fetched_at<=now).order_by(Report.end.desc()))
+        f["retention"] = None
+        if retention and retention.rows and (now.date()-retention.end).days<=7:
+            pairs=sorted((r["elapsedVideoTimeRatio"],r["audienceWatchRatio"]) for r in retention.rows)
+            width=pairs[-1][0]-pairs[0][0]
+            if width>0:
+                f["retention"] = sum((b[0]-a[0])*(a[1]+b[1])/2 for a,b in zip(pairs,pairs[1:]))/width
+        f["metric_status"].update(retention="available" if f["retention"] is not None else "delayed_or_missing",
+            traffic="available" if f["traffic_search"] is not None else "delayed_or_missing")
         f["age_days"] = max(0, (aware(now)-aware(v.published_at)).days)
         result.append((v, snapshots, f))
     return result
@@ -70,9 +82,12 @@ def dashboard_rows(session, now=None):
             p = session.scalar(select(Forecast).where(Forecast.video_id == video.id, Forecast.horizon_hours == h)
                                .order_by(Forecast.origin_at.desc()).limit(1))
             if p:
+                audit = session.get(PredictionAudit,p.id)
                 forecasts.append(dict(hours=h, views=p.predicted_views, lower=p.lower_views, upper=p.upper_views,
                     p100k=p.p100k, p1m=p.p1m, n=p.calibration_n, model=p.model_version,
-                    origin=p.origin_at, target=p.target_at))
+                    origin=p.origin_at, target=p.target_at,
+                    audit=audit.metadata_json if audit else {"confidence":"insufficient_data","version":"legacy"},
+                    feedback=audit.feedback if audit else {},recommendations=audit.recommendations if audit else []))
         explanation = assess(f, peers)
         current_traffic = session.scalar(select(Report).where(Report.video_id == video.id, Report.kind == "traffic")
                                         .order_by(Report.end.desc()).limit(1))
@@ -258,7 +273,7 @@ def _collect(client, budget=None):
                     issues.append(f"reach: {type(exc).__name__}")
         with Session() as s:
             from .memory import evaluate_memory, strategy_feature
-            mature(s, now)
+            feedback(s, now, budget)
             s.flush()
             evaluate_memory(s, now)
             s.flush()
@@ -287,7 +302,7 @@ def _collect(client, budget=None):
                         Forecast.origin_at == origin.observed_at, Forecast.horizon_hours == h))
                     if not exists:
                         budget.check()
-                        s.add(predict(s, video.id, origin, f, h))
+                        s.add(predict(s, video.id, origin, f, h, budget=budget))
                 s.commit()
             s.commit()
         # Optional lifetime retention is last: all core results are already committed.

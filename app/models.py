@@ -208,3 +208,13 @@ class ExperimentChange(Base):
     before_value: Mapped[str] = mapped_column(String(2000))
     after_value: Mapped[str] = mapped_column(String(2000))
     rationale: Mapped[str] = mapped_column(String(2000))
+
+
+class PredictionAudit(Base):
+    __tablename__ = "prediction_audits"
+    forecast_id: Mapped[int] = mapped_column(ForeignKey("forecasts.id", ondelete="CASCADE"), primary_key=True)
+    model_run_id: Mapped[int] = mapped_column(ForeignKey("model_runs.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    metadata_json: Mapped[dict] = mapped_column(JSON)
+    feedback: Mapped[dict] = mapped_column(JSON, default=dict)
+    recommendations: Mapped[list] = mapped_column(JSON)

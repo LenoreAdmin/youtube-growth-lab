@@ -80,6 +80,14 @@ def activate(session, decision, video_id, now=None):
             control_origin_at=aware(c.observed_at).isoformat(),
             control_target_at=(aware(c.observed_at)+timedelta(hours=h)).isoformat(),
             control_expected_gain=max(0, cp.predicted_views-cp.origin_views))
+    # Freeze the exact forecast IDs available at registration; later outcomes stay linked.
+    linked=[]
+    for hours in (24,168,720):
+        forecast=session.scalar(select(Forecast).where(Forecast.video_id==video_id,Forecast.horizon_hours==hours,
+            Forecast.origin_at<=now).order_by(Forecast.origin_at.desc()))
+        if forecast:
+            linked.append(forecast.id)
+    measurement["forecast_ids"] = linked
     decision.video_id, decision.status, decision.measurement = video_id, "registered", measurement
 
 
@@ -139,6 +147,9 @@ def evaluate_memory(session, now):
             control_gain = control.views-m["control_origin_views"]
             control_residual = (control_gain-m["control_expected_gain"])/max(1, m["control_expected_gain"])
             result.update(control_gain=control_gain, control_adjusted_residual=residual-control_residual)
+        result["forecast_outcomes"] = [dict(forecast_id=p.id, predicted_views=p.predicted_views,
+            actual_views=p.actual_views, absolute_error=p.absolute_error)
+            for p in session.scalars(select(Forecast).where(Forecast.id.in_(m.get("forecast_ids",[]))))]
         row.actual_result, row.deviation = result, gain-expected
         row.status, row.evaluated_at = "evaluated", now
         row.suspected_cause = "Noch nicht geprüft; Traffic, Retention und Störfaktoren vergleichen."

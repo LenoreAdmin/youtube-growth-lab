@@ -93,3 +93,5 @@ Das Repository ist fÃ¼r eine **private** GitHub-Ablage vorgesehen. Ein lokaler
 Die Zugangswerte in automatisierten Tests und der lokalen Demo sind absichtlich Ã¶ffentliche Test-Fixtures und dÃ¼rfen nicht fÃ¼r echte Daten verwendet werden.
 
 V2-Erweiterung, Testergebnis und sichere Production-Abnahme: [docs/V2.md](docs/V2.md).
+
+V3 Prediction-/Decision-Engine und lokale Abnahme: [docs/V3.md](docs/V3.md).
