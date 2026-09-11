@@ -569,41 +569,107 @@ def run(session, now, contexts, base, budget=None):
     for i, r in enumerate(ranking):
         r["priority"] = i+1
     plan = daily_plan(ranking, today, record)
+    # Momentum ranking keeps `priority`; `active_rank` marks the active growth priority.
     statement = upsert(session, GrowthPlan).values(day=today, version=VERSION, created_at=now, plan=plan)
     session.execute(statement.on_conflict_do_update(index_elements=["day", "version"], set_={"plan": statement.excluded.plan, "created_at": statement.excluded.created_at}))
     session.commit()
     return {"evaluated_actions": evaluated, "ranked": len(ranking), "priority": plan.get("priority_video_id")}
 
 
+PASSIVE_ACTIONS = ("protect_no_change", "observe")
+INACTIVE_STATES = ("protect_momentum", "paid_excluded", "paid_cooldown", "insufficient_data")
+NO_ACTIVE_ACTION = "Keine aktive Maßnahme empfohlen"
+
+
+def active_priority_score(row):
+    """Evidence-based *additional* growth potential of a changeable video: internal scores plus V6 external signals."""
+    ext = row.get("external") or {}
+    parts = [(row.get("opportunity_score"), 2.0), (row.get("viewer_score"), 1.0), (row.get("subscriber_score"), 1.0),
+             (ext.get("score"), 2.0), (ext.get("subscriber_fit"), 1.0)]
+    usable = [(v, w) for v, w in parts if v is not None]
+    if not usable:
+        return None
+    return round(sum(v*w for v, w in usable)/sum(w for _, w in usable), 1)
+
+
+def active_eligible(row):
+    """Only organic, changeable videos with a concrete measure may carry active priority; protection is never overridden."""
+    if row["state"] in INACTIVE_STATES or row["action"] in PASSIVE_ACTIONS:
+        return False
+    return row.get("opportunity_score") is not None
+
+
 def daily_plan(ranking, today, record):
-    top = ranking[0] if ranking else None
+    """Two separate concepts: the momentum/performance ranking (protection stays visible at the top) and the
+    active growth priority – the changeable video with the best evidence for additional organic growth."""
+    for r in ranking:
+        r["momentum_rank"] = r["priority"]
+        r["active_eligible"] = active_eligible(r)
+        r["active_priority_score"] = active_priority_score(r) if r["active_eligible"] else None
+        r["active_rank"] = None
+        r["ineligible_reason"] = (None if r["active_eligible"] else
+            "Momentum wird geschützt – bewusst keine Änderung" if r["state"] == "protect_momentum" else
+            "Werbetraffic: keine organische Optimierungspriorität" if r["state"] in ("paid_excluded", "paid_cooldown") else
+            "Zu wenig Daten" if r["state"] == "insufficient_data" else
+            "Nur Beobachtung empfohlen – keine aktive Maßnahme" if r["action"] == "observe" else "Kein belastbarer Score")
+    candidates = sorted((r for r in ranking if r["active_eligible"]), key=lambda r: (-(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0)))
+    for i, r in enumerate(candidates):
+        r["active_rank"] = i+1
+    protected = [{"video_id": r["video_id"], "title": r["title"], "regime": r["regime"], "action": r["action"], "reason": r["reason"],
+                  "opportunity_score": r["opportunity_score"], "do_not_change": r["do_not_change"], "momentum_rank": r["momentum_rank"]}
+                 for r in ranking if r["state"] == "protect_momentum"]
+    momentum_top = ranking[0] if ranking else None
     subscriber = max((r for r in ranking if r["subscriber_score"] is not None), key=lambda r: r["subscriber_score"], default=None)
     viewer = max((r for r in ranking if r["viewer_score"] is not None), key=lambda r: r["viewer_score"], default=None)
+    base = {"day": str(today), "version": VERSION, "ranking": ranking, "momentum_ranking": [r["video_id"] for r in ranking],
+            "protected": protected, "track_record": record, "note": SCORE_NOTE+" "+GENERALIZATION_NOTE,
+            "read_only": "Keine automatischen Änderungen auf YouTube.",
+            "momentum_top": {"video_id": momentum_top["video_id"], "title": momentum_top["title"], "state": momentum_top["state"],
+                             "opportunity_score": momentum_top["opportunity_score"]} if momentum_top else None,
+            "subscriber_focus": subscriber["video_id"] if subscriber else None, "viewer_focus": viewer["video_id"] if viewer else None,
+            "priority_semantics": "Aktive Growth-Priorität = änderbares, organisches Video mit der besten evidenzbasierten zusätzlichen Chance; "
+                                  "geschützte Videos behalten ihren Schutz und erscheinen separat."}
+    if momentum_top is None:
+        return {**base, "status": "insufficient_data", "active_status": "none", "priority_video_id": None, "priority_title": None,
+                "action": None, "why": "Keine Videos bewertet.", "why_priority": NO_ACTIVE_ACTION, "objective": None, "do_not_change": [],
+                "success_metric": None, "success_criterion": None, "window_days": None, "next_evaluation": None, "confidence": "insufficient_data",
+                "internal_signals": None, "external_signals": {"available": False}, "combined_decision": NO_ACTIVE_ACTION+"."}
+    top = candidates[0] if candidates else None
     if top is None:
-        return {"day": str(today), "version": VERSION, "status": "insufficient_data", "ranking": [], "note": SCORE_NOTE}
+        reasons = "; ".join(f"{r['title']}: {r['ineligible_reason']}" for r in ranking)
+        status = "insufficient_data" if all(r["state"] == "insufficient_data" for r in ranking) else "no_active_action"
+        return {**base, "status": status, "active_status": "none", "priority_video_id": None, "priority_title": None,
+                "action": None, "why": reasons, "why_priority": NO_ACTIVE_ACTION+" – kein änderbares Video mit ausreichender Evidenz.",
+                "objective": None, "do_not_change": sorted({d for r in ranking for d in r["do_not_change"]}), "success_metric": None,
+                "success_criterion": None, "window_days": None, "next_evaluation": None,
+                "confidence": min((r["confidence"] for r in ranking), key=lambda c: {"insufficient_data": 0, "low": 1, "moderate": 2}.get(c, 0)),
+                "internal_signals": None, "external_signals": {"available": False, "note": "Keine externe Chance lenkt derzeit eine aktive Maßnahme."},
+                "combined_decision": NO_ACTIVE_ACTION+"; "+("Schutz aktiv für: "+", ".join(p["title"] for p in protected)+"." if protected else "beobachten und Daten sammeln.")}
     objective = top["objective"]
-    if subscriber and subscriber["video_id"] == top["video_id"] and top["action"] in ("observe", "cross_promote") \
+    if subscriber and subscriber["video_id"] == top["video_id"] and top["action"] == "cross_promote" \
             and (top["subscriber_score"] or 0) > (top["viewer_score"] or 0):
         objective = "Subscriber"
     ext = top.get("external")
     internal = {"state": top["state"], "regime": top["regime"], "breakout": top["breakout"], "opportunity_score": top["opportunity_score"],
                 "viewer_score": top["viewer_score"], "subscriber_score": top["subscriber_score"], "paid_status": top.get("paid_status"),
-                "momentum_v2": (top.get("momentum") or {}).get("score")}
+                "momentum_v2": (top.get("momentum") or {}).get("score"), "momentum_rank": top["momentum_rank"],
+                "active_priority_score": top["active_priority_score"]}
     external_block = {"available": bool(ext), "score": ext.get("score") if ext else None, "kind": ext.get("kind") if ext else None,
                       "key": ext.get("key") if ext else None, "gap": ext.get("gap") if ext else None, "audience": ext.get("audience") if ext else None,
-                      "demand_source": ext.get("demand_source") if ext else None, "note": "Externe Nachfrage-Signale sind Proxies, außer sie stammen aus eigenen Analytics."}
-    combined = (f"{top['title']}: interner Zustand {top['state']}" + (f" + externe Chance „{ext['key']}“ ({ext['demand_source']})" if ext else " ohne externe Chance")
-                + f" → {top['action']}.")
-    return {"day": str(today), "version": VERSION, "status": "ok" if top["opportunity_score"] is not None else "insufficient_data",
+                      "demand_source": ext.get("demand_source") if ext else None, "subscriber_fit": ext.get("subscriber_fit") if ext else None,
+                      "note": "Externe Nachfrage-Signale sind Proxies, außer sie stammen aus eigenen Analytics."}
+    combined = (f"Aktive Growth-Priorität #1: {top['title']} – interner Zustand {top['state']}"
+                + (f" + externe Chance „{ext['key']}“ ({ext['demand_source']})" if ext else " ohne externe Chance") + f" → {top['action']}."
+                + (" Geschützt (keine Änderung): "+", ".join(p["title"] for p in protected)+"." if protected else ""))
+    return {**base, "status": "ok", "active_status": "active", "priority_video_id": top["video_id"], "priority_title": top["title"],
+            "why": top["reason"],
+            "why_priority": f"Höchste aktive Growth-Priorität ({top['active_priority_score']}) unter den änderbaren organischen Videos; "
+                            f"Zustand {top['state']}, Momentum-Rang {top['momentum_rank']}."
+                            + (f" Höherer Momentum-Score bei {momentum_top['title']} ({momentum_top['opportunity_score']}) bleibt geschützt." if momentum_top["video_id"] != top["video_id"] and momentum_top["state"] == "protect_momentum" else ""),
             "internal_signals": internal, "external_signals": external_block, "combined_decision": combined,
-            "priority_video_id": top["video_id"], "priority_title": top["title"], "why": top["reason"],
-            "why_priority": f"Höchster Growth-Opportunity-Score ({top['opportunity_score']}) im Ranking; Zustand {top['state']}." if top["opportunity_score"] is not None
-                            else "Kein Video mit belastbarem Score; Daten sammeln.",
             "action": top["action"], "objective": objective, "do_not_change": top["do_not_change"], "success_metric": top["target_metric"],
             "success_criterion": top["success_criterion"], "window_days": top["window_days"], "next_evaluation": top["next_evaluation"],
-            "confidence": top["confidence"], "subscriber_focus": subscriber["video_id"] if subscriber else None,
-            "viewer_focus": viewer["video_id"] if viewer else None, "ranking": ranking, "track_record": record,
-            "note": SCORE_NOTE+" "+GENERALIZATION_NOTE, "read_only": "Keine automatischen Änderungen auf YouTube."}
+            "confidence": top["confidence"]}
 
 
 def overview(session):

@@ -105,13 +105,19 @@ def test_run_writes_scores_actions_plan_and_holds_actions_until_evaluated(monkey
     assert result["growth"]["ranked"] == 2 and result["growth"]["priority"] in ("a", "b")
     session.expire_all()
     plan = session.scalar(select(GrowthPlan)).plan
-    assert plan["day"] == str(TODAY) and len(plan["ranking"]) == 2 and plan["ranking"][0]["priority"] == 1
-    assert plan["priority_video_id"] == plan["ranking"][0]["video_id"]
-    for key in ("why", "why_priority", "action", "objective", "do_not_change", "success_metric", "success_criterion", "window_days", "next_evaluation", "confidence"):
-        assert plan[key] is not None
-    assert plan["objective"] in ("Viewer", "Subscriber", "Watchtime", "Discovery") and plan["confidence"] in ("low", "insufficient_data")
-    assert date.fromisoformat(plan["next_evaluation"]) == TODAY+timedelta(days=plan["window_days"]+LAG)
-    assert "keine Wahrscheinlichkeit" in plan["note"] and plan["read_only"]
+    assert plan["day"] == str(TODAY) and len(plan["ranking"]) == 2 and plan["ranking"][0]["priority"] == 1 == plan["ranking"][0]["momentum_rank"]
+    assert plan["momentum_top"]["video_id"] == plan["ranking"][0]["video_id"]
+    if plan["active_status"] == "active":
+        for key in ("why", "why_priority", "action", "objective", "do_not_change", "success_metric", "success_criterion", "window_days", "next_evaluation", "confidence"):
+            assert plan[key] is not None
+        assert plan["objective"] in ("Viewer", "Subscriber", "Watchtime", "Discovery")
+        assert date.fromisoformat(plan["next_evaluation"]) == TODAY+timedelta(days=plan["window_days"]+LAG)
+        assert next(r for r in plan["ranking"] if r["video_id"] == plan["priority_video_id"])["active_rank"] == 1
+    else:
+        assert plan["status"] == "no_active_action" and plan["priority_video_id"] is None and plan["action"] is None
+        assert plan["why_priority"].startswith("Keine aktive Maßnahme empfohlen")
+    assert plan["confidence"] in ("low", "insufficient_data")
+    assert "keine Wahrscheinlichkeit" in plan["note"] and plan["read_only"] and plan["priority_semantics"]
     assert session.scalar(select(func.count()).select_from(GrowthAction)) == 2
     assert session.scalar(select(func.count()).select_from(GrowthScore)) == 2
     first = {r.video_id: r for r in session.scalars(select(GrowthAction))}
@@ -150,8 +156,12 @@ def test_protect_supersedes_pending_test_and_plan_prefers_winner(monkeypatch, se
     assert rows[("a", "superseded")].action == "test_title" and rows[("a", "superseded")].outcome == "inconclusive"
     assert rows[("a", "pending")].action == "protect_no_change" and rows[("a", "pending")].state == "protect_momentum"
     plan = session.scalar(select(GrowthPlan)).plan
-    assert plan["priority_video_id"] == "a" and plan["action"] == "protect_no_change" and "Titel" in plan["do_not_change"]
-    assert plan["ranking"][0]["breakout"] is True
+    # The winner keeps its protection and leads the momentum ranking, but never becomes the active priority.
+    assert plan["ranking"][0]["video_id"] == "a" and plan["ranking"][0]["breakout"] is True and plan["ranking"][0]["active_rank"] is None
+    assert plan["protected"][0]["video_id"] == "a" and plan["protected"][0]["action"] == "protect_no_change"
+    assert plan["priority_video_id"] != "a" and plan["status"] == "no_active_action"  # b only observes
+    assert "Keine aktive Maßnahme empfohlen" in plan["combined_decision"] and "Schutz aktiv für: a" in plan["combined_decision"]
+    assert "Titel" in plan["do_not_change"]
 
 
 def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, session):
@@ -220,7 +230,7 @@ def test_growth_step_runs_inside_sync_and_is_read_only(monkeypatch, session):
     assert pipeline_collect(FakeYouTube())["status"] == "ok"
     session.expire_all()
     plan = session.scalar(select(GrowthPlan))
-    assert plan is not None and plan.plan["status"] == "insufficient_data"
+    assert plan is not None and plan.plan["status"] == "insufficient_data" and plan.plan["active_status"] == "none"
     assert session.scalar(select(GrowthAction)).action == "observe"
     source = Path("app/youtube.py").read_text(encoding="utf-8")
     assert not re.search(r"\.(update|insert|delete|set|rate|thumbnails\(\)\.set)\(", source)
@@ -243,3 +253,57 @@ def test_upserts_compile_for_postgresql():
     assert "ON CONFLICT (video_id, created_day) DO NOTHING" in str(stmt.compile(dialect=postgresql.dialect()))
     plan = upsert(fake, GrowthPlan).values(day=date(2026, 1, 1), version="v", created_at=NOW, plan={})
     assert "DO UPDATE SET plan = excluded.plan" in str(plan.on_conflict_do_update(index_elements=["day", "version"], set_={"plan": plan.excluded.plan}).compile(dialect=postgresql.dialect()))
+
+
+def _row(video_id, state, action, opportunity, viewer=50, subscriber=50, external=None, regime="stable"):
+    return {"video_id": video_id, "title": video_id.title(), "state": state, "regime": regime, "breakout": state == "protect_momentum",
+            "action": action, "opportunity_score": opportunity, "viewer_score": viewer, "subscriber_score": subscriber, "revival": False,
+            "revival_signals": [], "confidence": "low", "reason": "r", "notes": [], "window_days": 14, "target_metric": "views_7d",
+            "success_criterion": "s", "objective": "Viewer", "do_not_change": ["Titel"] if action == "protect_no_change" else ["Thumbnail"],
+            "next_evaluation": "2026-10-01", "held_since": None, "momentum": None, "paid_status": "organic", "external": external}
+
+
+def _plan(rows):
+    rows = sorted(rows, key=lambda r: -(r["opportunity_score"] or 0))
+    for i, r in enumerate(rows):
+        r["priority"] = i+1
+    return ge.daily_plan(rows, TODAY, {})
+
+
+def test_protected_top_scorer_is_never_active_priority_and_changeable_video_becomes_number_one():
+    plan = _plan([_row("teaser", "protect_momentum", "protect_no_change", 60, regime="breakout"),
+                  _row("shine", "needs_packaging_test", "test_thumbnail", 38, viewer=38, subscriber=47),
+                  _row("trainstories", "paid_cooldown", "observe", None)])
+    assert plan["ranking"][0]["video_id"] == "teaser" and plan["momentum_top"]["video_id"] == "teaser"
+    assert plan["active_status"] == "active" and plan["priority_video_id"] == "shine" and plan["action"] == "test_thumbnail"
+    ranks = {r["video_id"]: (r["active_rank"], r["ineligible_reason"]) for r in plan["ranking"]}
+    assert ranks["shine"][0] == 1 and ranks["teaser"][0] is None and "geschützt" in ranks["teaser"][1]
+    assert ranks["trainstories"][0] is None and "Werbetraffic" in ranks["trainstories"][1]
+    assert plan["protected"][0]["video_id"] == "teaser" and plan["protected"][0]["action"] == "protect_no_change" and len(plan["protected"]) == 1
+    assert "Aktive Growth-Priorität #1: Shine" in plan["combined_decision"] and "Geschützt (keine Änderung): Teaser" in plan["combined_decision"]
+    assert "bleibt geschützt" in plan["why_priority"] and "Titel" in plan["protected"][0]["do_not_change"]
+
+
+def test_external_v6_signals_shape_the_active_priority_without_touching_protection():
+    strong = {"score": 82, "kind": "search", "key": "train journey", "gap": "existing_video_opportunity", "demand_source": "own_analytics", "subscriber_fit": 60}
+    plan = _plan([_row("teaser", "protect_momentum", "protect_no_change", 70, external={**strong, "score": 95}),
+                  _row("shine", "needs_discovery", "improve_discovery", 55),
+                  _row("trainstories", "observe", "target_search_opportunity", 48, external=strong)])
+    assert plan["priority_video_id"] == "trainstories" and plan["external_signals"]["available"] is True
+    assert plan["external_signals"]["key"] == "train journey" and plan["internal_signals"]["active_priority_score"] > 55
+    assert next(r for r in plan["ranking"] if r["video_id"] == "shine")["active_rank"] == 2
+    assert plan["protected"][0]["video_id"] == "teaser" and plan["protected"][0]["action"] == "protect_no_change"
+
+
+def test_no_active_measure_is_stated_instead_of_inventing_a_number_one():
+    plan = _plan([_row("teaser", "protect_momentum", "protect_no_change", 60),
+                  _row("shine", "observe", "observe", 40),
+                  _row("trainstories", "paid_excluded", "observe", None)])
+    assert plan["status"] == "no_active_action" and plan["active_status"] == "none" and plan["priority_video_id"] is None
+    assert plan["action"] is None and plan["why_priority"].startswith("Keine aktive Maßnahme empfohlen")
+    assert plan["combined_decision"].startswith("Keine aktive Maßnahme empfohlen") and "Teaser" in plan["combined_decision"]
+    assert all(r["active_rank"] is None for r in plan["ranking"]) and plan["momentum_top"]["video_id"] == "teaser"
+    assert "Titel" in plan["do_not_change"]
+    # A paid-cooldown video with a strong external opportunity still never gets active priority.
+    plan = _plan([_row("trainstories", "paid_cooldown", "observe", None, external={"score": 90, "kind": "search", "key": "x", "gap": "search_opportunity", "demand_source": "public_proxy"})])
+    assert plan["active_status"] == "none" and plan["priority_video_id"] is None

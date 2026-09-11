@@ -37,18 +37,28 @@ def test_v5_dashboard_javascript_renders_plan_and_card():
 const assert=require('node:assert/strict');
 const nodes={};
 global.document={getElementById:id=>nodes[id]||(nodes[id]={textContent:'',innerHTML:'',disabled:false})};
-const ranking=[{priority:1,video_id:'a',title:'Song A',opportunity_score:71.5,viewer_score:66,subscriber_score:40,state:'protect_momentum',regime:'breakout',breakout:true,action:'protect_no_change',reason:'Beschleunigung',notes:['n'],window_days:7,next_evaluation:'2026-09-21',held_since:null,revival:false,revival_signals:[]},
- {priority:2,video_id:'b',title:'Song B',opportunity_score:35,viewer_score:30,subscriber_score:52,state:'revival_candidate',regime:'stable',breakout:false,action:'test_thumbnail',reason:'CTR',notes:[],window_days:14,next_evaluation:'2026-09-28',held_since:'2026-09-10',revival:true,revival_signals:['Packaging-/CTR-Schwäche']},
+const ranking=[{priority:1,momentum_rank:1,active_rank:null,ineligible_reason:'Momentum wird geschützt – bewusst keine Änderung',video_id:'a',title:'Song A',opportunity_score:71.5,viewer_score:66,subscriber_score:40,state:'protect_momentum',regime:'breakout',breakout:true,action:'protect_no_change',reason:'Beschleunigung',notes:['n'],window_days:7,next_evaluation:'2026-09-21',held_since:null,revival:false,revival_signals:[]},
+ {priority:2,momentum_rank:2,active_rank:1,active_priority_score:41.5,video_id:'b',title:'Song B',opportunity_score:35,viewer_score:30,subscriber_score:52,state:'revival_candidate',regime:'stable',breakout:false,action:'test_thumbnail',reason:'CTR',notes:[],window_days:14,next_evaluation:'2026-09-28',held_since:'2026-09-10',revival:true,revival_signals:['Packaging-/CTR-Schwäche']},
  {priority:3,video_id:'c',title:'Song C',opportunity_score:null,viewer_score:null,subscriber_score:null,state:'paid_excluded',regime:'paid_excluded',breakout:false,action:'observe',reason:'Werbung',notes:[],window_days:7,next_evaluation:'2026-09-21',revival:false,revival_signals:[],paid_status:'paid_excluded',paid_note:'26 Werbetage in der Historie, zuletzt 2026-09-05',paid:{days_until_clean:29,clean_days:3,required_clean_days:32}}];
-const plan={day:'2026-09-11',status:'ok',priority_video_id:'a',priority_title:'Song A',why:'Beschleunigung',why_priority:'Höchster Score',action:'protect_no_change',objective:'Discovery',do_not_change:['Titel','Thumbnail'],success_metric:'views_7d',success_criterion:'≥ 85 %',window_days:7,next_evaluation:'2026-09-21',confidence:'low',subscriber_focus:'b',viewer_focus:'a',ranking,track_record:{test_thumbnail:{positive:1,negative:0,neutral:2,inconclusive:0,n:3}},note:'keine Wahrscheinlichkeit'};
+const plan={day:'2026-09-11',status:'ok',active_status:'active',priority_video_id:'b',priority_title:'Song B',why:'CTR',why_priority:'Höchste aktive Growth-Priorität (41.5); Höherer Momentum-Score bei Song A bleibt geschützt.',action:'test_thumbnail',objective:'Viewer',do_not_change:['Titel'],success_metric:'ctr_or_views',success_criterion:'+15 %',window_days:14,next_evaluation:'2026-09-28',confidence:'low',subscriber_focus:'b',viewer_focus:'a',ranking,protected:[{video_id:'a',title:'Song A',action:'protect_no_change'}],momentum_top:{video_id:'a',title:'Song A',state:'protect_momentum',opportunity_score:71.5},track_record:{test_thumbnail:{positive:1,negative:0,neutral:2,inconclusive:0,n:3}},note:'keine Wahrscheinlichkeit'};
 renderGrowth({plan});
-assert.match(nodes.growthTitle.textContent,/Priorität #1: Song A/);
-assert.match(nodes.growthTop.innerHTML,/Growth Opportunity<\/span><strong>72<\/strong>/);
+assert.match(nodes.growthTitle.textContent,/Aktive Growth-Priorität #1: Song B/);
+assert.match(nodes.growthDay.textContent,/Momentum schützen: Song A \(Nichts ändern – Momentum schützen\)/);
+assert.match(nodes.growthTop.innerHTML,/Aktive Growth-Priorität<\/span><strong>42<\/strong>/);
+assert.match(nodes.growthTop.innerHTML,/Growth Opportunity<\/span><strong>35<\/strong><small>Momentum-Rang 2/);
 assert.match(nodes.growthTop.innerHTML,/Subscriber Opportunity/);
-assert.match(nodes.growthTop.innerHTML,/Breakout-Signale aktiv/);
-assert.match(nodes.growthDetail.innerHTML,/Nichts ändern – Momentum schützen/);
-assert.match(nodes.growthDetail.innerHTML,/Nicht verändern:<\/strong> Titel, Thumbnail/);
-assert.match(nodes.growthDetail.innerHTML,/nächste Auswertung 2026-09-21/);
+assert.match(nodes.growthDetail.innerHTML,/Empfohlene Aktion:<\/strong> Thumbnail testen/);
+assert.match(nodes.growthDetail.innerHTML,/Momentum schützen \(keine Änderung\):<\/strong> Song A/);
+assert.match(nodes.growthDetail.innerHTML,/Nicht verändern:<\/strong> Titel/);
+assert.match(nodes.growthDetail.innerHTML,/nächste Auswertung 2026-09-28/);
+assert.match(nodes.growthRanking.innerHTML,/<td>1<\/td><td>—<small>Momentum wird geschützt/);
+assert.match(nodes.growthRanking.innerHTML,/<td>2<\/td><td><span class='up'>#1<\/span><small>Score 42/);
+renderGrowth({plan:{...plan,status:'no_active_action',active_status:'none',priority_video_id:null,priority_title:null,action:null,why_priority:'Keine aktive Maßnahme empfohlen – kein änderbares Video mit ausreichender Evidenz.'}});
+assert.match(nodes.growthTitle.textContent,/Keine aktive Maßnahme empfohlen/);
+assert.match(nodes.growthTop.innerHTML,/Aktive Maßnahme<\/span><strong>keine<\/strong>/);
+assert.match(nodes.growthTop.innerHTML,/Momentum-Spitze<\/span><strong>Song A/);
+assert.match(nodes.growthDetail.innerHTML,/Empfohlene Aktion:<\/strong> Keine aktive Maßnahme empfohlen/);
+renderGrowth({plan});
 assert.match(nodes.growthRanking.innerHTML,/Revival-Kandidat<small>Packaging/);
 assert.match(nodes.growthRanking.innerHTML,/Aktuell Paid beeinflusst/);
 assert.match(nodes.growthRanking.innerHTML,/26 Werbetage in der Historie, zuletzt 2026-09-05 · noch 29 saubere Tage \(3\/32\)/);
