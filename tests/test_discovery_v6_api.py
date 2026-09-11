@@ -78,7 +78,7 @@ renderDiscovery({best,top:[best,{kind:'suggested',key:'ext1',gap:'suggested_oppo
  last_run:{day:'2026-09-11',status:'ok',units_used:811,issues:[]},quota:{units_used:811,daily_limit:1500},insufficient:3,
  capabilities:[{source:'Google Trends',status:'nicht genutzt',note:'keine API'}],memory:{search:{positive:2,negative:0,neutral:1,inconclusive:0,weight:1}},limits:['l']});
 assert.match(nodes.discoveryTitle.textContent,/Beste externe Chance: „train journey“ → Trainstories/);
-assert.match(nodes.discoveryStatus.textContent,/811 \/ 1’?500 Einheiten/);
+assert.match(nodes.discoveryStatus.textContent,/811 \/ 1\D?500 Einheiten/);
 assert.match(nodes.discoveryTop.innerHTML,/eigene Analytics \(real\)/);
 assert.match(nodes.discoveryTop.innerHTML,/Bestehendes Video sichtbar machen/);
 assert.match(nodes.discoveryDetail.innerHTML,/Shine On:<\/strong> noch keine externe Chance/);

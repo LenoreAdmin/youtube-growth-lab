@@ -84,7 +84,7 @@ assert.match(nodes.learningSignals.textContent,/nicht kausal/);
 assert.match(nodes.learningAudit.innerHTML,/insufficient_data/);
 assert.match(nodes.learningScope.textContent,/Zeitlich validiert auf bestehenden Videos/);
 assert.match(nodes.learningScope.textContent,/Generalisierung auf neue Videos: unzureichende Daten \(3 von mindestens 10 Videos\)/);
-assert.match(nodes.learningStatus.textContent,/n_rows 3’?000.*n_origins 1’?000.*n_videos 3/);
+assert.match(nodes.learningStatus.textContent,/n_rows 3\D?000.*n_origins 1\D?000.*n_videos 3/); // thousands separator depends on the runner's ICU
 assert.match(nodes.learningTable.innerHTML,/zeitlich validiert/);
 assert.match(nodes.learningTable.innerHTML,/unzureichende Daten<small>3\/10 Videos/);
 assert.match(nodes.learningTable.innerHTML,/balanciert 8.5/);
