@@ -49,7 +49,9 @@ def test_states_and_revival_are_data_driven():
     assert ge.state_of(features(ctr_7d=.02), {"regime": "declining"}, BASE, {"candidate": False}) == "needs_packaging_test"
     assert ge.state_of(features(traffic_search=.1, traffic_suggested=.1, traffic_browse=.05), {"regime": "stable"}, BASE, {"candidate": False}) == "needs_discovery"
     assert ge.state_of(stable, {"regime": "stable"}, BASE, {"candidate": False}) == "observe"
-    assert ge.state_of(stable, {"regime": "paid_excluded"}, BASE, {"candidate": True}) == "paid_excluded"
+    assert ge.state_of(features(paid_views_32d=3), {"regime": "paid_excluded"}, BASE, {"candidate": True}) == "paid_excluded"
+    cooldown = features(paid_views_32d=3, paid={"status": "paid_cooldown", "paid_days_total": 2, "clean_days": 10, "required_clean_days": 32, "days_until_clean": 22})
+    assert ge.state_of(cooldown, {"regime": "paid_excluded"}, BASE, {"candidate": True}) == "paid_cooldown"
     assert ge.state_of(None, {"regime": "insufficient_data"}, BASE, {"candidate": False}) == "insufficient_data"
     assert ge.state_of(stable, {"regime": "stable"}, BASE, {"candidate": True}) == "revival_candidate"
     peak = {"peak_velocity": 2000}

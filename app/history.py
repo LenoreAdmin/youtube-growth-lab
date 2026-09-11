@@ -67,6 +67,10 @@ class VideoHistory:
                     total += views
         return total
 
+    def paid_days(self):
+        """Every day with advertising views, oldest first; the auditable paid history."""
+        return sorted(d for d, sources in self.traffic.items() if any(p and v > 0 for v, p in sources.values()))
+
 
 def load(session):
     videos = list(session.scalars(select(Video).where(Video.active.is_(True))))
@@ -89,6 +93,45 @@ def _window(history, end, days):
 def _weighted(rows, attribute):
     total = sum(r.views for r in rows)
     return sum(getattr(r, attribute)*r.views for r in rows)/total if total else None
+
+
+PAID_STATUSES = ("organic", "organic_with_paid_history", "paid_cooldown", "paid_excluded")
+
+
+def paid_profile(history, origin, lag=None):
+    """Strictly separates historical ads from a contaminated current window and from a clean window again.
+
+    paid_excluded: ads inside the last 7 known days or the analytics lag gap (current contamination).
+    paid_cooldown: ads inside the last PAID_WINDOW_DAYS known days but not in the 7-day window – the
+    28-day pace inputs are still contaminated; the clean window is growing.
+    organic_with_paid_history: at least PAID_WINDOW_DAYS clean known days after the last ad day.
+    organic: never advertised. Training exclusion (32 days) is unchanged; this only grades the live state.
+    """
+    lag = lag_days() if lag is None else lag
+    known_end = origin-timedelta(days=lag)
+    if history.last_day is not None:
+        known_end = min(known_end, history.last_day)
+    days = [d for d in history.paid_days() if d <= origin]
+    last = days[-1] if days else None
+    gap = history.paid_views(known_end+timedelta(days=1), origin) if origin > known_end else 0
+    paid_7d = history.paid_views(known_end-timedelta(days=6), known_end)
+    paid_28d = history.paid_views(known_end-timedelta(days=27), known_end)
+    paid_32d = history.paid_views(known_end-timedelta(days=PAID_WINDOW_DAYS-1), known_end)
+    clean_days = (known_end-last).days if last and last <= known_end else (0 if last else None)
+    if gap > 0 or paid_7d > 0:
+        status = "paid_excluded"
+    elif paid_32d > 0:
+        status = "paid_cooldown"
+    elif days:
+        status = "organic_with_paid_history"
+    else:
+        status = "organic"
+    return {"status": status, "paid_views_7d": paid_7d, "paid_views_28d": paid_28d, "paid_views_32d": paid_32d, "paid_views_lag_gap": gap,
+            "paid_days_total": len(days), "paid_views_total": sum(history.paid_views(d, d) for d in days),
+            "first_paid_day": str(days[0]) if days else None, "last_paid_day": str(last) if last else None,
+            "clean_days": clean_days, "required_clean_days": PAID_WINDOW_DAYS,
+            "days_until_clean": max(0, PAID_WINDOW_DAYS-clean_days) if status in ("paid_cooldown", "paid_excluded") and clean_days is not None else 0,
+            "known_end": str(known_end)}
 
 
 def features_at(history, origin, lag=None):
@@ -147,6 +190,7 @@ def features_at(history, origin, lag=None):
         "paid_views_32d": history.paid_views(known_end-timedelta(days=PAID_WINDOW_DAYS-1), known_end),
         # Ads inside the analytics lag gap are unknown to Google's report but known to the channel owner.
         "paid_views_lag_gap": history.paid_views(known_end+timedelta(days=1), origin) if origin > known_end else 0,
+        "paid": paid_profile(history, origin, lag),
         "age_days": (origin-pacific_day(published)).days, "duration_seconds": history.video.duration_seconds,
         "upload_weekday": published.weekday(), "upload_hour": published.hour,
         "content_type": next((r.content_type for r in rows7 if r.content_type != "UNKNOWN"), "UNKNOWN"),

@@ -11,13 +11,15 @@ from math import tanh
 from sqlalchemy import select
 from .models import (GrowthAssessment, GrowthScore, GrowthAction, GrowthPlan, AnalyticsForecast, Decision, Video, utcnow)
 from .backfill import upsert
-from .history import pacific_day, lag_days, features_at, PAID_WINDOW_DAYS
+from .history import pacific_day, lag_days, features_at, paid_profile, PAID_WINDOW_DAYS
 from .metrics import aware
 from .strategy import confidence as v4_confidence, NO_MANIPULATION, GENERALIZATION_NOTE
 
 VERSION = "growth-v5"
 STATES = ["protect_momentum", "scale_opportunity", "needs_packaging_test", "needs_retention_analysis", "needs_discovery",
-          "revival_candidate", "observe", "paid_excluded", "insufficient_data"]
+          "revival_candidate", "observe", "paid_cooldown", "paid_excluded", "insufficient_data"]
+PAID_LABELS = {"organic": "Aktuell organisch", "organic_with_paid_history": "Aktuell organisch – historisch Werbung vorhanden",
+               "paid_cooldown": "Paid-Cooldown", "paid_excluded": "Aktuell Paid beeinflusst"}
 ACTIONS = ["protect_no_change", "test_title", "test_thumbnail", "test_title_thumbnail", "investigate_retention",
            "improve_discovery", "cross_promote", "create_followup_content", "observe"]
 PROTECT_REGIMES = ("breakout", "breakout_candidate", "accelerating")
@@ -96,11 +98,25 @@ def forecast_uplift(forecasts):
     return uplift, width, weekly
 
 
+def paid_state(f):
+    """Graded paid status of the current window; historical ads alone never block scoring."""
+    profile = (f or {}).get("paid")
+    if profile is None:
+        # Features without a profile (legacy rows): any paid views in the live windows count as current contamination.
+        contaminated = ((f or {}).get("paid_views_32d") or 0) > 0 or ((f or {}).get("paid_views_lag_gap") or 0) > 0
+        profile = {"status": "paid_excluded" if contaminated else "organic", "paid_days_total": 0}
+    return profile.get("status", "organic"), profile
+
+
 def scores(f, regime, base, forecasts, momentum, peak):
     """Opportunity, viewer-acquisition and subscriber-opportunity scores with explained components."""
     status = regime["regime"]
     if status == "paid_excluded":
-        blocked = {"score": None, "components": [], "reason": "Werbetraffic im Fenster – kein organischer Prioritätswert.", "note": SCORE_NOTE}
+        paid, profile = paid_state(f)
+        reason = ("Werbetraffic im aktuellen 7-Tage-Fenster oder in der Analytics-Lücke – kein organischer Prioritätswert." if paid == "paid_excluded"
+                  else f"Paid-Cooldown: letzter Werbetag {profile.get('last_paid_day')}, sauberes Fenster {profile.get('clean_days')} von "
+                       f"{profile.get('required_clean_days', PAID_WINDOW_DAYS)} Tagen – Scores folgen automatisch nach {profile.get('days_until_clean')} weiteren sauberen Tagen.")
+        blocked = {"score": None, "components": [], "reason": reason, "note": SCORE_NOTE, "paid": profile}
         return {"opportunity": blocked, "viewer": blocked, "subscriber": blocked}
     if f is None or base.get("status") != "ok":
         blocked = {"score": None, "components": [], "reason": "Zu wenig Historie oder keine belastbare Kanal-Baseline.", "note": SCORE_NOTE}
@@ -177,26 +193,36 @@ def scores(f, regime, base, forecasts, momentum, peak):
 
 # ----------------------------------------------------------------------------- revival & states
 def historical_peak(history, today):
-    """Best 7-day organic pace in the video's own history; None without history."""
+    """Organic 7-day peak from ad-free weeks outside any paid spillover window; the paid peak is kept apart for audit.
+
+    A week counts as organic only if no advertising day lies inside the week or within
+    PAID_WINDOW_DAYS before it (post-campaign spillover is not organic evidence).
+    """
     if history.first_day is None:
         return None
-    best, best_day = 0.0, None
+    paid_days = history.paid_days()
+    best, best_day, paid_best, paid_best_day = 0.0, None, 0.0, None
     day = history.first_day+timedelta(days=6)
     end = min(history.last_day, today)
     while day <= end:
-        window = [day-timedelta(days=i) for i in range(7)]
-        if history.paid_views(window[-1], window[0]) == 0:
-            pace = sum(history.views(d) for d in window)/7
-            if pace > best:
-                best, best_day = pace, day
+        start = day-timedelta(days=6)
+        pace = sum(history.views(start+timedelta(days=i)) for i in range(7))/7
+        tainted = any(start-timedelta(days=PAID_WINDOW_DAYS) <= p <= day for p in paid_days)
+        if tainted:
+            if pace > paid_best:
+                paid_best, paid_best_day = pace, day
+        elif pace > best:
+            best, best_day = pace, day
         day += timedelta(days=7)
-    return {"peak_velocity": best, "peak_week_end": str(best_day) if best_day else None}
+    return {"peak_velocity": best, "peak_week_end": str(best_day) if best_day else None, "basis": "organic_weeks_only",
+            "paid_peak_velocity": paid_best if paid_days else None, "paid_peak_week_end": str(paid_best_day) if paid_best_day else None,
+            "paid_days_total": len(paid_days), "spillover_days_excluded": PAID_WINDOW_DAYS}
 
 
 def revival(f, regime, base, peak):
     """Old video that could grow again: at least two independent revival signals."""
     if f is None or regime["regime"] in ("paid_excluded", "insufficient_data") or f.get("age_days", 0) < 180:
-        return {"candidate": False, "signals": [], "reason": "Nur Videos ab 180 Tagen ohne Werbung werden auf Revival geprüft."}
+        return {"candidate": False, "signals": [], "reason": "Nur Videos ab 180 Tagen mit sauberem aktuellem Fenster werden auf Revival geprüft."}
     signals = []
     aq = base.get("accel_7d", {})
     if aq and (f.get("accel_7d", 0) >= aq.get("q75", 1e9) or f.get("days_above_28d_last3", 0) >= 2):
@@ -219,14 +245,18 @@ def revival(f, regime, base, peak):
         signals.append("gute Abo-Conversion trotz niedriger Views")
     if below("ctr_7d") and (above("retention_avg") or above("pct_7d")):
         signals.append("Packaging-/CTR-Schwäche bei guten Qualitätswerten")
+    paid, profile = paid_state(f)
     return {"candidate": len(signals) >= 2, "signals": signals, "far_below_peak": bool(far_below_peak), "peak": peak,
-            "reason": f"{len(signals)} von 6 Revival-Signalen" if signals else "Keine Revival-Signale."}
+            "paid_status": paid, "post_paid": paid == "organic_with_paid_history",
+            "reason": (f"{len(signals)} von 6 Revival-Signalen" if signals else "Keine Revival-Signale.")
+                      +(f" – organisches Revival nach Werbung (letzter Werbetag {profile.get('last_paid_day')}, {profile.get('clean_days')} saubere Tage; Peak nur aus werbefreien Wochen)." if paid == "organic_with_paid_history" else "")}
 
 
 def state_of(f, regime, base, rev):
     status = regime["regime"]
     if status == "paid_excluded":
-        return "paid_excluded"
+        paid, _ = paid_state(f)
+        return "paid_excluded" if paid == "paid_excluded" else "paid_cooldown"
     if status == "insufficient_data" or f is None:
         return "insufficient_data"
     if status in PROTECT_REGIMES:
@@ -293,8 +323,11 @@ def choose_action(state, f, rev, base, experiments, record):
             action = "improve_discovery"
         else:
             action = "cross_promote"
+    elif state == "paid_cooldown":
+        profile = (f or {}).get("paid") or {}
+        action, notes = "observe", [f"Paid-Cooldown: noch {profile.get('days_until_clean')} saubere Tage bis zur organischen Bewertung; keine organische Schlussfolgerung."]
     elif state in ("paid_excluded", "insufficient_data"):
-        action, notes = "observe", ["Keine organische Entscheidung möglich (Werbung oder zu wenig Daten)."]
+        action, notes = "observe", ["Keine organische Entscheidung möglich (aktuell Werbung oder zu wenig Daten)."]
     else:
         action = "observe"
     entry = record.get(action, {})
@@ -456,7 +489,7 @@ def run(session, now, contexts, base, budget=None):
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})
         pending = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == "pending")
                                  .order_by(GrowthAction.created_day.desc()))
-        if pending and state not in ("protect_momentum", "paid_excluded") and pending.action != "protect_no_change":
+        if pending and state not in ("protect_momentum", "paid_excluded", "paid_cooldown") and pending.action != "protect_no_change":
             action, notes = pending.action, [f"Aktion vom {pending.created_day} läuft noch bis zur Auswertung; keine tägliche Kurskorrektur."]
             details = {**pending.payload, "notes": notes, "held_since": str(pending.created_day)}
         else:
@@ -472,12 +505,17 @@ def run(session, now, contexts, base, budget=None):
                     state=state, action=action, target_metric=details["target_metric"], window_days=details["window_days"],
                     evaluate_after=today+timedelta(days=details["window_days"]+lag_days()), status="pending", payload=details)
                 session.execute(statement.on_conflict_do_nothing(index_elements=["video_id", "created_day"]))
+        paid, profile = paid_state(f)
+        if f is None:
+            profile = paid_profile(history, today)
+            paid = profile["status"]
         statement = upsert(session, GrowthScore).values(video_id=video.id, day=today, version=VERSION, state=state, action=action,
             opportunity=board["opportunity"], viewer=board["viewer"], subscriber=board["subscriber"], revival=rev,
-            momentum=momentum or {}, created_at=now)
+            momentum={**(momentum or {}), "paid": profile}, created_at=now)
         session.execute(statement.on_conflict_do_update(index_elements=["video_id", "day", "version"],
             set_={k: getattr(statement.excluded, k) for k in ("state", "action", "opportunity", "viewer", "subscriber", "revival", "momentum", "created_at")}))
         ranking.append({"video_id": video.id, "title": video.title, "state": state, "regime": regime["regime"], "breakout": regime["regime"] in PROTECT_REGIMES,
+            "paid_status": paid, "paid_label": PAID_LABELS.get(paid, paid), "paid": profile,
             "action": action, "opportunity_score": board["opportunity"]["score"], "viewer_score": board["viewer"]["score"],
             "subscriber_score": board["subscriber"]["score"], "revival": rev["candidate"], "revival_signals": rev["signals"],
             "confidence": conf["level"], "reason": details["reason"], "notes": details.get("notes", []), "window_days": details["window_days"],
@@ -485,6 +523,9 @@ def run(session, now, contexts, base, budget=None):
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": details.get("held_since"), "momentum": momentum})
     ranking.sort(key=lambda r: (r["opportunity_score"] is None, -(r["opportunity_score"] or 0), -(r["viewer_score"] or 0)))
+    # Paid history and current paid state must remain auditable even where scores exist.
+    for r in ranking:
+        r["paid_note"] = (f"{r['paid'].get('paid_days_total', 0)} Werbetage in der Historie, zuletzt {r['paid'].get('last_paid_day')}" if r["paid"].get("paid_days_total") else "nie beworben")
     for i, r in enumerate(ranking):
         r["priority"] = i+1
     plan = daily_plan(ranking, today, record)

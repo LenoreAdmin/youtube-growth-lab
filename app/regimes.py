@@ -42,9 +42,12 @@ def classify(f, base):
     """Descriptive regime with the thresholds that produced it; no probability claim."""
     if f is None:
         return {"regime": "insufficient_data", "reason": "Weniger als 28 Tage Analytics-Historie.", "version": VERSION}
-    if f.get("paid_views_32d", 0) > 0:
-        return {"regime": "paid_excluded", "reason": f"{f['paid_views_32d']} als Werbung klassifizierte Views in den letzten 32 bekannten Tagen.",
-                "version": VERSION}
+    if f.get("paid_views_32d", 0) > 0 or f.get("paid_views_lag_gap", 0) > 0:
+        profile = f.get("paid") or {}
+        detail = ("Werbe-Views in den letzten 7 bekannten Tagen oder in der Analytics-Lücke" if profile.get("status") == "paid_excluded"
+                  else f"letzter Werbetag {profile.get('last_paid_day')}, sauberes Fenster {profile.get('clean_days')} von {profile.get('required_clean_days', 32)} Tagen")
+        return {"regime": "paid_excluded", "reason": f"{f.get('paid_views_32d', 0)+f.get('paid_views_lag_gap', 0)} als Werbung klassifizierte Views "
+                f"im 32-Tage-Fenster ({detail}); organisches Regime nicht identifizierbar.", "version": VERSION, "paid": profile}
     if base.get("status") != "ok" or f.get("ratio_7_28") is None:
         return {"regime": "insufficient_data", "reason": "Kanal-Baseline noch nicht belastbar oder keine Views im 28-Tage-Fenster.",
                 "version": VERSION, "baseline_n": base.get("n_rows", 0)}
