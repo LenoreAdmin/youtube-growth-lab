@@ -101,3 +101,5 @@ Historischer Backfill (Tageswerte, Traffic-Quellen, Retention, Reach – soweit 
 V4 Historical Learning, Backtesting & Strategy Engine (leakage-freie Trainingsdaten, Walk-forward-Backtests, Quantil-Regime, Handlungsempfehlungen): [docs/V4.md](docs/V4.md).
 
 V5 Active Organic Growth Engine (Opportunity-/Viewer-/Subscriber-Scores, Growth States, Revival, eine Aktion je Video, Feedback-Loop, Daily Growth Plan – read-only gegenüber YouTube): [docs/V5.md](docs/V5.md).
+
+V6 External Audience Discovery (eigene Traffic-Source-Details, budgetierte Data-API-Suchproben, Audience-Cluster, Search-/Suggested-/Content-Gap-Opportunities mit Discovery-Gedächtnis, integriert in den Growth Plan): [docs/V6.md](docs/V6.md).

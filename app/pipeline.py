@@ -307,6 +307,7 @@ def _collect(client, budget=None):
             s.commit()
         # Optional steps are last: all core results are already committed.
         optional_learning(now, budget, issues)
+        optional_discovery(client, now, budget, issues)
         optional_lifetime(client, now, end, budget, issues)
     except SyncBudgetExceeded:
         deferred = True
@@ -334,6 +335,23 @@ def optional_learning(now, budget, issues):
     except Exception as exc:
         issues.append(f"optional/learning: {type(exc).__name__}; retry next sync")
         log.error("Optional learning failed (%s); raw data omitted", type(exc).__name__)
+
+
+def optional_discovery(client, now, budget, issues):
+    """V6 external discovery at most once per Pacific day inside the remaining budget; read-only, never fails the core sync."""
+    if not hasattr(client, "search"):
+        return  # Test doubles without public lookups.
+    try:
+        budget.check()
+        from .discovery import run as discovery_run
+        result = discovery_run(client, now, budget)
+        if result.get("status") in ("failed", "partial"):
+            issues.append(f"optional/discovery: {result['status']}")
+    except SyncBudgetExceeded:
+        return
+    except Exception as exc:
+        issues.append(f"optional/discovery: {type(exc).__name__}; retry next sync")
+        log.error("Optional discovery failed (%s); raw data omitted", type(exc).__name__)
 
 
 def optional_lifetime(client, now, end, budget, issues):

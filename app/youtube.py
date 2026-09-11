@@ -106,6 +106,41 @@ class YouTube:
                 return rows
             offset += len(batch)
 
+    def traffic_detail(self, video, start, end, source_type, max_results=25):
+        """Top search terms / recommending videos / external URLs behind one traffic source (own analytics, no Data API quota)."""
+        request = self.analytics.reports().query(ids="channel==MINE", startDate=str(start), endDate=str(end),
+            metrics="views,estimatedMinutesWatched", dimensions="insightTrafficSourceDetail",
+            filters=f"video=={video};insightTrafficSourceType=={source_type}", sort="-views", maxResults=min(25, max_results))
+        result = self.execute(request)
+        headers = [h["name"] for h in result.get("columnHeaders", [])]
+        return [dict(zip(headers, r)) for r in result.get("rows", [])]
+
+    # Public read-only Data API lookups for discovery. Quota: search.list 100 units, list calls 1 unit.
+    def search(self, query, max_results=25, published_after=None, order="relevance"):
+        args = dict(part="snippet", q=query, type="video", maxResults=min(50, max_results), order=order, safeSearch="none")
+        if published_after:
+            args["publishedAfter"] = published_after
+        result = self.execute(self.data.search().list(**args))
+        return [{"video_id": item["id"]["videoId"], "channel_id": item["snippet"]["channelId"], "title": item["snippet"]["title"],
+                 "channel_title": item["snippet"].get("channelTitle", ""), "published_at": item["snippet"]["publishedAt"]}
+                for item in result.get("items", []) if item.get("id", {}).get("videoId")]
+
+    def videos_by_id(self, ids):
+        rows = []
+        ids = list(dict.fromkeys(ids))
+        for offset in range(0, len(ids), 50):
+            result = self.execute(self.data.videos().list(part="snippet,contentDetails,statistics", id=",".join(ids[offset:offset+50])))
+            rows.extend(result.get("items", []))
+        return rows
+
+    def channels_by_id(self, ids):
+        rows = []
+        ids = list(dict.fromkeys(ids))
+        for offset in range(0, len(ids), 50):
+            result = self.execute(self.data.channels().list(part="snippet,statistics", id=",".join(ids[offset:offset+50])))
+            rows.extend(result.get("items", []))
+        return rows
+
     def reach_reports(self):
         """Discover current reach report type instead of hardcoding a retired ID."""
         types = self.execute(self.reporting.reportTypes().list()).get("reportTypes", [])

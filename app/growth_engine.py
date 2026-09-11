@@ -14,6 +14,7 @@ from .backfill import upsert
 from .history import pacific_day, lag_days, features_at, paid_profile, PAID_WINDOW_DAYS
 from .metrics import aware
 from .strategy import confidence as v4_confidence, NO_MANIPULATION, GENERALIZATION_NOTE
+from .discovery import best_for_video as external_opportunity
 
 VERSION = "growth-v5"
 STATES = ["protect_momentum", "scale_opportunity", "needs_packaging_test", "needs_retention_analysis", "needs_discovery",
@@ -21,24 +22,35 @@ STATES = ["protect_momentum", "scale_opportunity", "needs_packaging_test", "need
 PAID_LABELS = {"organic": "Aktuell organisch", "organic_with_paid_history": "Aktuell organisch – historisch Werbung vorhanden",
                "paid_cooldown": "Paid-Cooldown", "paid_excluded": "Aktuell Paid beeinflusst"}
 ACTIONS = ["protect_no_change", "test_title", "test_thumbnail", "test_title_thumbnail", "investigate_retention",
-           "improve_discovery", "cross_promote", "create_followup_content", "observe"]
+           "improve_discovery", "cross_promote", "create_followup_content", "observe",
+           "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video"]
+EXTERNAL_MIN_SCORE = 60  # Relative external score needed before an external opportunity may drive the action.
+EXTERNAL_STATES = ("observe", "needs_discovery", "needs_packaging_test", "scale_opportunity", "revival_candidate")
+GAP_ACTIONS = {"existing_video_opportunity": "target_search_opportunity", "search_opportunity": "target_search_opportunity",
+               "suggested_opportunity": "target_suggested_cluster", "packaging_opportunity": "packaging_for_audience",
+               "followup_content_opportunity": "create_followup_content"}
 PROTECT_REGIMES = ("breakout", "breakout_candidate", "accelerating")
 DISCOVERY_KEYS = ("traffic_search", "traffic_suggested", "traffic_browse")
 SCORE_NOTE = "Relativer Priorisierungswert für diesen Kanal (0–100), keine Wahrscheinlichkeit."
 OBJECTIVES = {"protect_no_change": "Discovery", "test_title": "Viewer", "test_thumbnail": "Viewer", "test_title_thumbnail": "Viewer",
               "investigate_retention": "Watchtime", "improve_discovery": "Discovery", "cross_promote": "Discovery",
-              "create_followup_content": "Subscriber", "observe": "Watchtime"}
+              "create_followup_content": "Subscriber", "observe": "Watchtime", "target_search_opportunity": "Viewer",
+              "target_suggested_cluster": "Discovery", "packaging_for_audience": "Viewer", "revive_existing_video": "Viewer"}
 WINDOWS = {"protect_no_change": 7, "test_title": 14, "test_thumbnail": 14, "test_title_thumbnail": 14, "investigate_retention": 14,
-           "improve_discovery": 14, "cross_promote": 14, "create_followup_content": 30, "observe": 7}
+           "improve_discovery": 14, "cross_promote": 14, "create_followup_content": 30, "observe": 7,
+           "target_search_opportunity": 28, "target_suggested_cluster": 28, "packaging_for_audience": 14, "revive_existing_video": 28}
 TARGETS = {"protect_no_change": "views_7d", "test_title": "views_7d", "test_thumbnail": "ctr_or_views", "test_title_thumbnail": "ctr_or_views",
            "investigate_retention": "watch_minutes_7d", "improve_discovery": "discovery_views_7d", "cross_promote": "views_7d",
-           "create_followup_content": "subscribers_7d", "observe": "views_7d"}
+           "create_followup_content": "subscribers_7d", "observe": "views_7d", "target_search_opportunity": "discovery_views_7d",
+           "target_suggested_cluster": "discovery_views_7d", "packaging_for_audience": "ctr_or_views", "revive_existing_video": "views_7d"}
 DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags", "Sichtbarkeit", "Endscreens des Videos"],
                  "test_title": ["Thumbnail", "Beschreibung", "Kapitel"], "test_thumbnail": ["Titel", "Beschreibung", "Kapitel"],
                  "test_title_thumbnail": ["Beschreibung", "Videoinhalt", "Sichtbarkeit"],
                  "investigate_retention": ["Titel", "Thumbnail"], "improve_discovery": ["Titel", "Thumbnail", "Videoinhalt"],
                  "cross_promote": ["Titel und Thumbnail des beworbenen Videos"], "create_followup_content": ["Bestehendes Video"],
-                 "observe": ["Alles – zuerst messen"]}
+                 "observe": ["Alles – zuerst messen"], "target_search_opportunity": ["Thumbnail", "Videoinhalt"],
+                 "target_suggested_cluster": ["Titel", "Thumbnail", "Videoinhalt"], "packaging_for_audience": ["Videoinhalt", "Sichtbarkeit"],
+                 "revive_existing_video": ["Videoinhalt", "Sichtbarkeit"]}
 MIN_TRACK_RECORD = 3
 
 
@@ -108,9 +120,12 @@ def paid_state(f):
     return profile.get("status", "organic"), profile
 
 
-def scores(f, regime, base, forecasts, momentum, peak):
+def scores(f, regime, base, forecasts, momentum, peak, external=None):
     """Opportunity, viewer-acquisition and subscriber-opportunity scores with explained components."""
     status = regime["regime"]
+    external_signal = None if not external or external.get("score") is None else (external["score"]-50)/50
+    fit = (external or {}).get("scores", {}).get("subscriber_fit_score")
+    subscriber_fit_signal = None if fit is None else (fit-50)/50
     if status == "paid_excluded":
         paid, profile = paid_state(f)
         reason = ("Werbetraffic im aktuellen 7-Tage-Fenster oder in der Analytics-Lücke – kein organischer Prioritätswert." if paid == "paid_excluded"
@@ -161,6 +176,8 @@ def scores(f, regime, base, forecasts, momentum, peak):
         _component("V4-Prognose 7d vs Baseline", forecast, 1.5, uplift),
         _component("Prognose-Unsicherheit (Intervallbreite)", uncertainty, 1, width, note="nur bei empirischem Intervall"),
         _component("Videoalter", age_signal, .5, age),
+        _component("Externe Audience-Chance (V6)", external_signal, 1.5, external.get("score") if external else None,
+                   note=("Nachfrage: "+("eigene Analytics" if external.get("demand_source") == "own_analytics" else "öffentlicher Proxy")) if external else "keine externe Chance erkannt"),
     ]
     viewer = [
         _component("Discovery-Anteil (Search+Suggested+Browse)", discovery, 3, share),
@@ -171,6 +188,8 @@ def scores(f, regime, base, forecasts, momentum, peak):
         _component("Regime V4", regime_signal, 1.5, status),
         _component("Abstand zum eigenen Peak", peak_signal, 1, f.get("velocity_7d"), peak.get("peak_velocity") if peak else None),
         _component("Videoalter", age_signal, .5, age),
+        _component("Externe Audience-Chance (V6)", external_signal, 2, external.get("score") if external else None,
+                   note=("Nachfrage: "+("eigene Analytics" if external.get("demand_source") == "own_analytics" else "öffentlicher Proxy")) if external else "keine externe Chance erkannt"),
     ]
     subscriber = [
         _component("Abo-Conversion vs Median", conversion, 3, f.get("subscriber_conversion_7d"), conv_ref.get("median")),
@@ -182,6 +201,7 @@ def scores(f, regime, base, forecasts, momentum, peak):
         _component("Discovery-Anteil (neue Zuschauer)", discovery, 1, share),
         _component("Regime V4 (organische Wachstumsphase)", regime_signal, 1, status),
         _component("Videoalter", age_signal, .5, age),
+        _component("Subscriber-Fit der externen Chance (V6)", subscriber_fit_signal, 1, (external or {}).get("scores", {}).get("subscriber_fit_score")),
     ]
     def pack(components, reason):
         return {"score": _score(components), "components": components, "missing": [c["name"] for c in components if not c["available"]],
@@ -293,8 +313,9 @@ def track_record(session):
     return record
 
 
-def choose_action(state, f, rev, base, experiments, record):
-    """Exactly one prioritised action. Winners are protected first; running experiments are measured, not stacked."""
+def choose_action(state, f, rev, base, experiments, record, external=None):
+    """Exactly one prioritised action. Winners are protected first; running experiments are measured, not stacked.
+    An external opportunity (V6) may steer the action only for organic, non-protected states."""
     running = [e for e in experiments if e.get("status") == "registered"]
     med = base.get("medians", {})
     def below(key):
@@ -305,6 +326,10 @@ def choose_action(state, f, rev, base, experiments, record):
         action = "protect_no_change"
     elif running:
         action, notes = "observe", [f"Experiment #{running[0]['decision_id']} läuft – erst messen, keine weitere Änderung stapeln."]
+    elif external and (external.get("score") or 0) >= EXTERNAL_MIN_SCORE and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS:
+        action = "revive_existing_video" if state == "revival_candidate" and external["gap"] != "packaging_opportunity" else GAP_ACTIONS[external["gap"]]
+        notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Nachfrage: "
+                 f"{'eigene Analytics' if external.get('demand_source') == 'own_analytics' else 'öffentlicher Proxy'}) lenkt die Aktion."]
     elif state == "scale_opportunity":
         action = "cross_promote"
     elif state == "needs_retention_analysis":
@@ -337,9 +362,11 @@ def choose_action(state, f, rev, base, experiments, record):
     return action, notes
 
 
-def action_details(action, state, f, regime, base, scoreboard, rev, momentum, conf, notes, experiments):
+def action_details(action, state, f, regime, base, scoreboard, rev, momentum, conf, notes, experiments, external=None):
     """Reason, signals, counterarguments, target metric, window, success and stop criteria."""
     signals = []
+    if external:
+        signals.append({"signal": "external_audience_score_v6", "value": external.get("score")})
     if f:
         signals += [{"signal": "ratio_7_28", "value": f.get("ratio_7_28")}, {"signal": "accel_7d", "value": f.get("accel_7d")},
                     {"signal": "retention_avg", "value": f.get("retention_avg")}, {"signal": "ctr_7d", "value": f.get("ctr_7d")},
@@ -367,6 +394,10 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
         "cross_promote": "Wachstum über Baseline: bestehendes Publikum über Endscreens/Playlists/Community auf dieses Video lenken.",
         "create_followup_content": "Muster funktioniert: verwandtes Folgevideo als vorregistriertes Experiment.",
         "observe": "Keine belastbare Änderung ableitbar oder Messung läuft: beobachten und Daten sammeln.",
+        "target_search_opportunity": f"Reale/proxy Suchnachfrage „{(external or {}).get('key', '')}“ passt zum Video: Titel-/Beschreibungswortlaut auf diese Suchintention ausrichten (ohne Clickbait), Kapitel und Playlist-Kontext ergänzen.",
+        "target_suggested_cluster": f"Nachbarvideo/-cluster „{(external or {}).get('audience', '')}“ erreicht eine passende Audience: Endscreens, Playlists und Beschreibung auf diesen Themenkontext ausrichten, damit die Empfehlung neben diesen Videos wahrscheinlicher wird.",
+        "packaging_for_audience": f"Das Video passt zu „{(external or {}).get('key', '')}“, aber Titel/Thumbnail sprechen diese Audience nicht an: Packaging für diese Zielgruppe testen (eine Dimension).",
+        "revive_existing_video": f"Altes Video mit Revival-Signalen und externer Chance „{(external or {}).get('key', '')}“: gezielt für diese Audience reaktivieren (Playlist, Endscreens, Community-Post, ggf. Titel).",
     }[action]
     window = WINDOWS[action]
     target = TARGETS[action]
@@ -377,13 +408,18 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
     stop = ("Nicht anwendbar – keine Änderung." if action in ("protect_no_change", "observe") else
             "Views oder Watchtime im Nachher-Fenster ≥ 15 % unter Vorher, oder Retention fällt unter Kanalmedian: Änderung zurücknehmen und als negativ protokollieren.")
     template = None
-    if action in ("test_title", "test_thumbnail", "test_title_thumbnail", "create_followup_content", "improve_discovery", "cross_promote"):
+    if action in ("test_title", "test_thumbnail", "test_title_thumbnail", "create_followup_content", "improve_discovery", "cross_promote",
+                  "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video"):
         template = {"hypothesis": f"{action}: {reason}", "horizon_hours": 168 if window <= 14 else 720,
                     "design": "observational", "note": "Vor der Änderung im Experiment Memory registrieren; Zeitpunkt protokollieren."}
     return {"action": action, "state": state, "reason": reason, "notes": notes, "signals": signals, "against": against,
             "confidence": conf, "target_metric": target, "window_days": window, "success_criterion": success, "stop_criterion": stop,
             "do_not_change": DO_NOT_CHANGE[action]+[NO_MANIPULATION], "objective": OBJECTIVES[action],
             "experiment_template": template, "linked_decision_ids": [e["decision_id"] for e in experiments],
+            "audience": {"target": external.get("audience"), "opportunity": external.get("key"), "kind": external.get("kind"), "gap": external.get("gap"),
+                         "score": external.get("score"), "demand_source": external.get("demand_source"), "shared_tokens": external.get("shared_tokens"),
+                         "evidence": {k: v for k, v in (external.get("evidence") or {}).items() if k in ("own_search_views_90d", "own_suggested_views_90d", "probe", "channel", "views", "uncertainty", "missing")}}
+                        if external else None,
             "read_only": "Empfehlung – das System ändert nichts auf YouTube.", "generalization": GENERALIZATION_NOTE}
 
 
@@ -484,7 +520,8 @@ def run(session, now, contexts, base, budget=None):
         momentum = live_momentum(session, video.id)
         peak = historical_peak(history, today)
         rev = revival(f, regime, base, peak)
-        board = scores(f, regime, base, c.get("forecasts", []), momentum, peak)
+        external = external_opportunity(session, video.id)
+        board = scores(f, regime, base, c.get("forecasts", []), momentum, peak, external)
         state = state_of(f, regime, base, rev)
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})
         pending = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == "pending")
@@ -493,8 +530,8 @@ def run(session, now, contexts, base, budget=None):
             action, notes = pending.action, [f"Aktion vom {pending.created_day} läuft noch bis zur Auswertung; keine tägliche Kurskorrektur."]
             details = {**pending.payload, "notes": notes, "held_since": str(pending.created_day)}
         else:
-            action, notes = choose_action(state, f, rev, base, c.get("experiments", []), record)
-            details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, c.get("experiments", []))
+            action, notes = choose_action(state, f, rev, base, c.get("experiments", []), record, external)
+            details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, c.get("experiments", []), external)
             if pending and (pending.action != action):
                 pending.status, pending.outcome = "superseded", "inconclusive"
                 pending.evaluation = {"reason": f"Ersetzt durch {action} wegen Zustand {state}.", "superseded_on": str(today)}
@@ -521,7 +558,10 @@ def run(session, now, contexts, base, budget=None):
             "confidence": conf["level"], "reason": details["reason"], "notes": details.get("notes", []), "window_days": details["window_days"],
             "target_metric": details["target_metric"], "success_criterion": details["success_criterion"], "objective": details["objective"],
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
-            "held_since": details.get("held_since"), "momentum": momentum})
+            "held_since": details.get("held_since"), "momentum": momentum,
+            "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
+                         "audience": external.get("audience"), "demand_source": external.get("demand_source"),
+                         "subscriber_fit": (external.get("scores") or {}).get("subscriber_fit_score")} if external else None})
     ranking.sort(key=lambda r: (r["opportunity_score"] is None, -(r["opportunity_score"] or 0), -(r["viewer_score"] or 0)))
     # Paid history and current paid state must remain auditable even where scores exist.
     for r in ranking:
@@ -545,7 +585,17 @@ def daily_plan(ranking, today, record):
     if subscriber and subscriber["video_id"] == top["video_id"] and top["action"] in ("observe", "cross_promote") \
             and (top["subscriber_score"] or 0) > (top["viewer_score"] or 0):
         objective = "Subscriber"
+    ext = top.get("external")
+    internal = {"state": top["state"], "regime": top["regime"], "breakout": top["breakout"], "opportunity_score": top["opportunity_score"],
+                "viewer_score": top["viewer_score"], "subscriber_score": top["subscriber_score"], "paid_status": top.get("paid_status"),
+                "momentum_v2": (top.get("momentum") or {}).get("score")}
+    external_block = {"available": bool(ext), "score": ext.get("score") if ext else None, "kind": ext.get("kind") if ext else None,
+                      "key": ext.get("key") if ext else None, "gap": ext.get("gap") if ext else None, "audience": ext.get("audience") if ext else None,
+                      "demand_source": ext.get("demand_source") if ext else None, "note": "Externe Nachfrage-Signale sind Proxies, außer sie stammen aus eigenen Analytics."}
+    combined = (f"{top['title']}: interner Zustand {top['state']}" + (f" + externe Chance „{ext['key']}“ ({ext['demand_source']})" if ext else " ohne externe Chance")
+                + f" → {top['action']}.")
     return {"day": str(today), "version": VERSION, "status": "ok" if top["opportunity_score"] is not None else "insufficient_data",
+            "internal_signals": internal, "external_signals": external_block, "combined_decision": combined,
             "priority_video_id": top["video_id"], "priority_title": top["title"], "why": top["reason"],
             "why_priority": f"Höchster Growth-Opportunity-Score ({top['opportunity_score']}) im Ranking; Zustand {top['state']}." if top["opportunity_score"] is not None
                             else "Kein Video mit belastbarem Score; Daten sammeln.",

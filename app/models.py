@@ -383,3 +383,103 @@ class GrowthPlan(Base):
     version: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     plan: Mapped[dict] = mapped_column(JSON)
+
+
+class DiscoveryRun(Base):
+    """One budgeted, resumable external discovery pass; quota units are accounted per run and per day."""
+    __tablename__ = "discovery_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    units_used: Mapped[int] = mapped_column(Integer, default=0)
+    issues: Mapped[list] = mapped_column(JSON, default=list)
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class DiscoveryQuota(Base):
+    __tablename__ = "discovery_quota"
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    units: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DiscoveryQuery(Base):
+    """Search probe cache: each normalised query is probed at most once per REPROBE_DAYS."""
+    __tablename__ = "discovery_queries"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    query: Mapped[str] = mapped_column(String(200), unique=True)
+    source: Mapped[str] = mapped_column(String(32))
+    seed_video_id: Mapped[str | None] = mapped_column(String(64))
+    priority: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_probed_day: Mapped[date | None] = mapped_column(Date)
+    next_probe_day: Mapped[date | None] = mapped_column(Date)
+    probe_count: Mapped[int] = mapped_column(Integer, default=0)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    results: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class DiscoveryItem(Base):
+    """Public metadata of an external video seen via search probes or as a recommending source."""
+    __tablename__ = "discovery_items"
+    video_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    channel_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(512))
+    channel_title: Mapped[str | None] = mapped_column(String(256))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    views: Mapped[int | None] = mapped_column(BigInteger)
+    likes: Mapped[int | None] = mapped_column(BigInteger)
+    comments: Mapped[int | None] = mapped_column(BigInteger)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    via: Mapped[dict] = mapped_column(JSON, default=dict)
+    first_seen_day: Mapped[date] = mapped_column(Date)
+    last_seen_day: Mapped[date] = mapped_column(Date)
+    seen_count: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class DiscoveryChannel(Base):
+    __tablename__ = "discovery_channels"
+    channel_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256))
+    subscribers: Mapped[int | None] = mapped_column(BigInteger)
+    video_count: Mapped[int | None] = mapped_column(Integer)
+    views: Mapped[int | None] = mapped_column(BigInteger)
+    first_seen_day: Mapped[date] = mapped_column(Date)
+    last_seen_day: Mapped[date] = mapped_column(Date)
+
+
+class DiscoverySignal(Base):
+    """Own-analytics demand evidence per video: search terms, recommending videos, external URLs (windowed)."""
+    __tablename__ = "discovery_signals"
+    __table_args__ = (UniqueConstraint("video_id", "kind", "detail", "window_end"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    detail: Mapped[str] = mapped_column(String(512))
+    window_start: Mapped[date] = mapped_column(Date)
+    window_end: Mapped[date] = mapped_column(Date)
+    views: Mapped[int] = mapped_column(BigInteger)
+    watch_minutes: Mapped[float] = mapped_column(Float)
+    fetched_day: Mapped[date] = mapped_column(Date)
+
+
+class DiscoveryOpportunity(Base):
+    """Daily opportunity snapshot (discovery memory); evaluated later against own traffic signals."""
+    __tablename__ = "discovery_opportunities"
+    __table_args__ = (UniqueConstraint("day", "kind", "key"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    key: Mapped[str] = mapped_column(String(200))
+    video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id", ondelete="SET NULL"), index=True)
+    gap: Mapped[str] = mapped_column(String(40))
+    scores: Mapped[dict] = mapped_column(JSON)
+    components: Mapped[dict] = mapped_column(JSON)
+    evidence: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default="open")
+    outcome: Mapped[str | None] = mapped_column(String(32))
+    evaluation: Mapped[dict | None] = mapped_column(JSON)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

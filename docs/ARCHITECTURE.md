@@ -18,6 +18,7 @@ app/
   strategy.py      V4 Strategy Engine und Experiment-Kontext
   learning.py      V4 Orchestrierung, Feedback-Loop, Dashboard-Overview
   growth_engine.py V5 Opportunity-/Viewer-/Subscriber-Scoring, States, Revival, Action Engine, Feedback, Daily Growth Plan
+  discovery.py     V6 externe Audience-Discovery: Signale, Seeds, Such-Proben, Analyse, Gedächtnis
   metrics.py       Velocity, Acceleration, Momentum, Conversion
   prediction.py    Baseline, RÃ¼ckkopplung, Ridge und Kalibrierung
   memory.py        Vorregistrierung, Auswertung, Strategieevidenz
@@ -51,6 +52,7 @@ Keine zusÃ¤tzliche Node-Laufzeit im Betrieb. Diese Entscheidung hÃ¤lt eine i
 | analytics_forecasts | V4: Analytics-Prognosen mit damaligen Features, Baseline, Intervall und späterem Ausgang |
 | strategy_recommendations | V4: versionierte Handlungsempfehlungen je Video/Tag mit Forecast-/Experiment-Links |
 | growth_scores / growth_actions / growth_plans | V5: relative Prioritätsscores mit Komponenten, je eine Aktion je Video mit Erfolgs-/Stop-Kriterium und späterer Auswertung, Daily Growth Plan ([V5.md](V5.md)) |
+| discovery_runs / discovery_quota / discovery_queries / discovery_items / discovery_channels / discovery_signals / discovery_opportunities | V6: budgetierte externe Discovery (Quota je Tag, Such-Proben-Cache, öffentliche Nachbar-Metadaten, eigene Traffic-Source-Details, tägliche Opportunity-Snapshots mit Auswertung) ([V6.md](V6.md)) |
 | forecasts | UnverÃ¤nderliche Vorhersage, Features, Modell, tatsÃ¤chliches Ergebnis |
 | model_runs | Validierung, Modellparameter, Trainings-IDs, Koeffizienten/Skalierung |
 | decisions | VollstÃ¤ndiges Experiment Memory, vorab definierte Strategie |

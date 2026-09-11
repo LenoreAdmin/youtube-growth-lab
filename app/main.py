@@ -17,6 +17,7 @@ from .memory import DecisionInput, create_decision, activate, evidence
 from . import backfill as backfill_module
 from . import learning as learning_module
 from . import growth_engine as growth_module
+from . import discovery as discovery_module
 
 app = FastAPI(title="YouTube Growth Lab", version="0.1.0")
 security = HTTPBearer(auto_error=False)
@@ -133,6 +134,29 @@ def growth_overview(s=Depends(db)):
     return jsonable_encoder(growth_module.overview(s))
 
 
+@app.get("/api/discovery", dependencies=[Depends(authenticate)])
+def discovery_overview(s=Depends(db)):
+    return jsonable_encoder(discovery_module.overview(s))
+
+
+@app.post("/api/discovery/run", dependencies=[Depends(authenticate)])
+def discovery_run():
+    if settings.vercel_env == "preview":
+        raise HTTPException(403, "Discovery ist in Preview-Deployments deaktiviert.")
+    from .youtube import YouTube
+    from .budget import Budget
+    try:
+        # Read-only public lookups within the daily quota budget; own lease, idempotent per day.
+        result = discovery_module.run(YouTube(), utcnow(), Budget(settings.sync_budget_seconds), force=True)
+    except Exception:
+        raise HTTPException(503, "Discovery fehlgeschlagen. Serverkonfiguration und Discovery-Status prüfen.") from None
+    if result["status"] == "already_running":
+        raise HTTPException(409, "Ein Discovery-Lauf läuft bereits.")
+    if result["status"] == "failed":
+        raise HTTPException(503, "Discovery fehlgeschlagen. Details im Discovery-Status.")
+    return jsonable_encoder(result)
+
+
 @app.post("/api/learning/rebuild", dependencies=[Depends(authenticate)])
 def learning_rebuild(s=Depends(db)):
     if settings.vercel_env == "preview":
@@ -156,6 +180,7 @@ def dashboard(s=Depends(db)):
             "backfill": jsonable_encoder(backfill_module.summary(s)),
             "learning_v4": jsonable_encoder(learning_module.overview(s)),
             "growth_v5": jsonable_encoder(growth_module.overview(s)),
+            "discovery_v6": jsonable_encoder(discovery_module.overview(s)),
             "learning": {"evaluated_forecasts": len(evaluated),
                          "mae": sum(r.absolute_error for r in evaluated)/len(evaluated) if evaluated else None},
             "availability": {"returning_viewers": "Nicht Ã¼ber die verwendeten APIs verfÃ¼gbar",
