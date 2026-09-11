@@ -95,3 +95,5 @@ Die Zugangswerte in automatisierten Tests und der lokalen Demo sind absichtlich 
 V2-Erweiterung, Testergebnis und sichere Production-Abnahme: [docs/V2.md](docs/V2.md).
 
 V3 Prediction-/Decision-Engine und lokale Abnahme: [docs/V3.md](docs/V3.md).
+
+Historischer Backfill (Tageswerte, Traffic-Quellen, Retention, Reach – soweit die APIs sie liefern; keine künstlichen Snapshots): [docs/BACKFILL.md](docs/BACKFILL.md).

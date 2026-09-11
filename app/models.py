@@ -218,3 +218,51 @@ class PredictionAudit(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON)
     feedback: Mapped[dict] = mapped_column(JSON, default=dict)
     recommendations: Mapped[list] = mapped_column(JSON)
+
+
+class BackfillRun(Base):
+    """Manual historical import runs; separate from hourly sync_runs."""
+    __tablename__ = "backfill_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    issues: Mapped[list] = mapped_column(JSON, default=list)
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class BackfillProgress(Base):
+    """Resumable cursor per video and history kind; never rewinds committed work."""
+    __tablename__ = "backfill_progress"
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    first: Mapped[date] = mapped_column(Date)
+    target: Mapped[date] = mapped_column(Date)
+    through: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str | None] = mapped_column(String(512))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrafficDaily(Base):
+    """Historical daily traffic sources; paid rows stay marked and excluded from organic learning."""
+    __tablename__ = "video_traffic_daily"
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    views: Mapped[int] = mapped_column(BigInteger)
+    watch_minutes: Mapped[float] = mapped_column(Float)
+    paid: Mapped[bool] = mapped_column(Boolean, default=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BackfillReport(Base):
+    """Historical period reports (retention per calendar month) with their exact window."""
+    __tablename__ = "backfill_reports"
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    start: Mapped[date] = mapped_column(Date, primary_key=True)
+    end: Mapped[date] = mapped_column(Date, primary_key=True)
+    rows: Mapped[list] = mapped_column(JSON)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -11,6 +11,7 @@ app/
   db.py            Engine und Sessions
   youtube.py       offizielle APIs und Desktop-OAuth
   pipeline.py      historische Imports, Snapshots, Feedback-Zyklus
+  backfill.py      manueller, resumierbarer historischer Import (eigene Lease)
   metrics.py       Velocity, Acceleration, Momentum, Conversion
   prediction.py    Baseline, RÃ¼ckkopplung, Ridge und Kalibrierung
   memory.py        Vorregistrierung, Auswertung, Strategieevidenz
@@ -37,6 +38,9 @@ Keine zusÃ¤tzliche Node-Laufzeit im Betrieb. Diese Entscheidung hÃ¤lt eine i
 | reach_daily | Offizielle Thumbnail-Impressionen und CTR je Video/Tag |
 | ingest_cursors | Letzter erfolgreich abgefragter Zeitraum je Video/Art |
 | sync_runs | Laufstatus, Zeitstempel, isolierte Fehler |
+| backfill_runs / backfill_progress | Manuelle historische Importläufe und resumierbare Cursor je Video/Art ([BACKFILL.md](BACKFILL.md)) |
+| video_traffic_daily | Historische Traffic-Quellen je Video/Tag; `paid` markiert Werbetraffic |
+| backfill_reports | Historische Retention je Kalendermonat mit exaktem Fenster |
 | forecasts | UnverÃ¤nderliche Vorhersage, Features, Modell, tatsÃ¤chliches Ergebnis |
 | model_runs | Validierung, Modellparameter, Trainings-IDs, Koeffizienten/Skalierung |
 | decisions | VollstÃ¤ndiges Experiment Memory, vorab definierte Strategie |

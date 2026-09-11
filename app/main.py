@@ -14,6 +14,7 @@ from .config import settings
 from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview, GrowthAssessment, ExperimentChange, PredictionAudit, ModelRun, utcnow
 from .pipeline import dashboard_rows, collect
 from .memory import DecisionInput, create_decision, activate, evidence
+from . import backfill as backfill_module
 
 app = FastAPI(title="YouTube Growth Lab", version="0.1.0")
 security = HTTPBearer(auto_error=False)
@@ -94,6 +95,32 @@ def manual_sync():
     return {"status": status}
 
 
+class BackfillInput(BaseModel):
+    retry_failed: bool = False
+
+
+@app.post("/api/backfill", dependencies=[Depends(authenticate)])
+def backfill_run(data: BackfillInput | None = None):
+    if settings.vercel_env == "preview":
+        raise HTTPException(403, "Backfill ist in Preview-Deployments deaktiviert.")
+    try:
+        # Own lease: the hourly cron sync is never blocked by a running backfill.
+        result = backfill_module.run(retry_failed=bool(data and data.retry_failed))
+    except Exception:
+        raise HTTPException(503, "Backfill fehlgeschlagen. Serverkonfiguration und Backfill-Status prüfen.") from None
+    status = result["status"]
+    if status == "already_running":
+        raise HTTPException(409, "Ein Backfill läuft bereits. Bitte nach dessen Abschluss erneut versuchen.")
+    if status == "failed":
+        raise HTTPException(503, "Backfill fehlgeschlagen. Details stehen im Backfill-Status.")
+    return jsonable_encoder(result)
+
+
+@app.get("/api/backfill", dependencies=[Depends(authenticate)])
+def backfill_status(s=Depends(db)):
+    return jsonable_encoder({**backfill_module.summary(s), "progress": backfill_module.detail(s)})
+
+
 @app.get("/api/dashboard", dependencies=[Depends(authenticate)])
 def dashboard(s=Depends(db)):
     channels = list(s.scalars(select(Channel)))
@@ -101,6 +128,7 @@ def dashboard(s=Depends(db)):
     evaluated = list(s.scalars(select(Forecast).where(Forecast.actual_views.is_not(None))))
     return {"channels": jsonable_encoder(channels), "videos": dashboard_rows(s),
             "sync": jsonable_encoder(run), "demo": any(c.id.startswith("DEMO") for c in channels),
+            "backfill": jsonable_encoder(backfill_module.summary(s)),
             "learning": {"evaluated_forecasts": len(evaluated),
                          "mae": sum(r.absolute_error for r in evaluated)/len(evaluated) if evaluated else None},
             "availability": {"returning_viewers": "Nicht Ã¼ber die verwendeten APIs verfÃ¼gbar",
@@ -129,6 +157,7 @@ def video_detail(video_id: str, s=Depends(db)):
             "daily": jsonable_encoder(list(s.scalars(select(Daily).where(Daily.video_id == video_id).order_by(Daily.day.desc()).limit(365)))[::-1]),
             "reach": jsonable_encoder(list(s.scalars(select(Reach).where(Reach.video_id == video_id).order_by(Reach.day.desc()).limit(90)))[::-1]),
             "reports": latest, "monetization": monetization,
+            "history": jsonable_encoder(backfill_module.video_history(s, video_id)),
             "growth_history": jsonable_encoder(list(s.scalars(select(GrowthAssessment)
                 .where(GrowthAssessment.video_id == video_id).order_by(GrowthAssessment.origin_at.desc()).limit(168))))}
 
