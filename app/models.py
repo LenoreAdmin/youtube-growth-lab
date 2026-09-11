@@ -183,3 +183,28 @@ class ImportedReport(Base):
     __tablename__ = "imported_reports"
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GrowthAssessment(Base):
+    """Immutable observation-time inputs and descriptive regime for later evaluation."""
+    __tablename__ = "growth_assessments"
+    __table_args__ = (UniqueConstraint("video_id", "origin_at", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    origin_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    version: Mapped[str] = mapped_column(String(64))
+    features: Mapped[dict] = mapped_column(JSON)
+    assessment: Mapped[dict] = mapped_column(JSON)
+
+
+class ExperimentChange(Base):
+    """Append-only user-reported changes; never writes to YouTube."""
+    __tablename__ = "experiment_changes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    decision_id: Mapped[int] = mapped_column(ForeignKey("decisions.id", ondelete="CASCADE"), index=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    dimension: Mapped[str] = mapped_column(String(32))
+    before_value: Mapped[str] = mapped_column(String(2000))
+    after_value: Mapped[str] = mapped_column(String(2000))
+    rationale: Mapped[str] = mapped_column(String(2000))

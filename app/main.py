@@ -6,11 +6,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AwareDatetime
+from typing import Literal
 from sqlalchemy import select, text
 from .db import Session
 from .config import settings
-from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview
+from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview, GrowthAssessment, ExperimentChange, utcnow
 from .pipeline import dashboard_rows, collect
 from .memory import DecisionInput, create_decision, activate, evidence
 
@@ -107,13 +108,16 @@ def video_detail(video_id: str, s=Depends(db)):
             "snapshots": jsonable_encoder(list(s.scalars(select(Snapshot).where(Snapshot.video_id == video_id).order_by(Snapshot.observed_at.desc()).limit(1000)))[::-1]),
             "daily": jsonable_encoder(list(s.scalars(select(Daily).where(Daily.video_id == video_id).order_by(Daily.day.desc()).limit(365)))[::-1]),
             "reach": jsonable_encoder(list(s.scalars(select(Reach).where(Reach.video_id == video_id).order_by(Reach.day.desc()).limit(90)))[::-1]),
-            "reports": latest, "monetization": monetization}
+            "reports": latest, "monetization": monetization,
+            "growth_history": jsonable_encoder(list(s.scalars(select(GrowthAssessment)
+                .where(GrowthAssessment.video_id == video_id).order_by(GrowthAssessment.origin_at.desc()).limit(168))))}
 
 
 @app.get("/api/memory", dependencies=[Depends(authenticate)])
 def memory(s=Depends(db)):
     rows = list(s.scalars(select(Decision).order_by(Decision.id.desc())))
     return [{"decision": jsonable_encoder(r), "evidence": evidence(s, r.strategy_key),
+             "changes": jsonable_encoder(list(s.scalars(select(ExperimentChange).where(ExperimentChange.decision_id == r.id).order_by(ExperimentChange.recorded_at)))) ,
              "reviews": jsonable_encoder(list(s.scalars(select(MemoryReview).where(MemoryReview.decision_id == r.id))))} for r in rows]
 
 
@@ -165,3 +169,24 @@ def memory_review(decision_id: int, data: ReviewInput, s=Depends(db)):
 
 
 app.mount("/static", StaticFiles(directory=static), name="static")
+
+
+class ChangeInput(BaseModel):
+    applied_at: AwareDatetime
+    dimension: Literal["content", "title", "thumbnail", "hook", "audience"]
+    before_value: str = Field(min_length=1, max_length=2000)
+    after_value: str = Field(min_length=1, max_length=2000)
+    rationale: str = Field(min_length=3, max_length=2000)
+
+
+@app.post("/api/memory/{decision_id}/changes", dependencies=[Depends(authenticate)], status_code=201)
+def record_change(decision_id: int, data: ChangeInput, s=Depends(db)):
+    decision = s.get(Decision, decision_id)
+    if decision is None:
+        raise HTTPException(404, "Experiment not found")
+    if decision.status == "draft" or data.applied_at > utcnow():
+        raise HTTPException(422, "Register the experiment first and report an actual past change.")
+    row = ExperimentChange(decision_id=decision_id, **data.model_dump())
+    s.add(row)
+    s.commit()
+    return jsonable_encoder(row)

@@ -6,8 +6,9 @@ from sqlalchemy import select, func, text, delete
 import isodate
 from .config import settings
 from .db import Session, engine
-from .models import Channel, Video, Snapshot, Daily, Report, Reach, SyncRun, Forecast, IngestCursor, ImportedReport, utcnow
-from .metrics import features, momentum, aware
+from .models import Channel, Video, Snapshot, Daily, Report, Reach, SyncRun, Forecast, IngestCursor, ImportedReport, GrowthAssessment, utcnow
+from .metrics import features, aware
+from .growth import enrich, assess, VERSION
 from .prediction import mature, predict
 from .youtube import YouTube
 from .budget import Budget, SyncBudgetExceeded
@@ -24,12 +25,24 @@ def latest_features(session, now=None, budget=None):
         if budget:
             budget.check()
         snapshots = list(session.scalars(select(Snapshot).where(Snapshot.video_id == v.id,
-            Snapshot.observed_at >= now-timedelta(days=4)).order_by(Snapshot.observed_at)))
+            Snapshot.observed_at >= now-timedelta(days=62), Snapshot.observed_at <= now).order_by(Snapshot.observed_at)))
         # Consistent calendar window across videos; missing rows remain unknown.
-        end = session.scalar(select(func.max(Daily.day)))
+        end = session.scalar(select(func.max(Daily.day)).where(Daily.day <= now.date(), Daily.fetched_at <= now))
         daily = list(session.scalars(select(Daily).where(Daily.video_id == v.id,
-            Daily.day >= end-timedelta(days=27), Daily.day <= end).order_by(Daily.day))) if end else []
-        f = features(v, snapshots, daily)
+            Daily.day >= end-timedelta(days=27), Daily.day <= end, Daily.fetched_at <= now).order_by(Daily.day))) if end else []
+        f = enrich(features(v, snapshots, daily), snapshots, now)
+        reaches = list(session.scalars(select(Reach).where(Reach.video_id == v.id,
+            Reach.day >= now.date()-timedelta(days=30), Reach.day <= now.date(), Reach.ctr.is_not(None))))
+        impressions = sum(r.impressions for r in reaches)
+        f["ctr"] = sum(r.impressions*r.ctr for r in reaches)/impressions if impressions else None
+        f["reach_end"] = str(max(r.day for r in reaches)) if reaches else None
+        f["metric_status"] = {"analytics": "available", "ctr": "available" if reaches else "missing"}
+        if not daily or (now.date()-daily[-1].day).days > max(7, settings.analytics_lag_days+3):
+            f.update(subscriber_conversion=None, watchtime_efficiency=None)
+            f["metric_status"]["analytics"] = "delayed_or_missing"
+        if reaches and (now.date()-max(r.day for r in reaches)).days > 7:
+            f["ctr"] = None
+            f["metric_status"]["ctr"] = "delayed"
         if snapshots and (aware(now)-aware(snapshots[-1].observed_at)).total_seconds() > settings.sync_interval_seconds*3:
             f.update(velocity=None, acceleration=None, quality="Snapshots veraltet")
         f["analytics_end"] = str(daily[-1].day) if daily else None
@@ -60,7 +73,7 @@ def dashboard_rows(session, now=None):
                 forecasts.append(dict(hours=h, views=p.predicted_views, lower=p.lower_views, upper=p.upper_views,
                     p100k=p.p100k, p1m=p.p1m, n=p.calibration_n, model=p.model_version,
                     origin=p.origin_at, target=p.target_at))
-        explanation = momentum(f, peers)
+        explanation = assess(f, peers)
         current_traffic = session.scalar(select(Report).where(Report.video_id == video.id, Report.kind == "traffic")
                                         .order_by(Report.end.desc()).limit(1))
         previous_traffic = session.scalar(select(Report).where(Report.video_id == video.id, Report.kind == "traffic_previous")
@@ -218,8 +231,6 @@ def _collect(client, budget=None):
                     if previous_start <= previous_end:
                         queries.append(("traffic_previous", previous_start, previous_end,
                                         "views,estimatedMinutesWatched", "insightTrafficSourceType"))
-                    if video.id == settings.focus_video_id:
-                        queries.append(("retention_lifetime", first, end, "audienceWatchRatio,relativeRetentionPerformance", "elapsedVideoTimeRatio"))
                     if settings.enable_revenue:
                         queries.append(("revenue", recent, end, "estimatedRevenue,views", "day"))
                     for kind, begin, finish, metrics, dimensions in queries:
@@ -252,8 +263,21 @@ def _collect(client, budget=None):
             evaluate_memory(s, now)
             s.flush()
             s.commit()
-            for video, snapshots, f in latest_features(s, now, budget):
+            all_features = latest_features(s, now, budget)
+            for video, snapshots, f in all_features:
                 budget.check()
+                if snapshots:
+                    peers = [other for peer, _, other in all_features if peer.id != video.id
+                        and other["content_type"] == f["content_type"] != "UNKNOWN"
+                        and min(other["age_days"]//30,3) == min(f["age_days"]//30,3)]
+                    assessment = assess(f, peers)
+                    f = {**f, "growth_assessment": assessment}
+                    exists = s.scalar(select(GrowthAssessment.id).where(GrowthAssessment.video_id == video.id,
+                        GrowthAssessment.origin_at == snapshots[-1].observed_at, GrowthAssessment.version == VERSION))
+                    if not exists:
+                        s.add(GrowthAssessment(video_id=video.id, origin_at=snapshots[-1].observed_at,
+                            version=VERSION, features=f, assessment=assessment))
+                        s.commit()
                 if f["velocity"] is None or not snapshots or (f.get("advertising_views_reported") or 0) > 0:
                     continue
                 f["strategy_evidence"] = strategy_feature(s, video.id, now)
@@ -266,6 +290,8 @@ def _collect(client, budget=None):
                         s.add(predict(s, video.id, origin, f, h))
                 s.commit()
             s.commit()
+        # Optional lifetime retention is last: all core results are already committed.
+        optional_lifetime(client, now, end, budget, issues)
     except SyncBudgetExceeded:
         deferred = True
         issues.append("Zeitbudget erreicht; gespeicherter Fortschritt wird beim nÃ¤chsten Cron fortgesetzt.")
@@ -275,6 +301,38 @@ def _collect(client, budget=None):
     with Session() as s:
         run = s.get(SyncRun, run_id)
         run.finished_at, run.issues = utcnow(), issues
-        run.status = "deferred" if deferred else "failed" if any(i.startswith("pipeline:") for i in issues) else "partial" if issues else "ok"
+        run.status = "deferred" if deferred else "failed" if any(i.startswith("pipeline:") for i in issues) else "partial" if any(not i.startswith("optional/") for i in issues) else "ok"
         s.commit()
         return {"status": run.status, "issues": issues}
+
+
+def optional_lifetime(client, now, end, budget, issues):
+    """One bounded request, weekly cooldown persisted before I/O; never retry in this run."""
+    if not settings.focus_video_id:
+        return
+    try:
+        budget.check()
+        with Session() as s:
+            video = s.get(Video, settings.focus_video_id)
+            if not video or not video.active:
+                return
+            cursor = s.get(IngestCursor, (video.id, "retention_attempt"))
+            if cursor and aware(cursor.updated_at) > now-timedelta(days=7):
+                return
+            first = aware(video.published_at).astimezone(ZoneInfo("America/Los_Angeles")).date()
+            if first > end:
+                return
+            s.merge(IngestCursor(video_id=video.id, kind="retention_attempt", through=end, updated_at=now))
+            s.commit()
+            if isinstance(client, YouTube):
+                rows = client.query(video.id, first, end, "audienceWatchRatio,relativeRetentionPerformance",
+                                    "elapsedVideoTimeRatio", timeout=5, max_pages=1)
+            else:
+                rows = client.query(video.id, first, end, "audienceWatchRatio,relativeRetentionPerformance", "elapsedVideoTimeRatio")
+            s.merge(Report(video_id=video.id, kind="retention_lifetime", start=first, end=end, rows=rows, fetched_at=now))
+            s.commit()
+    except SyncBudgetExceeded:
+        # Skipped optional work must not downgrade a completed core sync.
+        return
+    except Exception as exc:
+        issues.append(f"optional/retention_lifetime: {type(exc).__name__}; retry after cooldown")

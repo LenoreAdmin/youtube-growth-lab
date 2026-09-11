@@ -30,3 +30,30 @@ def test_invalid_memory_rejected(client):
 
 def test_health(client):
     assert client.get("/health").json() == {"status":"ok"}
+
+
+def test_experiment_changes_are_authenticated_append_only(client,session):
+    from test_memory import decision
+    from app.memory import activate
+    from app.models import Snapshot, utcnow
+    from datetime import timedelta
+    now=utcnow()
+    row=decision(session)
+    session.add(Snapshot(video_id="a",observed_at=now,views=100))
+    session.flush()
+    headers={"Authorization":"Bearer test-token-only"}
+    path=f"/api/memory/{row.id}/changes"
+    data=dict(dimension="title",applied_at=now.isoformat(),before_value="Original",
+              after_value="Updated",rationale="Test clearer benefit")
+    assert client.post(path,json=data).status_code == 401
+    assert client.post(path,json=data,headers=headers).status_code == 422
+    activate(session,row,"a",now)
+    session.commit()
+    assert client.post(path,json={**data,"applied_at":(now+timedelta(days=1)).isoformat()},headers=headers).status_code == 422
+    assert client.post(path,json=data,headers=headers).status_code == 201
+    assert client.post(path,json={**data,"after_value":"Second"},headers=headers).status_code == 201
+    result=client.get("/api/memory",headers=headers).json()[0]
+    assert len(result["changes"]) == 2
+    assert result["decision"]["hypothesis"] == row.hypothesis
+    assert result["changes"][0]["after_value"] == "Updated"
+    assert client.put(path,json=data,headers=headers).status_code == 405

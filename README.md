@@ -91,3 +91,5 @@ Die bereitgestellte GitHub-Actions-Datei fÃ¼hrt zusÃ¤tzlich Migrationen und 
 Das Repository ist fÃ¼r eine **private** GitHub-Ablage vorgesehen. Ein lokaler Commit verÃ¶ffentlicht nichts; Repository-Erstellung und Push benÃ¶tigen eine separate Freigabe. Vor jedem Push `git status` und den gestagten Diff prÃ¼fen. Nur die rootseitige `.env.example` darf versioniert werden; alle echten `.env`-Dateien, OAuth-Dateien, lokalen Datenbanken und Logs bleiben ausgeschlossen.
 
 Die Zugangswerte in automatisierten Tests und der lokalen Demo sind absichtlich Ã¶ffentliche Test-Fixtures und dÃ¼rfen nicht fÃ¼r echte Daten verwendet werden.
+
+V2-Erweiterung, Testergebnis und sichere Production-Abnahme: [docs/V2.md](docs/V2.md).

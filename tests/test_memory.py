@@ -83,7 +83,7 @@ def test_matched_control_evaluates_against_registered_comparison(session):
             session.add(Snapshot(video_id=video_id,observed_at=now-timedelta(days=days),views=views))
         session.add(Daily(video_id=video_id,day=(now-timedelta(days=3)).date(),views=100,
             watch_minutes=500,average_duration=300,average_percentage=50,subscribers_gained=2,
-            subscribers_lost=0,likes=2,comments=1,content_type="VIDEO"))
+            subscribers_lost=0,likes=2,comments=1,content_type="VIDEO",fetched_at=now))
     session.flush()
     control=predict(session,"b",Snapshot(views=100,observed_at=now),
         {"velocity":100/24,"acceleration":0,"subscriber_conversion":.02,"watchtime_efficiency":.5},24)

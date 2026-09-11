@@ -57,12 +57,12 @@ class YouTube:
         self.analytics = build("youtubeAnalytics", "v2", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=15)), cache_discovery=False)
         self.reporting = build("youtubereporting", "v1", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=15)), cache_discovery=False)
 
-    def execute(self, request):
+    def execute(self, request, http=None):
         if getattr(self, "budget", None):
             self.budget.check()
         # No unbounded retry/backoff inside the limited function invocation.
         # The next cron resumes failed chunks from database checkpoints.
-        return request.execute(num_retries=0)
+        return request.execute(num_retries=0, http=http) if http is not None else request.execute(num_retries=0)
 
     def channel(self):
         items = self.execute(self.data.channels().list(part="snippet,statistics,contentDetails", mine=True))["items"]
@@ -84,15 +84,21 @@ class YouTube:
             if not page:
                 break
 
-    def query(self, video, start, end, metrics, dimensions=None, filters=None):
+    def query(self, video, start, end, metrics, dimensions=None, filters=None, timeout=None, max_pages=None):
         args = dict(ids="channel==MINE", startDate=str(start), endDate=str(end),
                     metrics=metrics, filters=f"video=={video}" + (f";{filters}" if filters else ""))
         if dimensions:
             args["dimensions"] = dimensions
         rows = []
         offset = 1
+        pages = 0
+        transport = AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=timeout), max_refresh_attempts=0) if timeout else None
         while True:
-            result = self.execute(self.analytics.reports().query(**args, startIndex=offset, maxResults=200))
+            pages += 1
+            if max_pages is not None and pages > max_pages:
+                raise TimeoutError("Optional report page budget exceeded")
+            request = self.analytics.reports().query(**args, startIndex=offset, maxResults=200)
+            result = self.execute(request, http=transport) if transport else self.execute(request)
             headers = [h["name"] for h in result.get("columnHeaders", [])]
             batch = result.get("rows", [])
             rows.extend(dict(zip(headers, r)) for r in batch)
