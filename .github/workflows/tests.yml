@@ -17,13 +17,14 @@ jobs:
     env:
       DATABASE_URL: postgresql+psycopg://growth:test_only@localhost:5432/growth_test
       APP_TOKEN: ci-test-token-only
+      TEST_POSTGRES_URL: postgresql+psycopg://growth:test_only@localhost:5432/growth_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install -c constraints.txt ".[dev]"
-      - run: alembic upgrade head
+      - run: python -m app.release migrate
       - run: python -m app.cli demo
       - run: python -m pytest -q
       - run: alembic downgrade base
-      - run: alembic upgrade head
+      - run: python -m app.release migrate

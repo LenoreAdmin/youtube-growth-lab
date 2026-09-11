@@ -11,6 +11,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
 from .config import settings
+from .budget import Budget
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
@@ -23,6 +24,8 @@ def scopes():
 
 
 def authorize():
+    if settings.hosted:
+        raise ValueError("Interactive OAuth is local only; use Vercel environment variables.")
     flow = InstalledAppFlow.from_client_secrets_file(settings.google_client_file, scopes())
     credentials = flow.run_local_server(host="127.0.0.1", port=0, access_type="offline", prompt="consent")
     target = Path(settings.google_token_file)
@@ -36,15 +39,30 @@ def authorize():
 
 
 class YouTube:
-    def __init__(self):
-        self.credentials = Credentials.from_authorized_user_file(settings.google_token_file, scopes())
-        self.data = build("youtube", "v3", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=60)), cache_discovery=False)
-        self.analytics = build("youtubeAnalytics", "v2", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=60)), cache_discovery=False)
-        self.reporting = build("youtubereporting", "v1", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=60)), cache_discovery=False)
+    def __init__(self, budget=None):
+        self.budget = budget
+        values = (settings.google_client_id, settings.google_client_secret, settings.google_refresh_token)
+        if any(values):
+            if not all(values) or any(v.startswith("REPLACE_") for v in values):
+                raise ValueError("All three Google OAuth environment variables are required.")
+            self.credentials = Credentials(token=None, refresh_token=settings.google_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=settings.google_client_id, client_secret=settings.google_client_secret,
+                scopes=scopes())
+        elif settings.hosted:
+            raise ValueError("Google OAuth environment variables are required; secret files are forbidden on Vercel.")
+        else:
+            self.credentials = Credentials.from_authorized_user_file(settings.google_token_file, scopes())
+        self.data = build("youtube", "v3", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=15)), cache_discovery=False)
+        self.analytics = build("youtubeAnalytics", "v2", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=15)), cache_discovery=False)
+        self.reporting = build("youtubereporting", "v1", http=AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=15)), cache_discovery=False)
 
-    @staticmethod
-    def execute(request):
-        return request.execute(num_retries=3)
+    def execute(self, request):
+        if getattr(self, "budget", None):
+            self.budget.check()
+        # No unbounded retry/backoff inside the limited function invocation.
+        # The next cron resumes failed chunks from database checkpoints.
+        return request.execute(num_retries=0)
 
     def channel(self):
         items = self.execute(self.data.channels().list(part="snippet,statistics,contentDetails", mine=True))["items"]
@@ -115,6 +133,8 @@ class YouTube:
         host = urlparse(url).hostname or ""
         if urlparse(url).scheme != "https" or not (host == "googleapis.com" or host.endswith(".googleapis.com")):
             raise ValueError("Unexpected Reporting download host.")
-        response = AuthorizedSession(self.credentials).get(url, timeout=120)
+        if getattr(self, "budget", None):
+            self.budget.check()
+        response = AuthorizedSession(self.credentials).get(url, timeout=15)
         response.raise_for_status()
         return list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))

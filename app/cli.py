@@ -22,6 +22,8 @@ def main():
         if result["status"] not in ("ok", "already_running"):
             raise SystemExit(1)
     else:
+        if settings.hosted:
+            raise SystemExit("Use Vercel Cron; persistent workers are disabled in hosted environments.")
         while True:
             try:
                 logging.info("Sync result: %s", collect())

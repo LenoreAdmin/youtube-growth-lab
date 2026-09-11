@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "buildCommand": "python -m app.release build",
+  "functions": {
+    "app/main.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,docs/**,secrets/**,.env*,.venv/**,work/**,**/__pycache__/**,*.zip}"
+    }
+  },
+  "crons": [
+    { "path": "/api/cron/sync", "schedule": "0 * * * *" }
+  ]
+}

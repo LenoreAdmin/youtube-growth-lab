@@ -1,8 +1,17 @@
 from alembic import context
-from app.db import engine
 from app.models import Base
 
-with engine.connect() as connection:
+
+def run(connection):
     context.configure(connection=connection, target_metadata=Base.metadata)
     with context.begin_transaction():
         context.run_migrations()
+
+
+provided = context.config.attributes.get("connection")
+if provided is not None:
+    run(provided)
+else:
+    from app.db import engine
+    with engine.connect() as connection:
+        run(connection)

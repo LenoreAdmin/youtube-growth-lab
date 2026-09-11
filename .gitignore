@@ -126,3 +126,4 @@ Desktop.ini
 [Cc]lient_[Ss]ecret*.yml
 *.secret
 *.secrets
+.vercel/

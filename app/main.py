@@ -1,8 +1,9 @@
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
@@ -10,7 +11,7 @@ from sqlalchemy import select, text
 from .db import Session
 from .config import settings
 from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview
-from .pipeline import dashboard_rows
+from .pipeline import dashboard_rows, collect
 from .memory import DecisionInput, create_decision, activate, evidence
 
 app = FastAPI(title="YouTube Growth Lab", version="0.1.0")
@@ -21,7 +22,7 @@ static = Path(__file__).parent/"static"
 def authenticate(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
     if not settings.app_token or settings.app_token.startswith("REPLACE_"):
         raise HTTPException(503, "APP_TOKEN muss lokal konfiguriert werden.")
-    if not credentials or not secrets.compare_digest(credentials.credentials, settings.app_token):
+    if not credentials or not secrets.compare_digest(credentials.credentials.encode(), settings.app_token.encode()):
         raise HTTPException(401, "Anmeldung erforderlich.")
 
 
@@ -51,6 +52,27 @@ def health(s=Depends(db)):
     return {"status": "ok"}
 
 
+def cron_authenticate(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
+    secret = settings.cron_secret
+    if len(secret) < 32 or secret.startswith("REPLACE_"):
+        raise HTTPException(503, "Cron secret is not configured.")
+    if not credentials or not secrets.compare_digest(credentials.credentials.encode(), secret.encode()):
+        raise HTTPException(401, "Invalid cron authorization.")
+
+
+@app.get("/api/cron/sync", dependencies=[Depends(cron_authenticate)], include_in_schema=False)
+def cron_sync():
+    if settings.vercel_env == "preview":
+        raise HTTPException(403, "Sync is disabled in preview deployments.")
+    bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+    try:
+        result = collect(bucket=bucket)
+    except Exception:
+        return JSONResponse({"status": "failed", "detail": "Sync unavailable; check server configuration."}, status_code=503)
+    code = 503 if result["status"] in ("failed", "partial") else 200
+    return JSONResponse(result, status_code=code)
+
+
 @app.get("/api/dashboard", dependencies=[Depends(authenticate)])
 def dashboard(s=Depends(db)):
     channels = list(s.scalars(select(Channel)))
@@ -60,9 +82,9 @@ def dashboard(s=Depends(db)):
             "sync": jsonable_encoder(run), "demo": any(c.id.startswith("DEMO") for c in channels),
             "learning": {"evaluated_forecasts": len(evaluated),
                          "mae": sum(r.absolute_error for r in evaluated)/len(evaluated) if evaluated else None},
-            "availability": {"returning_viewers": "Nicht über die verwendeten APIs verfügbar",
-                             "reach": "YouTube Reporting API; historische Verfügbarkeit begrenzt",
-                             "probabilities": "Horizontbezogen; erst ab 30 unabhängigen Modellfehlern"}}
+            "availability": {"returning_viewers": "Nicht Ã¼ber die verwendeten APIs verfÃ¼gbar",
+                             "reach": "YouTube Reporting API; historische VerfÃ¼gbarkeit begrenzt",
+                             "probabilities": "Horizontbezogen; erst ab 30 unabhÃ¤ngigen Modellfehlern"}}
 
 
 @app.get("/api/videos/{video_id}", dependencies=[Depends(authenticate)])
@@ -135,7 +157,7 @@ def memory_review(decision_id: int, data: ReviewInput, s=Depends(db)):
     if not row:
         raise HTTPException(404, "Hypothese nicht gefunden")
     if row.status != "evaluated":
-        raise HTTPException(422, "Ergebnis noch nicht verfügbar")
+        raise HTTPException(422, "Ergebnis noch nicht verfÃ¼gbar")
     s.add(MemoryReview(decision_id=decision_id, **data.model_dump()))
     row.suspected_cause, row.next_hypothesis = data.suspected_cause, data.next_hypothesis
     s.commit()

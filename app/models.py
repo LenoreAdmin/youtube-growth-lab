@@ -170,3 +170,16 @@ class IngestCursor(Base):
     kind: Mapped[str] = mapped_column(String(32), primary_key=True)
     through: Mapped[date] = mapped_column(Date)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class JobLease(Base):
+    __tablename__ = "job_leases"
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_bucket: Mapped[str | None] = mapped_column(String(32))
+
+
+class ImportedReport(Base):
+    __tablename__ = "imported_reports"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -6,19 +6,23 @@ from sqlalchemy import select, func, text, delete
 import isodate
 from .config import settings
 from .db import Session, engine
-from .models import Channel, Video, Snapshot, Daily, Report, Reach, SyncRun, Forecast, IngestCursor, utcnow
+from .models import Channel, Video, Snapshot, Daily, Report, Reach, SyncRun, Forecast, IngestCursor, ImportedReport, utcnow
 from .metrics import features, momentum, aware
 from .prediction import mature, predict
 from .youtube import YouTube
+from .budget import Budget, SyncBudgetExceeded
+from .jobs import acquire, release
 
 log = logging.getLogger(__name__)
 METRICS = "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost,likes,comments"
 
 
-def latest_features(session, now=None):
+def latest_features(session, now=None, budget=None):
     now = now or utcnow()
     result = []
     for v in session.scalars(select(Video).where(Video.active.is_(True))):
+        if budget:
+            budget.check()
         snapshots = list(session.scalars(select(Snapshot).where(Snapshot.video_id == v.id,
             Snapshot.observed_at >= now-timedelta(days=4)).order_by(Snapshot.observed_at)))
         # Consistent calendar window across videos; missing rows remain unknown.
@@ -70,10 +74,10 @@ def dashboard_rows(session, now=None):
                     source = row["insightTrafficSourceType"]
                     delta = row["views"]/ctotal-previous.get(source,0)/ptotal
                     if abs(delta) >= 0.1:
-                        explanation["reasons"].append(f"Traffic-Anteil {source}: {delta*100:+.1f} Prozentpunkte gegenüber Vorperiode; mögliche Erklärung, kein Kausalnachweis.")
+                        explanation["reasons"].append(f"Traffic-Anteil {source}: {delta*100:+.1f} Prozentpunkte gegenÃ¼ber Vorperiode; mÃ¶gliche ErklÃ¤rung, kein Kausalnachweis.")
         if (f.get("advertising_views_reported") or 0) > 0:
             explanation.update(score=None, direction="Werbung enthalten")
-            explanation["reasons"].append("Gesamtzähler enthalten Werbetraffic. Organisches Momentum und neue Gesamtzähler-Prognosen ausgesetzt.")
+            explanation["reasons"].append("GesamtzÃ¤hler enthalten Werbetraffic. Organisches Momentum und neue GesamtzÃ¤hler-Prognosen ausgesetzt.")
         output.append(dict(id=video.id, title=video.title, published_at=video.published_at,
             duration=video.duration_seconds, focus=video.id == settings.focus_video_id,
             last_snapshot=snapshots[-1].observed_at if snapshots else None,
@@ -82,13 +86,17 @@ def dashboard_rows(session, now=None):
     return sorted(output, key=lambda r: r["score"] if r["score"] is not None else -1, reverse=True)
 
 
-def ingest_reach(session, client, issues):
+def ingest_reach(session, client, issues, budget=None):
     ids = set(session.scalars(select(Video.id)))
     reports = list(client.reach_reports())
     if not reports:
         issues.append("reach: Reporting-Job erstellt; Google hat noch keine Berichte bereitgestellt.")
     for report in reports:
-        # Re-import available reports to capture official corrections; overwrite, never add duplicates.
+        if budget:
+            budget.check()
+        if session.get(ImportedReport, report["id"]):
+            continue
+        # Replacement reports have new IDs; imported IDs need no further downloads.
         grouped = defaultdict(lambda: [0, 0.0])
         for row in client.download_reach(report["downloadUrl"]):
             if row["video_id"] not in ids:
@@ -103,29 +111,35 @@ def ingest_reach(session, client, issues):
         for (video_id, day), (count, weighted) in grouped.items():
             session.merge(Reach(video_id=video_id, day=day, impressions=count,
                 ctr=weighted/count if count else None, report_id=report["id"]))
+        session.add(ImportedReport(id=report["id"]))
+        session.commit()
 
 
-def collect(client=None):
-    # Dedicated connection holds lock across per-video commits.
-    with engine.connect() as lock:
-        locked = engine.dialect.name == "postgresql"
-        if locked and not lock.scalar(text("SELECT pg_try_advisory_lock(71402951)")):
-            return {"status": "already_running"}
-        try:
-            return _collect(client or YouTube())
-        finally:
-            if locked:
-                lock.execute(text("SELECT pg_advisory_unlock(71402951)"))
+def collect(client=None, bucket=None):
+    owner, skipped = acquire(Session, bucket)
+    if skipped:
+        return {"status": skipped}
+    result = None
+    try:
+        budget = Budget(settings.sync_budget_seconds)
+        result = _collect(client, budget)
+        return result
+    finally:
+        completed = bucket if result and result["status"] in ("ok", "deferred") else None
+        release(Session, owner, completed)
 
 
-def _collect(client):
-    issues, now = [], utcnow()
+def _collect(client, budget=None):
+    budget = budget or Budget(settings.sync_budget_seconds)
+    issues, now, deferred = [], utcnow(), False
     with Session() as s:
         run = SyncRun()
         s.add(run)
         s.commit()
         run_id = run.id
     try:
+        client = client or YouTube(budget=budget)
+        budget.check()
         raw = client.channel()
         with Session() as s:
             existing_channel = s.scalar(select(Channel.id))
@@ -157,15 +171,23 @@ def _collect(client):
                         comments=int(stats["commentCount"]) if "commentCount" in stats else None))
             s.commit()
         end = now.astimezone(ZoneInfo("America/Los_Angeles")).date()-timedelta(days=max(2, settings.analytics_lag_days))
-        for item in sorted(videos, key=lambda v: v["id"] != settings.focus_video_id):
+        with Session() as s:
+            attempts = {c.video_id: aware(c.updated_at).timestamp() for c in s.scalars(
+                select(IngestCursor).where(IngestCursor.kind == "attempt"))}
+        ordered = sorted(videos, key=lambda v: (attempts.get(v["id"], 0), v["id"] != settings.focus_video_id))
+        for item in ordered:
+            budget.check()
             with Session() as s:
                 video = s.get(Video, item["id"])
+                s.merge(IngestCursor(video_id=video.id, kind="attempt", through=end, updated_at=now))
+                s.commit()
                 first = max(date(2009, 1, 1), aware(video.published_at).astimezone(ZoneInfo("America/Los_Angeles")).date())
                 cursor = s.get(IngestCursor, (video.id, "daily"))
                 last = cursor.through if cursor else s.scalar(select(func.max(Daily.day)).where(Daily.video_id == video.id))
                 start = max(first, last-timedelta(days=30)) if last else first
                 try:
                     while start <= end:
+                        budget.check()
                         stop = min(end, start+timedelta(days=179))
                         rows = client.query(video.id, start, stop, METRICS, "day")
                         # Successful refresh replaces its window, including disappeared/suppressed rows.
@@ -204,17 +226,23 @@ def _collect(client):
                         try:
                             rows = client.query(video.id, begin, finish, metrics, dimensions)
                             s.merge(Report(video_id=video.id, kind=kind, start=begin, end=finish, rows=rows, fetched_at=now))
+                        except SyncBudgetExceeded:
+                            raise
                         except Exception as exc:
                             issues.append(f"{video.id}/{kind}: {type(exc).__name__}")
                     s.commit()
+                except SyncBudgetExceeded:
+                    raise
                 except Exception as exc:
                     s.rollback()
                     issues.append(f"{video.id}/analytics: {type(exc).__name__}")
         if settings.enable_reach:
             with Session() as s:
                 try:
-                    ingest_reach(s, client, issues)
+                    ingest_reach(s, client, issues, budget)
                     s.commit()
+                except SyncBudgetExceeded:
+                    raise
                 except Exception as exc:
                     issues.append(f"reach: {type(exc).__name__}")
         with Session() as s:
@@ -223,7 +251,9 @@ def _collect(client):
             s.flush()
             evaluate_memory(s, now)
             s.flush()
-            for video, snapshots, f in latest_features(s, now):
+            s.commit()
+            for video, snapshots, f in latest_features(s, now, budget):
+                budget.check()
                 if f["velocity"] is None or not snapshots or (f.get("advertising_views_reported") or 0) > 0:
                     continue
                 f["strategy_evidence"] = strategy_feature(s, video.id, now)
@@ -232,14 +262,19 @@ def _collect(client):
                     exists = s.scalar(select(Forecast.id).where(Forecast.video_id == video.id,
                         Forecast.origin_at == origin.observed_at, Forecast.horizon_hours == h))
                     if not exists:
+                        budget.check()
                         s.add(predict(s, video.id, origin, f, h))
+                s.commit()
             s.commit()
+    except SyncBudgetExceeded:
+        deferred = True
+        issues.append("Zeitbudget erreicht; gespeicherter Fortschritt wird beim nÃ¤chsten Cron fortgesetzt.")
     except Exception as exc:
         issues.append(f"pipeline: {type(exc).__name__}")
         log.error("Collection failed (%s); secrets and raw API responses omitted", type(exc).__name__)
     with Session() as s:
         run = s.get(SyncRun, run_id)
         run.finished_at, run.issues = utcnow(), issues
-        run.status = "failed" if any(i.startswith("pipeline:") for i in issues) else "partial" if issues else "ok"
+        run.status = "deferred" if deferred else "failed" if any(i.startswith("pipeline:") for i in issues) else "partial" if issues else "ok"
         s.commit()
         return {"status": run.status, "issues": issues}

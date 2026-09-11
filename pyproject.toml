@@ -16,3 +16,6 @@ include = ["app*"]
 app = ["static/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.vercel]
+entrypoint = "app.main:app"
