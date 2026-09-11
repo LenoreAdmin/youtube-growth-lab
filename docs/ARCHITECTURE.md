@@ -12,6 +12,11 @@ app/
   youtube.py       offizielle APIs und Desktop-OAuth
   pipeline.py      historische Imports, Snapshots, Feedback-Zyklus
   backfill.py      manueller, resumierbarer historischer Import (eigene Lease)
+  history.py       V4 leakage-freier historischer Trainingsdatensatz
+  backtest.py      V4 Walk-forward-Backtests, Baselines, Modellwahl
+  regimes.py       V4 quantilbasierte Growth-Regime
+  strategy.py      V4 Strategy Engine und Experiment-Kontext
+  learning.py      V4 Orchestrierung, Feedback-Loop, Dashboard-Overview
   metrics.py       Velocity, Acceleration, Momentum, Conversion
   prediction.py    Baseline, RÃ¼ckkopplung, Ridge und Kalibrierung
   memory.py        Vorregistrierung, Auswertung, Strategieevidenz
@@ -41,6 +46,9 @@ Keine zusÃ¤tzliche Node-Laufzeit im Betrieb. Diese Entscheidung hÃ¤lt eine i
 | backfill_runs / backfill_progress | Manuelle historische Importläufe und resumierbare Cursor je Video/Art ([BACKFILL.md](BACKFILL.md)) |
 | video_traffic_daily | Historische Traffic-Quellen je Video/Tag; `paid` markiert Werbetraffic |
 | backfill_reports | Historische Retention je Kalendermonat mit exaktem Fenster |
+| learning_datasets / learning_backtests | V4: signierte historische Datensätze, Audit, Walk-forward-Backtests je Horizont ([V4.md](V4.md)) |
+| analytics_forecasts | V4: Analytics-Prognosen mit damaligen Features, Baseline, Intervall und späterem Ausgang |
+| strategy_recommendations | V4: versionierte Handlungsempfehlungen je Video/Tag mit Forecast-/Experiment-Links |
 | forecasts | UnverÃ¤nderliche Vorhersage, Features, Modell, tatsÃ¤chliches Ergebnis |
 | model_runs | Validierung, Modellparameter, Trainings-IDs, Koeffizienten/Skalierung |
 | decisions | VollstÃ¤ndiges Experiment Memory, vorab definierte Strategie |

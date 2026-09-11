@@ -266,3 +266,71 @@ class BackfillReport(Base):
     end: Mapped[date] = mapped_column(Date, primary_key=True)
     rows: Mapped[list] = mapped_column(JSON)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LearningDataset(Base):
+    """Reproducible historical dataset build: audit, exclusions and channel baselines at build time."""
+    __tablename__ = "learning_datasets"
+    signature: Mapped[str] = mapped_column(String(64), primary_key=True)
+    built_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    version: Mapped[str] = mapped_column(String(64))
+    config: Mapped[dict] = mapped_column(JSON)
+    audit: Mapped[dict] = mapped_column(JSON)
+    rows_per_horizon: Mapped[dict] = mapped_column(JSON)
+    exclusions: Mapped[dict] = mapped_column(JSON)
+    baselines: Mapped[dict] = mapped_column(JSON)
+
+
+class LearningBacktest(Base):
+    __tablename__ = "learning_backtests"
+    __table_args__ = (UniqueConstraint("dataset_signature", "horizon_hours", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset_signature: Mapped[str] = mapped_column(ForeignKey("learning_datasets.signature", ondelete="CASCADE"), index=True)
+    horizon_hours: Mapped[int] = mapped_column(Integer)
+    version: Mapped[str] = mapped_column(String(64))
+    built_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    champion: Mapped[str] = mapped_column(String(64))
+    accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    result: Mapped[dict] = mapped_column(JSON)
+    parameters: Mapped[dict] = mapped_column(JSON)
+    signals: Mapped[list] = mapped_column(JSON)
+
+
+class AnalyticsForecast(Base):
+    """Analytics-view forecast with the exact features and model used; evaluated once the days are observed."""
+    __tablename__ = "analytics_forecasts"
+    __table_args__ = (UniqueConstraint("video_id", "origin_day", "horizon_hours"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    origin_day: Mapped[date] = mapped_column(Date, index=True)
+    horizon_hours: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    model: Mapped[str] = mapped_column(String(64))
+    model_version: Mapped[str] = mapped_column(String(64))
+    dataset_signature: Mapped[str | None] = mapped_column(String(64))
+    predicted_views: Mapped[float] = mapped_column(Float)
+    baseline_views: Mapped[float] = mapped_column(Float)
+    lower_views: Mapped[float | None] = mapped_column(Float)
+    upper_views: Mapped[float | None] = mapped_column(Float)
+    interval_kind: Mapped[str] = mapped_column(String(32))
+    features: Mapped[dict] = mapped_column(JSON)
+    regime: Mapped[str] = mapped_column(String(32))
+    actual_views: Mapped[int | None] = mapped_column(BigInteger)
+    absolute_error: Mapped[float | None] = mapped_column(Float)
+    log_error: Mapped[float | None] = mapped_column(Float)
+    eligibility: Mapped[str | None] = mapped_column(String(64))
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StrategyRecommendation(Base):
+    __tablename__ = "strategy_recommendations"
+    __table_args__ = (UniqueConstraint("video_id", "origin_day", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    origin_day: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    version: Mapped[str] = mapped_column(String(64))
+    regime: Mapped[str] = mapped_column(String(32))
+    recommendation: Mapped[dict] = mapped_column(JSON)
+    forecast_ids: Mapped[list] = mapped_column(JSON, default=list)
+    decision_ids: Mapped[list] = mapped_column(JSON, default=list)

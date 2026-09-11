@@ -15,6 +15,7 @@ from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, Sy
 from .pipeline import dashboard_rows, collect
 from .memory import DecisionInput, create_decision, activate, evidence
 from . import backfill as backfill_module
+from . import learning as learning_module
 
 app = FastAPI(title="YouTube Growth Lab", version="0.1.0")
 security = HTTPBearer(auto_error=False)
@@ -121,6 +122,24 @@ def backfill_status(s=Depends(db)):
     return jsonable_encoder({**backfill_module.summary(s), "progress": backfill_module.detail(s)})
 
 
+@app.get("/api/learning", dependencies=[Depends(authenticate)])
+def learning_overview(s=Depends(db)):
+    return jsonable_encoder(learning_module.overview(s))
+
+
+@app.post("/api/learning/rebuild", dependencies=[Depends(authenticate)])
+def learning_rebuild(s=Depends(db)):
+    if settings.vercel_env == "preview":
+        raise HTTPException(403, "Lernlauf ist in Preview-Deployments deaktiviert.")
+    from .budget import Budget
+    try:
+        # Idempotent upserts keyed by dataset signature; a concurrent sync cannot duplicate results.
+        result = learning_module.refresh(s, utcnow(), Budget(settings.sync_budget_seconds), force=True)
+    except Exception:
+        raise HTTPException(503, "Lernlauf fehlgeschlagen oder Zeitbudget erreicht. Details im Lernstatus.") from None
+    return jsonable_encoder(result)
+
+
 @app.get("/api/dashboard", dependencies=[Depends(authenticate)])
 def dashboard(s=Depends(db)):
     channels = list(s.scalars(select(Channel)))
@@ -129,6 +148,7 @@ def dashboard(s=Depends(db)):
     return {"channels": jsonable_encoder(channels), "videos": dashboard_rows(s),
             "sync": jsonable_encoder(run), "demo": any(c.id.startswith("DEMO") for c in channels),
             "backfill": jsonable_encoder(backfill_module.summary(s)),
+            "learning_v4": jsonable_encoder(learning_module.overview(s)),
             "learning": {"evaluated_forecasts": len(evaluated),
                          "mae": sum(r.absolute_error for r in evaluated)/len(evaluated) if evaluated else None},
             "availability": {"returning_viewers": "Nicht Ã¼ber die verwendeten APIs verfÃ¼gbar",
@@ -158,6 +178,7 @@ def video_detail(video_id: str, s=Depends(db)):
             "reach": jsonable_encoder(list(s.scalars(select(Reach).where(Reach.video_id == video_id).order_by(Reach.day.desc()).limit(90)))[::-1]),
             "reports": latest, "monetization": monetization,
             "history": jsonable_encoder(backfill_module.video_history(s, video_id)),
+            "strategy": jsonable_encoder(learning_module.overview(s)["videos"].get(video_id)),
             "growth_history": jsonable_encoder(list(s.scalars(select(GrowthAssessment)
                 .where(GrowthAssessment.video_id == video_id).order_by(GrowthAssessment.origin_at.desc()).limit(168))))}
 

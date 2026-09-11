@@ -305,7 +305,8 @@ def _collect(client, budget=None):
                         s.add(predict(s, video.id, origin, f, h, budget=budget))
                 s.commit()
             s.commit()
-        # Optional lifetime retention is last: all core results are already committed.
+        # Optional steps are last: all core results are already committed.
+        optional_learning(now, budget, issues)
         optional_lifetime(client, now, end, budget, issues)
     except SyncBudgetExceeded:
         deferred = True
@@ -319,6 +320,20 @@ def _collect(client, budget=None):
         run.status = "deferred" if deferred else "failed" if any(i.startswith("pipeline:") for i in issues) else "partial" if any(not i.startswith("optional/") for i in issues) else "ok"
         s.commit()
         return {"status": run.status, "issues": issues}
+
+
+def optional_learning(now, budget, issues):
+    """V4 historical learning inside the remaining budget; never downgrades a completed core sync."""
+    try:
+        budget.check()
+        from .learning import refresh
+        with Session() as s:
+            refresh(s, now, budget)
+    except SyncBudgetExceeded:
+        return
+    except Exception as exc:
+        issues.append(f"optional/learning: {type(exc).__name__}; retry next sync")
+        log.error("Optional learning failed (%s); raw data omitted", type(exc).__name__)
 
 
 def optional_lifetime(client, now, end, budget, issues):

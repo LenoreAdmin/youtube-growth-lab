@@ -97,3 +97,5 @@ V2-Erweiterung, Testergebnis und sichere Production-Abnahme: [docs/V2.md](docs/V
 V3 Prediction-/Decision-Engine und lokale Abnahme: [docs/V3.md](docs/V3.md).
 
 Historischer Backfill (Tageswerte, Traffic-Quellen, Retention, Reach – soweit die APIs sie liefern; keine künstlichen Snapshots): [docs/BACKFILL.md](docs/BACKFILL.md).
+
+V4 Historical Learning, Backtesting & Strategy Engine (leakage-freie Trainingsdaten, Walk-forward-Backtests, Quantil-Regime, Handlungsempfehlungen): [docs/V4.md](docs/V4.md).
