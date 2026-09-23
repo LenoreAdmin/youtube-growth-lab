@@ -1,4 +1,6 @@
+import time
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import logging
@@ -16,6 +18,25 @@ from .jobs import acquire, release
 
 log = logging.getLogger(__name__)
 OPTIONAL_RESERVE_SECONDS = 90  # Withheld from the core import so V4/V5/V6 always get a slot.
+
+
+class Steps:
+    """Wall-clock per step, stored on the run so the slowest core step is measured, not guessed."""
+    def __init__(self):
+        self.seconds = {}
+
+    @contextmanager
+    def step(self, name):
+        start = time.monotonic()
+        try:
+            yield
+        finally:
+            self.seconds[name] = round(self.seconds.get(name, 0.0)+time.monotonic()-start, 2)
+
+    def result(self, total_start):
+        return {**self.seconds, "total": round(time.monotonic()-total_start, 2)}
+
+
 METRICS = "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost,likes,comments"
 
 
@@ -162,15 +183,17 @@ def _collect(client, budget=None):
     budget = budget or Budget(settings.sync_budget_seconds)
     issues, now, deferred = [], utcnow(), False
     end = None
+    steps, started = Steps(), time.monotonic()
     with Session() as s:
         run = SyncRun()
         s.add(run)
         s.commit()
         run_id = run.id
     try:
-        client = client or YouTube(budget=budget)
-        budget.check()
-        raw = client.channel()
+        with steps.step("client_and_channel"):
+            client = client or YouTube(budget=budget)
+            budget.check()
+            raw = client.channel()
         with Session() as s:
             existing_channel = s.scalar(select(Channel.id))
             if existing_channel and existing_channel != raw["id"]:
@@ -181,8 +204,9 @@ def _collect(client, budget=None):
                 updated_at=now))
             s.commit()
         playlist = raw["contentDetails"]["relatedPlaylists"]["uploads"]
-        videos = list(client.videos(playlist))  # Do not deactivate anything on pagination failure.
-        with Session() as s:
+        with steps.step("videos_list"):
+            videos = list(client.videos(playlist))  # Do not deactivate anything on pagination failure.
+        with steps.step("snapshots"), Session() as s:
             existing = list(s.scalars(select(Video).where(Video.channel_id == raw["id"])))
             returned = {v["id"] for v in videos}
             for video in existing:
@@ -206,6 +230,7 @@ def _collect(client, budget=None):
                 select(IngestCursor).where(IngestCursor.kind == "attempt"))}
         ordered = sorted(videos, key=lambda v: (attempts.get(v["id"], 0), v["id"] != settings.focus_video_id))
         for item in ordered:
+          with steps.step("analytics_and_reports"):   # summiert ueber alle Videos, daher im Schleifenkoerper
             budget.check()
             with Session() as s:
                 video = s.get(Video, item["id"])
@@ -265,7 +290,7 @@ def _collect(client, budget=None):
                     s.rollback()
                     issues.append(f"{video.id}/analytics: {type(exc).__name__}")
         if settings.enable_reach:
-            with Session() as s:
+            with steps.step("reach"), Session() as s:
                 try:
                     ingest_reach(s, client, issues, budget)
                     s.commit()
@@ -273,15 +298,52 @@ def _collect(client, budget=None):
                     raise
                 except Exception as exc:
                     issues.append(f"reach: {type(exc).__name__}")
+    except SyncBudgetExceeded:
+        deferred = True
+        issues.append("Zeitbudget erreicht; gespeicherter Fortschritt wird beim nÃ¤chsten Cron fortgesetzt.")
+    except Exception as exc:
+        issues.append(f"pipeline: {type(exc).__name__}")
+        log.error("Collection failed (%s); secrets and raw API responses omitted", type(exc).__name__)
+    # Optional phase runs even after a deferred core: its seconds were reserved up front,
+    # so an oversized import can no longer keep V4/V5/V6 from running for days.
+    budget.release()
+    with steps.step("optional_learning"):
+        optional_learning(now, budget, issues)
+    if client is not None:
+        with steps.step("optional_discovery"):
+            optional_discovery(client, now, budget, issues)
+        if end is not None:
+            with steps.step("optional_lifetime"):
+                optional_lifetime(client, now, end, budget, issues)
+    # V3 zuletzt: gemessen der teuerste Schritt (~10.400 Abfragen je Lauf). Als abgeleitete Arbeit
+    # darf er den Kernimport nicht mehr auf deferred setzen und V4/V5/V6 nicht verdraengen.
+    with steps.step("v3_predictions"):
+        optional_predictions(now, budget, issues, steps)
+    with Session() as s:
+        run = s.get(SyncRun, run_id)
+        run.finished_at, run.issues, run.timings = utcnow(), issues, steps.result(started)
+        run.status = "deferred" if deferred else "failed" if any(i.startswith("pipeline:") for i in issues) else "partial" if any(not i.startswith("optional/") for i in issues) else "ok"
+        s.commit()
+        return {"status": run.status, "issues": issues}
+
+
+def optional_predictions(now, budget, issues, steps):
+    """V3-Feedback, Experiment-Memory, Growth-Assessments und Prognosen; resumierbar und idempotent."""
+    try:
+        budget.check()
         with Session() as s:
             from .memory import evaluate_memory, strategy_feature
-            feedback(s, now, budget)
-            s.flush()
-            evaluate_memory(s, now)
-            s.flush()
-            s.commit()
-            all_features = latest_features(s, now, budget)
+            with steps.step("v3_feedback"):
+                feedback(s, now, budget)
+                s.flush()
+            with steps.step("memory"):
+                evaluate_memory(s, now)
+                s.flush()
+                s.commit()
+            with steps.step("features"):
+                all_features = latest_features(s, now, budget)
             for video, snapshots, f in all_features:
+              with steps.step("v3_assessments_and_forecasts"):   # summiert ueber alle Videos
                 budget.check()
                 if snapshots:
                     peers = [other for peer, _, other in all_features if peer.id != video.id
@@ -308,25 +370,10 @@ def _collect(client, budget=None):
                 s.commit()
             s.commit()
     except SyncBudgetExceeded:
-        deferred = True
-        issues.append("Zeitbudget erreicht; gespeicherter Fortschritt wird beim nÃ¤chsten Cron fortgesetzt.")
+        issues.append("optional/v3_predictions: Zeitbudget erreicht; naechster Cron setzt fort")
     except Exception as exc:
-        issues.append(f"pipeline: {type(exc).__name__}")
-        log.error("Collection failed (%s); secrets and raw API responses omitted", type(exc).__name__)
-    # Optional phase runs even after a deferred core: its seconds were reserved up front,
-    # so an oversized import can no longer keep V4/V5/V6 from running for days.
-    budget.release()
-    optional_learning(now, budget, issues)
-    if client is not None:
-        optional_discovery(client, now, budget, issues)
-        if end is not None:
-            optional_lifetime(client, now, end, budget, issues)
-    with Session() as s:
-        run = s.get(SyncRun, run_id)
-        run.finished_at, run.issues = utcnow(), issues
-        run.status = "deferred" if deferred else "failed" if any(i.startswith("pipeline:") for i in issues) else "partial" if any(not i.startswith("optional/") for i in issues) else "ok"
-        s.commit()
-        return {"status": run.status, "issues": issues}
+        issues.append(f"optional/v3_predictions: {type(exc).__name__}")
+        log.error("Optional V3 predictions failed (%s); raw data omitted", type(exc).__name__)
 
 
 def optional_learning(now, budget, issues):

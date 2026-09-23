@@ -83,6 +83,7 @@ class SyncRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), default="running")
     issues: Mapped[list] = mapped_column(JSON, default=list)
+    timings: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Forecast(Base):

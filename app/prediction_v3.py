@@ -1,5 +1,5 @@
 """Auditable organic-only learning, chronological validation and honest cold start."""
-from datetime import timedelta
+from datetime import datetime, timedelta
 from math import log1p
 import numpy as np
 import sklearn
@@ -14,6 +14,8 @@ from .organic import eligibility
 from .decisions import recommend
 
 VERSION = "organic-prediction-v3"
+RECHECK_HOURS = 24      # Provenienz wird taeglich neu geprueft, nicht stuendlich.
+RECHECK_LIMIT = 150     # Obergrenze je Lauf: bounded Arbeit statt linear wachsender Kosten (24 Laeufe/Tag reichen fuer taegliche Abdeckung).
 FEATURES = ["velocity","acceleration","ctr","retention","watchtime_efficiency",
             "watch_minutes","subscriber_conversion","traffic_search","traffic_suggested","traffic_external","age_days"]
 REGIMES = ["baseline","rising","breakout","cooling"]
@@ -23,11 +25,29 @@ def vector(f):
     return [float(f.get(k) or 0) for k in FEATURES]+[float(f.get(k) is None) for k in FEATURES]+[float(f.get("growth_assessment",{}).get("regime")==r) for r in REGIMES]
 
 
-def feedback(session, now, budget=None):
+def due_for_recheck(audit, now):
+    """Noch nie geprueft oder letzter Check aelter als RECHECK_HOURS."""
+    checked=(audit.feedback or {}).get("checked_at")
+    if not checked:
+        return True
+    try:
+        return (aware(now)-datetime.fromisoformat(checked)).total_seconds() >= RECHECK_HOURS*3600
+    except ValueError:
+        return True
+
+
+def feedback(session, now, budget=None, limit=RECHECK_LIMIT):
+    """Jede Provenienzpruefung kostet mehrere Datenbank-Roundtrips; deshalb bounded und hoechstens taeglich.
+
+    Gemessen: ohne Begrenzung verursachte dieser Schritt allein ~9.400 Abfragen je Sync und wuchs
+    mit jeder gespeicherten Prognose weiter. Aelteste Pruefung zuerst, damit jede Zeile drankommt.
+    """
     mature(session, now)
     session.flush()
-    rows=session.execute(select(Forecast,PredictionAudit).join(PredictionAudit).where(Forecast.actual_views.is_not(None)))
-    for forecast,audit in rows:
+    rows=session.execute(select(Forecast,PredictionAudit).join(PredictionAudit).where(Forecast.actual_views.is_not(None))
+        .order_by(PredictionAudit.created_at)).all()
+    pending=[(f,a) for f,a in rows if due_for_recheck(a,now)][:limit]
+    for forecast,audit in pending:
         if budget:
             budget.check()
         quality=eligibility(session,forecast,now)
@@ -49,6 +69,12 @@ def training_history(session, cutoff, horizon, content_type, budget=None):
         if budget:
             budget.check()
         if row.features.get("content_type")!=content_type or row.features.get("prediction_version")!=VERSION:
+            continue
+        # Abgeschlossene Pruefung mit negativem Ergebnis: nicht erneut mit mehreren Abfragen pruefen.
+        # Nur ein Eintrag mit checked_at ist ein Pruefergebnis; feedback() haelt es taeglich aktuell,
+        # damit spaeter geeignete Zeilen wieder aufgenommen werden. Ungepruefte Zeilen werden voll geprueft.
+        verdict=audit.feedback or {}
+        if verdict.get("checked_at") and verdict.get("status")!="eligible_organic":
             continue
         # Recheck provenance as of this origin. Later corrected paid reports invalidate old eligibility.
         if eligibility(session,row,cutoff)["status"]!="eligible_organic":
