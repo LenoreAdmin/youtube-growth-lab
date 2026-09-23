@@ -51,12 +51,13 @@ def scorecard(session):
         rows = list(session.scalars(select(AnalyticsForecast).where(AnalyticsForecast.horizon_hours == h,
             AnalyticsForecast.eligibility == "eligible_organic")))
         if not rows:
-            out[str(h)] = {"n": 0, "status": "insufficient_data"}
+            out[str(h)] = {"n": 0, "never_validated": True, "status": "insufficient_data",
+                           "note": "Noch keine Live-Prognose ausgewertet: Modellgüte stammt ausschließlich aus dem Backtest."}
             continue
         model = sum(abs(r.actual_views-r.predicted_views) for r in rows)/len(rows)
         base = sum(abs(r.actual_views-r.baseline_views) for r in rows)/len(rows)
         interval = [r for r in rows if r.lower_views is not None]
-        out[str(h)] = {"n": len(rows), "model_mae": model, "baseline_mae": base,
+        out[str(h)] = {"n": len(rows), "never_validated": False, "model_mae": model, "baseline_mae": base,
                        "interval_hit_rate": sum(r.lower_views <= r.actual_views <= r.upper_views for r in interval)/len(interval) if interval else None,
                        "interval_n": len(interval),
                        "live_fallback": len(rows) >= LIVE_FALLBACK_MIN and model > base,
@@ -221,7 +222,12 @@ def overview(session, now=None):
     per_horizon = {}
     for h, bt in backtests.items():
         r = bt.result
+        champion_metrics = (r.get("models") or {}).get(bt.champion) or {}
+        baseline_metrics = (r.get("models") or {}).get(r.get("best_baseline")) or {}
         per_horizon[str(h)] = {"champion": bt.champion, "accepted": bt.accepted, "status": r.get("status"), "n_rows": r.get("n_rows"),
+            "mae_views": champion_metrics.get("mae"), "baseline_mae_views": baseline_metrics.get("mae"),
+            "mae_video_balanced_views": champion_metrics.get("mae_video_balanced"),
+            "scale_note": "MAE in Views je Horizont – absolute Größe beachten, nicht nur die relative Verbesserung.",
             "n_origins": r.get("n_origins"), "n_videos": r.get("n_videos"), "validation_scope": r.get("validation_scope"),
             "cross_video": r.get("cross_video"), "folds": len(r.get("folds", [])), "models": r.get("models", {}),
             "best_baseline": r.get("best_baseline"), "residual_quantiles": r.get("residual_quantiles"),

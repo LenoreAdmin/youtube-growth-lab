@@ -18,6 +18,7 @@ from . import backfill as backfill_module
 from . import learning as learning_module
 from . import growth_engine as growth_module
 from . import discovery as discovery_module
+from . import monitor as monitor_module
 
 app = FastAPI(title="YouTube Growth Lab", version="0.1.0")
 security = HTTPBearer(auto_error=False)
@@ -54,7 +55,9 @@ def index():
 @app.get("/health")
 def health(s=Depends(db)):
     s.execute(text("SELECT 1"))
-    return {"status": "ok"}
+    # Only the level, never details: this endpoint is unauthenticated but must expose a
+    # standstill so PC-off operation can be monitored externally.
+    return {"status": "ok", "jobs": monitor_module.health(s)["level"]}
 
 
 def cron_authenticate(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
@@ -76,6 +79,41 @@ def cron_sync():
         return JSONResponse({"status": "failed", "detail": "Sync unavailable; check server configuration."}, status_code=503)
     code = 503 if result["status"] in ("failed", "partial") else 200
     return JSONResponse(result, status_code=code)
+
+
+@app.get("/api/cron/jobs", dependencies=[Depends(cron_authenticate)], include_in_schema=False)
+def cron_jobs():
+    """V4/V5/V6 on their own schedule and lease: a saturated core import cannot starve them."""
+    if settings.vercel_env == "preview":
+        raise HTTPException(403, "Jobs are disabled in preview deployments.")
+    from .budget import Budget, SyncBudgetExceeded
+    from .jobs import acquire, release
+    bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+    owner, skipped = acquire(Session, bucket, "youtube-jobs")
+    if skipped:
+        return JSONResponse({"status": skipped}, status_code=200)
+    result = {"status": "ok", "learning": None, "discovery": None, "issues": []}
+    try:
+        budget = Budget(settings.sync_budget_seconds)
+        try:
+            with Session() as session:
+                result["learning"] = learning_module.refresh(session, utcnow(), budget).get("status")
+        except SyncBudgetExceeded:
+            result["learning"] = "deferred"
+        except Exception as exc:
+            result["issues"].append(f"learning: {type(exc).__name__}")
+        try:
+            from .youtube import YouTube
+            result["discovery"] = discovery_module.run(YouTube(budget=budget), utcnow(), budget).get("status")
+        except SyncBudgetExceeded:
+            result["discovery"] = "deferred"
+        except Exception as exc:
+            result["issues"].append(f"discovery: {type(exc).__name__}")
+    finally:
+        release(Session, owner, bucket, "youtube-jobs")
+    if result["issues"]:
+        result["status"] = "partial"
+    return JSONResponse(result, status_code=503 if len(result["issues"]) > 1 else 200)
 
 
 @app.post("/api/sync", dependencies=[Depends(authenticate)])
@@ -177,6 +215,7 @@ def dashboard(s=Depends(db)):
     evaluated = list(s.scalars(select(Forecast).where(Forecast.actual_views.is_not(None))))
     return {"channels": jsonable_encoder(channels), "videos": dashboard_rows(s),
             "sync": jsonable_encoder(run), "demo": any(c.id.startswith("DEMO") for c in channels),
+            "health": jsonable_encoder(monitor_module.health(s)),
             "backfill": jsonable_encoder(backfill_module.summary(s)),
             "learning_v4": jsonable_encoder(learning_module.overview(s)),
             "growth_v5": jsonable_encoder(growth_module.overview(s)),

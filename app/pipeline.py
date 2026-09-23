@@ -15,6 +15,7 @@ from .budget import Budget, SyncBudgetExceeded
 from .jobs import acquire, release
 
 log = logging.getLogger(__name__)
+OPTIONAL_RESERVE_SECONDS = 90  # Withheld from the core import so V4/V5/V6 always get a slot.
 METRICS = "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost,likes,comments"
 
 
@@ -149,7 +150,7 @@ def collect(client=None, bucket=None):
         return {"status": skipped}
     result = None
     try:
-        budget = Budget(settings.sync_budget_seconds)
+        budget = Budget(settings.sync_budget_seconds, reserve=OPTIONAL_RESERVE_SECONDS)
         result = _collect(client, budget)
         return result
     finally:
@@ -160,6 +161,7 @@ def collect(client=None, bucket=None):
 def _collect(client, budget=None):
     budget = budget or Budget(settings.sync_budget_seconds)
     issues, now, deferred = [], utcnow(), False
+    end = None
     with Session() as s:
         run = SyncRun()
         s.add(run)
@@ -305,16 +307,20 @@ def _collect(client, budget=None):
                         s.add(predict(s, video.id, origin, f, h, budget=budget))
                 s.commit()
             s.commit()
-        # Optional steps are last: all core results are already committed.
-        optional_learning(now, budget, issues)
-        optional_discovery(client, now, budget, issues)
-        optional_lifetime(client, now, end, budget, issues)
     except SyncBudgetExceeded:
         deferred = True
         issues.append("Zeitbudget erreicht; gespeicherter Fortschritt wird beim nÃ¤chsten Cron fortgesetzt.")
     except Exception as exc:
         issues.append(f"pipeline: {type(exc).__name__}")
         log.error("Collection failed (%s); secrets and raw API responses omitted", type(exc).__name__)
+    # Optional phase runs even after a deferred core: its seconds were reserved up front,
+    # so an oversized import can no longer keep V4/V5/V6 from running for days.
+    budget.release()
+    optional_learning(now, budget, issues)
+    if client is not None:
+        optional_discovery(client, now, budget, issues)
+        if end is not None:
+            optional_lifetime(client, now, end, budget, issues)
     with Session() as s:
         run = s.get(SyncRun, run_id)
         run.finished_at, run.issues = utcnow(), issues

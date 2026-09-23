@@ -54,7 +54,9 @@ def test_dashboard_exposes_discovery_and_video_detail_audience(client, session, 
     learning.refresh(session, NOW)
     session.expire_all()
     view = client.get("/api/discovery", headers=headers).json()
-    assert view["best"]["kind"] in ("search", "suggested", "cluster") and view["top"] and view["quota"]["units_used"] > 0
+    # Quota is counted per Pacific day of the run, not of the request: assert the run, not today.
+    assert view["best"]["kind"] in ("search", "suggested", "cluster") and view["top"]
+    assert view["last_run"]["units_used"] > 0 and view["quota"]["daily_limit"] == discovery.DAILY_UNITS
     assert view["per_video"]["a"]["score"] is not None
     dashboard = client.get("/api/dashboard", headers=headers).json()
     assert dashboard["discovery_v6"]["day"] == view["day"]

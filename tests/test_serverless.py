@@ -187,7 +187,8 @@ def test_vercel_config_matches_route_budget_and_entrypoint():
     from pathlib import Path
     import tomllib
     value=json.loads(Path("vercel.json").read_text(encoding="utf-8-sig"))
-    assert value["crons"] == [{"path":"/api/cron/sync","schedule":"0 * * * *"}]
+    assert value["crons"] == [{"path":"/api/cron/sync","schedule":"0 * * * *"},
+                              {"path":"/api/cron/jobs","schedule":"30 * * * *"}]
     assert value["functions"]["app/main.py"]["maxDuration"] == 300
     project=tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8-sig"))
     assert project["tool"]["vercel"]["entrypoint"] == "app.main:app"

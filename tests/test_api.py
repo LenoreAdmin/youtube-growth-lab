@@ -29,7 +29,9 @@ def test_invalid_memory_rejected(client):
     assert client.post("/api/memory",json={},headers={"Authorization":"Bearer test-token-only"}).status_code == 422
 
 def test_health(client):
-    assert client.get("/health").json() == {"status":"ok"}
+    body=client.get("/health").json()
+    # Unauthenticated liveness plus a job-standstill level, without leaking any detail.
+    assert body["status"]=="ok" and body["jobs"] in ("ok","warn","critical") and set(body)=={"status","jobs"}
 
 
 def test_experiment_changes_are_authenticated_append_only(client,session):

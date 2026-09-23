@@ -17,8 +17,8 @@ import isodate
 from sqlalchemy import select, func
 from googleapiclient.errors import HttpError
 from .db import Session
-from .models import (Video, DiscoveryRun, DiscoveryQuota, DiscoveryQuery, DiscoveryItem, DiscoveryChannel, DiscoverySignal,
-                     DiscoveryOpportunity, LearningDataset, utcnow)
+from .models import (Video, TrafficDaily, DiscoveryRun, DiscoveryQuota, DiscoveryQuery, DiscoveryItem, DiscoveryChannel,
+                     DiscoverySignal, DiscoveryOpportunity, LearningDataset, utcnow)
 from .backfill import upsert, classify as classify_error
 from .budget import Budget, SyncBudgetExceeded
 from .jobs import acquire, release
@@ -35,6 +35,10 @@ MAX_SEARCHES_PER_RUN = 8
 REPROBE_DAYS, FAIL_BACKOFF_DAYS, CHANNEL_REFRESH_DAYS = 7, 3, 30
 SIGNAL_WINDOW_DAYS = 90
 MEMORY_DAYS = 28
+MIN_SEED_TOKENS = 2        # Single generic words ("pop", "note") are not search intents.
+MIN_RELEVANCE = 0.34       # Seed relevance is a filter only, never positive evidence.
+PROXY_SCORE_CAP = 45       # Proxy-only chances must not look like validated demand.
+EVIDENCE_LEVELS = ("own_analytics", "probe", "none")
 SOURCE_KINDS = {"YT_SEARCH": "own_search_term", "RELATED_VIDEO": "own_suggested_source", "EXT_URL": "own_external"}
 GAPS = ["existing_video_opportunity", "packaging_opportunity", "search_opportunity", "suggested_opportunity",
         "followup_content_opportunity", "insufficient_evidence"]
@@ -43,7 +47,8 @@ STOPWORDS = BRAND | {"official", "video", "music", "musik", "feat", "ft", "the",
     "von", "for", "with", "you", "your", "our", "new", "neu", "hd", "4k", "full", "mix", "remix", "audio", "lyrics", "lyric", "song",
     "songs", "version", "edit", "live", "vs", "aus", "auf", "für", "im", "in", "zu", "am", "an", "of", "to", "on", "at", "by", "is",
     "are", "was", "der", "den", "dem", "des", "es", "ist", "top", "best", "beste", "hours", "hour", "stunden", "min", "part", "teil"}
-SCORE_NOTE = "Relativer Priorisierungswert (0–100) aus verfügbaren Komponenten; keine Wahrscheinlichkeit, kein Suchvolumen."
+SCORE_NOTE = ("Relativer Priorisierungswert (0–100) aus verfügbaren Komponenten; keine Wahrscheinlichkeit, kein Suchvolumen. "
+              f"Ohne eigene Analytics-Nachfrage bei {PROXY_SCORE_CAP} gedeckelt; die Seed-Relevanz ist zirkulär und wird nicht gewertet.")
 CAPABILITIES = [
     {"source": "Eigene Analytics: insightTrafficSourceDetail (Suchbegriffe, empfehlende Videos, externe URLs)", "status": "genutzt",
      "note": "Reale Nachfrage-Evidenz für eigene Videos; bestehender Analytics-Scope, keine Data-API-Quota; max. 25 Zeilen je Abfrage."},
@@ -122,6 +127,9 @@ def seed_queries(session, videos, tags_by_video, today):
     def add(query, source, video_id, priority):
         key = normalize(query)
         if len(key) < 3:
+            return
+        # Real own search terms may be single words; generated title/tag words may not.
+        if source != "own_search_term" and len(key.split()) < MIN_SEED_TOKENS:
             return
         current = candidates.get(key)
         if current is None or priority > current["priority"]:
@@ -362,16 +370,24 @@ def _run(client, now, budget, force):
 
 
 # ----------------------------------------------------------------------------- analysis
-def _component(name, signal, weight, value=None, note=None, proxy=False):
+def _component(name, signal, weight, value=None, note=None, proxy=False, scoring=True):
     return {"name": name, "signal": None if signal is None else round(float(signal), 4), "weight": weight, "value": value,
-            "available": signal is not None, "note": note, "evidence": "proxy" if proxy else "own_analytics"}
+            "available": signal is not None, "note": note, "evidence": "proxy" if proxy else "own_analytics",
+            "scoring": scoring}
 
 
 def _score(components):
-    usable = [c for c in components if c["available"]]
+    usable = [c for c in components if c["available"] and c.get("scoring", True)]
     if not usable:
         return None
     return round(50+50*sum(c["weight"]*c["signal"] for c in usable)/sum(c["weight"] for c in usable), 1)
+
+
+def grade(score, level):
+    """Cap proxy-only chances and drop those without any independent evidence."""
+    if level == "none" or score is None:
+        return None
+    return round(min(PROXY_SCORE_CAP, score), 1) if level != "own_analytics" else score
 
 
 def _latest_signals(session, kind):
@@ -486,7 +502,8 @@ def analyze(session, now):
         real_views = sum(views for per in search_signals.values() for term, views in per.items() if normalize(term) == key)
         real_ok = real_views > 0 and vid is not None and not paid_note(vid)
         comps = [
-            _component("Relevanz zum Sealand-Video (Token-Abdeckung)", 2*relevance-1, 3, relevance, "Anteil der Suchbegriffs-Wörter im Vokabular des passenden Videos"),
+            _component("Relevanz zum Sealand-Video (Token-Abdeckung)", 2*relevance-1, 3, relevance,
+                       "Zirkulär: Seeds stammen aus dem eigenen Titel/Tags – nur Filter, wird nicht gewertet", scoring=False),
             _component("Eigene Views aus diesem Suchbegriff (90 Tage, real)", (2*real_views/max_search_views-1) if real_ok else None, 3, real_views if real_views else None,
                        "Werbephase: nicht als organische Nachfrage gewertet" if (real_views and vid and paid_note(vid)) else None),
             _component("Nachfrage-Proxy: Median-Views der Top-Ergebnisse", tanh((log10(results["median_views"]+1)-4)/1.5) if results.get("median_views") is not None else None, 1.5,
@@ -500,8 +517,10 @@ def analyze(session, now):
         score = _score(comps)
         if score is not None:
             score = round(min(100, score*weights.get("search", 1.0)), 1)
+        level = "own_analytics" if real_ok else ("probe" if results.get("n") else "none")
+        score = grade(score, level)
         missing_tokens = [t for t in qt if vid and t not in ctx[vid]["title_tokens"] and t not in BRAND]
-        if score is None or (relevance < .25 and not real_ok):
+        if score is None or (relevance < MIN_RELEVANCE and not real_ok):
             gap = "insufficient_evidence"
         elif relevance >= .5 and results.get("n") and not results.get("our_rank"):
             gap = "existing_video_opportunity"
@@ -509,11 +528,13 @@ def analyze(session, now):
             gap = "packaging_opportunity"
         elif relevance >= .5:
             gap = "search_opportunity"
-        elif relevance >= .25 and (real_ok or (results.get("median_views") or 0) > 10000):
+        elif relevance >= MIN_RELEVANCE and (real_ok or (results.get("median_views") or 0) > 10000):
             gap = "followup_content_opportunity"
         else:
             gap = "insufficient_evidence"
-        evidence = {"demand_source": "own_analytics" if real_ok else "public_proxy", "own_search_views_90d": real_views, "probe": results,
+        evidence = {"demand_source": "own_analytics" if real_ok else "public_proxy", "evidence_level": level,
+                    "actionable": level == "own_analytics", "score_capped": level != "own_analytics",
+                    "own_search_views_90d": real_views, "probe": results,
                     "query_source": source, "missing_title_tokens": missing_tokens, "matched_video_id": vid, "relevance": relevance,
                     "missing": [c["name"] for c in comps if not c["available"]], "paid_status": ctx[vid]["paid"] if vid else None,
                     "uncertainty": "hoch" if sum(c["available"] for c in comps) <= 2 else "mittel" if not results else "moderat",
@@ -545,11 +566,15 @@ def analyze(session, now):
         score = _score(comps)
         if score is not None:
             score = round(min(100, score*weights.get("suggested", 1.0)), 1)
+        level = "own_analytics" if real_ok else ("probe" if (item.views is not None or subs is not None) else "none")
+        score = grade(score, level)
         gap = "suggested_opportunity" if (relevance >= .3 or real_ok) and score is not None else "insufficient_evidence"
         shared = sorted(it & (ctx[vid]["vocab"] if vid else set()))
         label = " ".join(shared[:2]) if shared else (sorted(it)[:1] or ["unbekannt"])[0]
         cluster_members[label].append((ext_id, item, relevance, real_views, vid))
-        evidence = {"demand_source": "own_analytics" if real_ok else "public_proxy", "own_suggested_views_90d": real_views, "title": item.title,
+        evidence = {"demand_source": "own_analytics" if real_ok else "public_proxy", "evidence_level": level,
+                    "actionable": level == "own_analytics", "score_capped": level != "own_analytics",
+                    "own_suggested_views_90d": real_views, "title": item.title,
                     "channel": item.channel_title, "channel_subscribers": subs, "views": item.views, "age_days": age_days, "shared_tokens": shared[:6],
                     "matched_video_id": vid, "relevance": relevance, "missing": [c["name"] for c in comps if not c["available"]],
                     "paid_status": ctx[vid]["paid"] if vid else None, "via": item.via, "baseline_views_for_memory": real_views,
@@ -570,11 +595,15 @@ def analyze(session, now):
         comps = [_component("Mittlere thematische Nähe", 2*rel-1, 3, rel), _component("Mittlere Reichweite (log Views)", tanh((reach-4)/1.5), 1.5, reach, proxy=True),
                  _component("Kanalvielfalt im Cluster", tanh(len(chans)/3-1), 1, len(chans), proxy=True),
                  _component("Eigene Views aus dem Cluster (real)", tanh(real/50) if real and vid and not paid_note(vid) else None, 2, real)]
-        score = _score(comps)
+        level = "own_analytics" if (real and vid and not paid_note(vid)) else "probe"
+        score = grade(_score(comps), level)
         write("cluster", label, vid, "suggested_opportunity" if score and rel >= .3 else "insufficient_evidence",
               {"external_audience_score": score, "subscriber_fit_score": subscriber_fit(vid, rel) if vid else None},
               {"components": comps}, {"members": [{"video_id": m[0], "title": m[1].title, "views": m[1].views} for m in members[:8]], "n_members": len(members),
-                                     "channels": len(chans), "matched_video_id": vid, "relevance": rel, "baseline_views_for_memory": real, "note": SCORE_NOTE})
+                                     "channels": len(chans), "matched_video_id": vid, "relevance": rel, "evidence_level": level,
+                                     "actionable": level == "own_analytics", "score_capped": level != "own_analytics",
+                                     "demand_source": "own_analytics" if level == "own_analytics" else "public_proxy",
+                                     "baseline_views_for_memory": real, "note": SCORE_NOTE})
     session.commit()
     return written
 
@@ -624,10 +653,28 @@ def best_for_video(session, video_id, day=None):
                                                                      DiscoveryOpportunity.gap != "insufficient_evidence")))
     if not rows:
         return None
-    best = max(rows, key=lambda r: r.scores.get("external_audience_score") or 0)
+    best = max(rows, key=lambda r: (bool(r.evidence.get("actionable")), r.scores.get("external_audience_score") or 0))
     return {"kind": best.kind, "key": best.key, "gap": best.gap, "scores": best.scores, "evidence": best.evidence, "day": str(best.day),
             "score": best.scores.get("external_audience_score"), "demand_source": best.evidence.get("demand_source"),
+            "evidence_level": best.evidence.get("evidence_level"), "actionable": bool(best.evidence.get("actionable")),
             "audience": best.evidence.get("title") or best.key, "shared_tokens": best.evidence.get("shared_tokens") or best.evidence.get("missing_title_tokens")}
+
+
+def demand_evidence(session, video_id, terms):
+    """YouTube suppresses search-term detail below a threshold: say so instead of falling back to proxies silently."""
+    if terms:
+        return {"status": "available", "note": None}
+    last = session.scalar(select(func.max(TrafficDaily.day)).where(TrafficDaily.video_id == video_id))
+    search_views = 0
+    if last is not None:
+        search_views = session.scalar(select(func.coalesce(func.sum(TrafficDaily.views), 0)).where(
+            TrafficDaily.video_id == video_id, TrafficDaily.source == "YT_SEARCH",
+            TrafficDaily.day >= last-timedelta(days=SIGNAL_WINDOW_DAYS-1))) or 0
+    if search_views:
+        return {"status": "unavailable_below_api_threshold", "search_views_90d": int(search_views),
+                "note": f"{int(search_views)} Search-Views in 90 Tagen, aber YouTube liefert keine Suchbegriff-Details "
+                        "(Aggregationsschwelle): keine reale Nachfrage-Evidenz verfügbar."}
+    return {"status": "no_search_traffic", "search_views_90d": 0, "note": "Keine Search-Views im Fenster."}
 
 
 def overview(session, now=None):
@@ -645,6 +692,7 @@ def overview(session, now=None):
                 "scores": r.scores, "evidence": r.evidence, "components": r.components, "status": r.status, "outcome": r.outcome, "trend": history})
     opportunities.sort(key=lambda o: -(o["scores"].get("external_audience_score") or 0))
     usable = [o for o in opportunities if o["gap"] != "insufficient_evidence"]
+    actionable = [o for o in usable if o["evidence"].get("actionable")]
     per_video = {vid: best_for_video(session, vid, latest) for vid in videos} if latest else {vid: None for vid in videos}
     _, record = memory_weights(session)
     signals = {}
@@ -653,15 +701,24 @@ def overview(session, now=None):
             DiscoverySignal.window_end == session.scalar(select(func.max(DiscoverySignal.window_end)).where(DiscoverySignal.video_id == vid))).order_by(DiscoverySignal.views.desc()).limit(8)))
         sources = list(session.execute(select(DiscoverySignal.detail, DiscoverySignal.views).where(DiscoverySignal.video_id == vid, DiscoverySignal.kind == "own_suggested_source",
             DiscoverySignal.window_end == session.scalar(select(func.max(DiscoverySignal.window_end)).where(DiscoverySignal.video_id == vid))).order_by(DiscoverySignal.views.desc()).limit(8)))
-        signals[vid] = {"search_terms": [{"term": t, "views": v} for t, v in terms], "suggested_sources": [{"video_id": t, "views": v} for t, v in sources]}
-    return {"version": VERSION, "day": str(latest) if latest else None, "best": usable[0] if usable else None,
-            "top": usable[:12], "insufficient": len(opportunities)-len(usable), "per_video": per_video, "signals": signals,
+        signals[vid] = {"search_terms": [{"term": t, "views": v} for t, v in terms],
+                        "suggested_sources": [{"video_id": t, "views": v} for t, v in sources],
+                        "demand_evidence": demand_evidence(session, vid, terms)}
+    return {"version": VERSION, "day": str(latest) if latest else None, "best": (actionable or usable or [None])[0],
+            "top": usable[:12], "insufficient": len(opportunities)-len(usable), "actionable": len(actionable),
+            "evidence_policy": {"proxy_score_cap": PROXY_SCORE_CAP, "min_seed_tokens": MIN_SEED_TOKENS,
+                                "min_relevance": MIN_RELEVANCE,
+                                "note": "Aktive Empfehlungen verlangen mindestens eine unabhängige Evidenzkomponente "
+                                        "(eigene Analytics-Nachfrage); Proxy-Chancen bleiben Hypothesen."},
+            "per_video": per_video, "signals": signals,
             "clusters": [o for o in opportunities if o["kind"] == "cluster"][:8],
             "last_run": {"day": str(run_row.day), "status": run_row.status, "units_used": run_row.units_used, "issues": run_row.issues, "stats": run_row.stats,
                          "finished_at": run_row.finished_at} if run_row else None,
             "quota": {"day": str(pacific_day(now)), "units_used": quota.units if quota else 0, "daily_limit": DAILY_UNITS, "search_cost": SEARCH_COST},
             "memory": record, "capabilities": CAPABILITIES, "gaps": GAPS,
-            "limits": ["Externe öffentliche Daten erhöhen n_videos nicht; interne Generalisierung bleibt low/insufficient.",
+            "limits": [f"Proxy-only Chancen sind bei {PROXY_SCORE_CAP} gedeckelt und lösen keine aktive Maßnahme aus.",
+                       "Die Seed-Relevanz ist zirkulär (Seeds stammen aus eigenem Titel/Tags) und wird nicht als Evidenz gewertet.",
+                       "Externe öffentliche Daten erhöhen n_videos nicht; interne Generalisierung bleibt low/insufficient.",
                        "Nachfrage aus Such-Proben ist ein Proxy (Ergebnis-Reichweite), kein Suchvolumen.",
                        "Fremde Erfolge werden nicht kausal erklärt und nicht kopiert; Nachbarvideos sind Audience-Signale.",
                        "Werbephasen liefern keine organische Nachfrage-Evidenz."], "read_only": True}

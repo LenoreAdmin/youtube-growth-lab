@@ -14,6 +14,7 @@ from .backfill import upsert
 from .history import pacific_day, lag_days, features_at, paid_profile, PAID_WINDOW_DAYS
 from .metrics import aware
 from .strategy import confidence as v4_confidence, NO_MANIPULATION, GENERALIZATION_NOTE
+from .regimes import usable_median
 from .discovery import best_for_video as external_opportunity
 
 VERSION = "growth-v5"
@@ -67,7 +68,7 @@ def _rank_signal(value, quantiles, low="q25", high="q75", cap="q95"):
 def _median_signal(f, base, key, higher_is_good=True):
     ref = base.get("medians", {}).get(key, {})
     value = f.get(key)
-    if value is None or ref.get("median") is None or ref.get("n", 0) < 30:
+    if value is None or not usable_median(ref):
         return None, ref
     center = ref["median"]
     signal = tanh((value-center)/center) if center else (0.5 if value > 0 else 0.0)
@@ -155,6 +156,9 @@ def scores(f, regime, base, forecasts, momentum, peak, external=None):
     uplift, width, weekly = forecast_uplift(forecasts)
     forecast = None if uplift is None else tanh(uplift)
     uncertainty = None if width is None else -min(1.0, width/4)
+    if regime.get("low_activity"):
+        # Tempo, Beschleunigung, Regime und Prognose sind bei dieser Menge Rauschen: nicht bewerten.
+        pace = accel = regime_signal = forecast = uncertainty = live = None
     age = f.get("age_days")
     age_signal = None if age is None else (.3 if age <= 90 else 0.0 if age <= 365 else -.1)
     peak_signal = None
@@ -250,10 +254,10 @@ def revival(f, regime, base, peak):
     med = base.get("medians", {})
     def above(key):
         ref = med.get(key, {})
-        return ref.get("median") is not None and ref.get("n", 0) >= 30 and f.get(key) is not None and f[key] > ref["median"]
+        return usable_median(ref) and f.get(key) is not None and f[key] > ref["median"]
     def below(key):
         ref = med.get(key, {})
-        return ref.get("median") is not None and ref.get("n", 0) >= 30 and f.get(key) is not None and f[key] < ref["median"]
+        return usable_median(ref) and f.get(key) is not None and f[key] < ref["median"]
     if above("traffic_search"):
         signals.append("Search-Anteil über Kanalmedian")
     if above("traffic_suggested") or above("traffic_browse"):
@@ -277,7 +281,12 @@ def state_of(f, regime, base, rev):
     if status == "paid_excluded":
         paid, _ = paid_state(f)
         return "paid_excluded" if paid == "paid_excluded" else "paid_cooldown"
-    if status == "insufficient_data" or f is None:
+    if f is None:
+        return "insufficient_data"
+    if regime.get("low_activity"):
+        # Belegte Distributionslücke statt Rauschen-Momentum: handlungsfähig, aber nie geschützt.
+        return "needs_discovery"
+    if status == "insufficient_data":
         return "insufficient_data"
     if status in PROTECT_REGIMES:
         return "protect_momentum"
@@ -288,14 +297,14 @@ def state_of(f, regime, base, rev):
     med = base.get("medians", {})
     def below(key):
         ref = med.get(key, {})
-        return ref.get("median") is not None and ref.get("n", 0) >= 30 and f.get(key) is not None and f[key] < ref["median"]
+        return usable_median(ref) and f.get(key) is not None and f[key] < ref["median"]
     if status == "declining" and (below("retention_avg") or below("pct_7d")):
         return "needs_retention_analysis"
     if status == "declining" and (below("ctr_7d") or f.get("ctr_7d") is None):
         return "needs_packaging_test"
     share = discovery_share(f)
     ref = [med.get(k, {}) for k in DISCOVERY_KEYS]
-    if share is not None and all(r.get("median") is not None and r.get("n", 0) >= 30 for r in ref) and share < sum(r["median"] for r in ref)*0.8:
+    if share is not None and all(usable_median(r) for r in ref) and share < sum(r["median"] for r in ref)*0.8:
         return "needs_discovery"
     return "observe"
 
@@ -326,10 +335,11 @@ def choose_action(state, f, rev, base, experiments, record, external=None):
         action = "protect_no_change"
     elif running:
         action, notes = "observe", [f"Experiment #{running[0]['decision_id']} läuft – erst messen, keine weitere Änderung stapeln."]
-    elif external and (external.get("score") or 0) >= EXTERNAL_MIN_SCORE and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS:
+    elif (external and external.get("actionable") and (external.get("score") or 0) >= EXTERNAL_MIN_SCORE
+            and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS):
         action = "revive_existing_video" if state == "revival_candidate" and external["gap"] != "packaging_opportunity" else GAP_ACTIONS[external["gap"]]
-        notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Nachfrage: "
-                 f"{'eigene Analytics' if external.get('demand_source') == 'own_analytics' else 'öffentlicher Proxy'}) lenkt die Aktion."]
+        notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Evidenz: "
+                 f"{external.get('evidence_level')}) lenkt die Aktion."]
     elif state == "scale_opportunity":
         action = "cross_promote"
     elif state == "needs_retention_analysis":
@@ -526,7 +536,9 @@ def run(session, now, contexts, base, budget=None):
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})
         pending = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == "pending")
                                  .order_by(GrowthAction.created_day.desc()))
-        if pending and state not in ("protect_momentum", "paid_excluded", "paid_cooldown") and pending.action != "protect_no_change":
+        # Only a real change-action is held until its evaluation; passive states are re-decided daily,
+        # otherwise a pending "observe" would block every later opportunity for 7+lag days.
+        if pending and pending.action not in PASSIVE_ACTIONS and state not in ("protect_momentum", "paid_excluded", "paid_cooldown"):
             action, notes = pending.action, [f"Aktion vom {pending.created_day} läuft noch bis zur Auswertung; keine tägliche Kurskorrektur."]
             details = {**pending.payload, "notes": notes, "held_since": str(pending.created_day)}
         else:
@@ -561,6 +573,7 @@ def run(session, now, contexts, base, budget=None):
             "held_since": details.get("held_since"), "momentum": momentum,
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
                          "audience": external.get("audience"), "demand_source": external.get("demand_source"),
+                         "evidence_level": external.get("evidence_level"), "actionable": bool(external.get("actionable")),
                          "subscriber_fit": (external.get("scores") or {}).get("subscriber_fit_score")} if external else None})
     ranking.sort(key=lambda r: (r["opportunity_score"] is None, -(r["opportunity_score"] or 0), -(r["viewer_score"] or 0)))
     # Paid history and current paid state must remain auditable even where scores exist.
@@ -594,9 +607,7 @@ def active_priority_score(row):
 
 def active_eligible(row):
     """Only organic, changeable videos with a concrete measure may carry active priority; protection is never overridden."""
-    if row["state"] in INACTIVE_STATES or row["action"] in PASSIVE_ACTIONS:
-        return False
-    return row.get("opportunity_score") is not None
+    return row["state"] not in INACTIVE_STATES and row["action"] not in PASSIVE_ACTIONS
 
 
 def daily_plan(ranking, today, record):
@@ -657,6 +668,7 @@ def daily_plan(ranking, today, record):
     external_block = {"available": bool(ext), "score": ext.get("score") if ext else None, "kind": ext.get("kind") if ext else None,
                       "key": ext.get("key") if ext else None, "gap": ext.get("gap") if ext else None, "audience": ext.get("audience") if ext else None,
                       "demand_source": ext.get("demand_source") if ext else None, "subscriber_fit": ext.get("subscriber_fit") if ext else None,
+                      "evidence_level": ext.get("evidence_level") if ext else None, "actionable": bool(ext and ext.get("actionable")),
                       "note": "Externe Nachfrage-Signale sind Proxies, außer sie stammen aus eigenen Analytics."}
     combined = (f"Aktive Growth-Priorität #1: {top['title']} – interner Zustand {top['state']}"
                 + (f" + externe Chance „{ext['key']}“ ({ext['demand_source']})" if ext else " ohne externe Chance") + f" → {top['action']}."
@@ -672,7 +684,19 @@ def daily_plan(ranking, today, record):
             "confidence": top["confidence"]}
 
 
-def overview(session):
+def live_paid_profiles(session, now=None):
+    """Paid status recomputed from current data; a stored profile can be days behind."""
+    from .history import load as load_histories
+    today = pacific_day(now or utcnow())
+    return {h.video.id: paid_profile(h, today) for h in load_histories(session)}
+
+
+def overview(session, now=None):
+    try:
+        live = live_paid_profiles(session, now)
+    except Exception:
+        # Der Lesepfad darf nie am Neuberechnen scheitern; gespeicherte Werte bleiben sichtbar.
+        live = {}
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.day.desc(), GrowthPlan.id.desc()))
     actions = {}
     for row in session.scalars(select(GrowthAction).order_by(GrowthAction.created_day.desc())):
@@ -684,7 +708,9 @@ def overview(session):
         row = session.scalar(select(GrowthScore).where(GrowthScore.video_id == video.id).order_by(GrowthScore.day.desc()))
         if row:
             scores_by_video[video.id] = {"day": row.day, "state": row.state, "action": row.action, "opportunity": row.opportunity,
-                                         "viewer": row.viewer, "subscriber": row.subscriber, "revival": row.revival, "momentum": row.momentum}
+                                         "viewer": row.viewer, "subscriber": row.subscriber, "revival": row.revival, "momentum": row.momentum,
+                                         "paid_live": live.get(video.id), "paid_stored": (row.momentum or {}).get("paid")}
     return {"version": VERSION, "plan": plan.plan if plan else None, "plan_day": plan.day if plan else None,
+            "paid_live": live,
             "scores": scores_by_video, "actions": {k: v[:10] for k, v in actions.items()}, "track_record": track_record(session),
             "states": STATES, "actions_catalog": ACTIONS, "read_only": True}

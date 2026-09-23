@@ -131,7 +131,10 @@ def test_run_writes_scores_actions_plan_and_holds_actions_until_evaluated(monkey
     assert session.scalar(select(func.count()).select_from(GrowthPlan)) == 2
     latest = session.scalar(select(GrowthPlan).order_by(GrowthPlan.day.desc())).plan
     held = next(r for r in latest["ranking"] if r["video_id"] == "a")
-    if first["a"].action != "protect_no_change":
+    if first["a"].action in ge.PASSIVE_ACTIONS:
+        # Passive Aktionen werden taeglich neu entschieden und sperren nichts.
+        assert held.get("held_since") is None
+    else:
         assert held["action"] == first["a"].action and held["held_since"] == str(TODAY)
     view = ge.overview(session)
     assert view["plan"]["priority_video_id"] and view["scores"]["a"]["opportunity"]["components"] and view["read_only"] is True

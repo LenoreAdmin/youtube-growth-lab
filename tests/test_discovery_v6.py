@@ -152,9 +152,12 @@ def test_opportunities_are_classified_with_evidence_and_paid_is_never_demand(mon
     discovery.run(DiscoveryClient(), NOW)
     session.expire_all()
     rows = {(r.kind, r.key): r for r in session.scalars(select(DiscoveryOpportunity).where(DiscoveryOpportunity.day == TODAY))}
-    search = rows[("search", "trainstories")]  # brand-free title probe: Trainstories ranks, demand only a public proxy
-    assert search.video_id == "a" and search.gap in ("search_opportunity", "packaging_opportunity")
-    assert search.evidence["demand_source"] == "public_proxy" and search.evidence["probe"]["n"] == 3 and search.evidence["probe"]["our_rank"] == 2
+    # Generische Ein-Wort-Seeds aus Titel/Tags werden nicht mehr geprobt.
+    assert ("search", "trainstories") not in rows and ("search", "journey") not in rows
+    branded = rows[("search", "sealand trainstories")]  # echter eigener Suchbegriff mit 30 Views
+    assert branded.video_id == "a" and branded.evidence["evidence_level"] == "own_analytics"
+    assert branded.evidence["actionable"] is True and branded.evidence["score_capped"] is False
+    assert branded.evidence["probe"]["n"] == 3 and branded.evidence["probe"]["our_rank"] == 2
     real = rows[("search", "train journey")]  # "train journey music" normalises to this key: real own search views
     assert real.video_id == "a" and real.evidence["demand_source"] == "own_analytics" and real.evidence["own_search_views_90d"] == 40
     assert real.gap == "existing_video_opportunity"  # relevant, but Trainstories is not in the top results
@@ -168,14 +171,22 @@ def test_opportunities_are_classified_with_evidence_and_paid_is_never_demand(mon
     # Shine On is in paid cooldown: its own search views exist but are not used as organic demand evidence.
     shine = rows[("search", "shine acoustic")]
     assert shine.video_id == "b" and shine.evidence["paid_status"] == "paid_cooldown" and shine.evidence["demand_source"] == "public_proxy"
+    # Proxy-only: gedeckelt, nicht handlungsauslösend.
+    assert shine.evidence["evidence_level"] == "probe" and shine.evidence["actionable"] is False
+    assert shine.scores["search_opportunity_score"] <= discovery.PROXY_SCORE_CAP
     demand = next(c for c in shine.components["components"] if c["name"].startswith("Eigene Views aus diesem Suchbegriff"))
     assert demand["available"] is False and "Werbephase" in (demand["note"] or "")
     assert all(0 <= (r.scores.get("external_audience_score") or 0) <= 100 for r in rows.values())
     assert all("keine Wahrscheinlichkeit" in (r.evidence.get("note") or "") for r in rows.values())
     best = discovery.best_for_video(session, "a")
     assert best and best["score"] is not None and best["gap"] != "insufficient_evidence"
+    assert best["actionable"] is True and best["evidence_level"] == "own_analytics"
     view = discovery.overview(session, NOW)
     assert view["best"]["video_id"] in ("a", "b") and view["quota"]["units_used"] > 0 and view["capabilities"]
+    assert view["best"]["evidence"]["actionable"] is True and view["actionable"] >= 1
+    assert view["evidence_policy"]["proxy_score_cap"] == discovery.PROXY_SCORE_CAP
+    assert view["signals"]["Ppg00gw0MxE" if "Ppg00gw0MxE" in view["signals"] else "a"]["demand_evidence"]["status"] in (
+        "available", "unavailable_below_api_threshold", "no_search_traffic")
     assert any(c["status"] == "nicht genutzt" and "Trends" in c["source"] for c in view["capabilities"])
     assert view["signals"]["a"]["search_terms"][0]["term"] == "train journey music"
 
@@ -183,9 +194,12 @@ def test_opportunities_are_classified_with_evidence_and_paid_is_never_demand(mon
 def test_external_opportunity_steers_v5_action_but_never_overrides_protection():
     base = {"status": "ok", "medians": {}}
     f = {"ctr_7d": None, "age_days": 400}
-    strong = {"score": 72, "kind": "search", "key": "train journey music", "gap": "existing_video_opportunity", "demand_source": "own_analytics", "audience": "train journey music"}
+    strong = {"score": 72, "kind": "search", "key": "train journey music", "gap": "existing_video_opportunity",
+              "demand_source": "own_analytics", "evidence_level": "own_analytics", "actionable": True, "audience": "train journey music"}
     action, notes = ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong)
-    assert action == "target_search_opportunity" and "eigene Analytics" in notes[0]
+    assert action == "target_search_opportunity" and "own_analytics" in notes[0]
+    # Proxy-only Chance (keine unabhaengige Evidenz) loest niemals eine aktive Massnahme aus.
+    assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "actionable": False, "evidence_level": "probe"})[0] == "observe"
     assert ge.choose_action("needs_discovery", f, {"signals": []}, base, [], {}, {**strong, "gap": "suggested_opportunity", "kind": "suggested"})[0] == "target_suggested_cluster"
     assert ge.choose_action("needs_packaging_test", f, {"signals": []}, base, [], {}, {**strong, "gap": "packaging_opportunity"})[0] == "packaging_for_audience"
     assert ge.choose_action("revival_candidate", f, {"signals": ["x", "y"]}, base, [], {}, strong)[0] == "revive_existing_video"

@@ -6,7 +6,15 @@ from .history import sample_sizes
 VERSION = "regimes-v4"
 REGIMES = ["declining", "stable", "growing", "accelerating", "breakout_candidate", "breakout", "paid_excluded", "insufficient_data"]
 MIN_BASELINE_ROWS = 100
+MIN_MEDIAN_N = 30
+MIN_WEEKLY_VIEWS = 50   # Below this, momentum/acceleration is noise: never classify a breakout.
 QUANTILES = (5, 25, 50, 75, 90, 95, 99)
+
+
+def usable_median(ref):
+    """A channel median is only a yardstick with enough rows AND a non-zero value."""
+    ref = ref or {}
+    return bool(ref.get("median")) and (ref.get("n") or 0) >= MIN_MEDIAN_N
 
 
 def _weighted(rows, key):
@@ -28,8 +36,11 @@ def baselines(rows):
                 "traffic_browse", "traffic_shorts", "like_rate_7d", "velocity_7d"):
         values, weights = _weighted(rows, key)
         kept = [r for r in rows if r["features"].get(key) is not None]
-        medians[key] = {"median": weighted_quantile(values, weights, .5), "n": len(values),
-                        "n_videos": len({r["video_id"] for r in kept})} if values else {"median": None, "n": 0, "n_videos": 0}
+        entry = {"median": weighted_quantile(values, weights, .5), "n": len(values),
+                 "n_videos": len({r["video_id"] for r in kept})} if values else {"median": None, "n": 0, "n_videos": 0}
+        # A median of 0 (the channel is inactive on most days) is not a threshold anyone can fall below.
+        entry["usable"] = usable_median(entry)
+        medians[key] = entry
     q = lambda values, weights: {f"q{p:02d}": weighted_quantile(values, weights, p/100) for p in QUANTILES} if len(values) else {}
     return {"version": VERSION, "n_rows": len(ratios), "n_origins": sizes["n_origins"], "n_videos": sizes["n_videos"],
             "rows_per_video": sizes["rows_per_video"], "largest_video_share": sizes["largest_video_share"],
@@ -51,6 +62,14 @@ def classify(f, base):
     if base.get("status") != "ok" or f.get("ratio_7_28") is None:
         return {"regime": "insufficient_data", "reason": "Kanal-Baseline noch nicht belastbar oder keine Views im 28-Tage-Fenster.",
                 "version": VERSION, "baseline_n": base.get("n_rows", 0)}
+    views_7d, views_28d = f.get("views_7d"), f.get("views_28d") or 0
+    if views_7d is not None and views_7d < MIN_WEEKLY_VIEWS and views_28d < 4*MIN_WEEKLY_VIEWS:
+        # Absolute activity floor: a video with almost no delivery can never be "accelerating",
+        # so it can never be protected as momentum. The distribution gap is the real finding.
+        return {"regime": "insufficient_data", "low_activity": True, "version": VERSION,
+                "views_7d": views_7d, "views_28d": views_28d, "min_weekly_views": MIN_WEEKLY_VIEWS,
+                "reason": f"Nur {views_7d} Views in 7 und {views_28d} in 28 bekannten Tagen (Schwelle {MIN_WEEKLY_VIEWS}/Woche): "
+                          "Momentum ist auf dieser Menge nicht messbar; keine Breakout-/Beschleunigungseinstufung."}
     r, a = f["ratio_7_28"], f["accel_7d"]
     rq, aq = base["ratio_7_28"], base["accel_7d"]
     sustained = f.get("days_above_28d_last3", 0) >= 3

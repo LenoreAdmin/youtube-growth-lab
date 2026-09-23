@@ -47,7 +47,8 @@ def confidence(base, backtest, quality):
 
 def _compare(f, base, key, label, higher_is_good=True):
     value, ref = f.get(key), base.get("medians", {}).get(key, {})
-    if value is None or ref.get("median") is None or ref["n"] < 30:
+    # A median of 0 or a thin sample is not a yardstick: report the signal as unavailable.
+    if value is None or not ref.get("median") or (ref.get("n") or 0) < 30:
         return None
     delta = value-ref["median"]
     good = delta >= 0 if higher_is_good else delta <= 0
