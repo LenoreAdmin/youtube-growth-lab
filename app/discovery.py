@@ -57,6 +57,13 @@ FAMILIES = {
     "cluster_corroboration": "Mehrere Nachbarvideos verschiedener Kanäle, über mehrere Routen entdeckt",
 }
 OWN_FAMILIES = ("own_term_demand", "own_traffic_mix")
+# Bevor eine fremde Chance den Wortlaut für Beschreibung oder Playlist vorgeben darf, muss das Thema
+# belegt sein. Ein einzelnes gemeinsames Wort ("shine") ist Wortgleichheit, nicht Themengleichheit:
+# "Shine On" und "Shine Jesus Shine" teilen ein Token und sonst nichts.
+MIN_CONTEXT_TOKENS = 2      # mindestens zwei gemeinsame, nicht generische Begriffe
+MIN_CONTEXT_MEMBERS = 3     # oder Bestätigung durch mehrere unabhängige Nachbarvideos
+MIN_CONTEXT_CHANNELS = 2    # aus mindestens zwei verschiedenen Kanälen
+MIN_CONTEXT_RELEVANCE = 0.5
 SOURCE_FOR_KIND = {"search": "YT_SEARCH", "suggested": "RELATED_VIDEO", "cluster": "RELATED_VIDEO"}
 SOURCE_KINDS = {"YT_SEARCH": "own_search_term", "RELATED_VIDEO": "own_suggested_source", "EXT_URL": "own_external"}
 GAPS = ["existing_video_opportunity", "packaging_opportunity", "search_opportunity", "suggested_opportunity",
@@ -455,6 +462,31 @@ def item_routes(item, has_metadata):
     return routes
 
 
+def topical_context(shared_tokens, level, relevance=0.0, members=1, channels=1, own_data=False):
+    """May this chance dictate the wording for description or playlist – or is it only a hypothesis?
+
+    Token overlap is not topical identity. Either our own analytics prove that viewers actually reach
+    us through this term, or several independent neighbour videos from different channels corroborate
+    the same theme with more than one shared word. Everything else stays a hypothesis to be probed.
+    """
+    shared = [t for t in (shared_tokens or []) if t not in BRAND]
+    if level == "own_analytics":
+        return True, "Eigene Analytics belegen, dass Zuschauer über dieses Thema tatsächlich hier ankommen."
+    if len(shared) < MIN_CONTEXT_TOKENS:
+        return False, (f"Nur {len(shared)} gemeinsames Stichwort ({', '.join(shared) or 'keines'}): Wortgleichheit ist keine "
+                       "Themengleichheit – als Hypothese behandeln, nicht als Textvorlage.")
+    if relevance < MIN_CONTEXT_RELEVANCE:
+        return False, f"Themenüberdeckung {relevance:.2f} unter {MIN_CONTEXT_RELEVANCE}: als Hypothese behandeln."
+    if own_data:
+        return True, (f"Eigene Views aus dieser Quelle und {len(shared)} gemeinsame Begriffe "
+                      f"({', '.join(shared[:4])}): thematisch plausibel.")
+    if members < MIN_CONTEXT_MEMBERS or channels < MIN_CONTEXT_CHANNELS:
+        return False, (f"Nur {members} Nachbarvideo(s) aus {channels} Kanal/Kanälen: zu wenig unabhängige Bestätigung "
+                       f"(nötig {MIN_CONTEXT_MEMBERS} aus {MIN_CONTEXT_CHANNELS}) – als Hypothese behandeln.")
+    return True, (f"{members} Nachbarvideos aus {channels} Kanälen teilen {len(shared)} Begriffe "
+                  f"({', '.join(shared[:4])}): thematisch plausibel.")
+
+
 def demand_source(families):
     """Provenance in one word, so no proxy is ever read as measured demand."""
     if "own_term_demand" in families:
@@ -663,6 +695,9 @@ def analyze(session, now):
         level = classify_evidence(families, circular=quality["circular"], generic=quality["generic"])
         score = grade(score, level, level_weights)
         missing_tokens = [t for t in qt if vid and t not in ctx[vid]["title_tokens"] and t not in BRAND]
+        shared_tokens = [t for t in qt if vid and t in ctx[vid]["vocab"] and t not in BRAND]
+        context_usable, context_reason = topical_context(shared_tokens, level, relevance,
+                                                        own_data="own_traffic_mix" in families)
         if score is None or (relevance < MIN_RELEVANCE and not real_ok):
             gap = "insufficient_evidence"
         elif relevance >= .5 and results.get("n") and not results.get("our_rank"):
@@ -679,6 +714,7 @@ def analyze(session, now):
                     "actionable": level in ACTIONABLE_LEVELS, "score_capped": level != "own_analytics",
                     "families": sorted(families), "family_labels": [FAMILIES[f] for f in sorted(families)],
                     "seed_quality": quality, "missing_evidence": missing_evidence(families, quality["generic"]),
+                    "shared_tokens": shared_tokens, "context_usable": context_usable, "context_reason": context_reason,
                     "own_search_views_90d": real_views, "own_source_views_90d": source_views.get(vid, {}) if vid else {},
                     "probe": results,
                     "query_source": source, "missing_title_tokens": missing_tokens, "matched_video_id": vid, "relevance": relevance,
@@ -721,15 +757,18 @@ def analyze(session, now):
         level = classify_evidence(families, circular=False)
         score = grade(score, level, level_weights)
         gap = "suggested_opportunity" if (relevance >= .3 or real_ok) and score is not None else "insufficient_evidence"
-        shared = sorted(it & (ctx[vid]["vocab"] if vid else set()))
+        shared = sorted(t for t in (it & (ctx[vid]["vocab"] if vid else set())) if t not in BRAND)
+        context_usable, context_reason = topical_context(shared, level, relevance, members=1, channels=1,
+                                                        own_data="own_traffic_mix" in families)
         label = " ".join(shared[:2]) if shared else (sorted(it)[:1] or ["unbekannt"])[0]
-        cluster_members[label].append((ext_id, item, relevance, real_views, vid))
+        cluster_members[label].append((ext_id, item, relevance, real_views, vid, shared))
         evidence = {"demand_source": demand_source(families), "evidence_level": level,
                     "actionable": level in ACTIONABLE_LEVELS, "score_capped": level != "own_analytics",
                     "families": sorted(families), "family_labels": [FAMILIES[f] for f in sorted(families)],
                     "missing_evidence": missing_evidence(families),
                     "own_source_views_90d": source_views.get(vid, {}) if vid else {},
                     "own_suggested_views_90d": real_views, "title": item.title,
+                    "context_usable": context_usable, "context_reason": context_reason,
                     "channel": item.channel_title, "channel_subscribers": subs, "views": item.views, "age_days": age_days, "shared_tokens": shared[:6],
                     "matched_video_id": vid, "relevance": relevance, "missing": [c["name"] for c in comps if not c["available"]],
                     "paid_status": ctx[vid]["paid"] if vid else None, "via": item.via, "baseline_views_for_memory": real_views,
@@ -764,6 +803,10 @@ def analyze(session, now):
             families.add("cluster_corroboration")
         level = classify_evidence(families, circular=False)
         score = grade(_score(comps), level, level_weights)
+        # Gemeinsam ist nur, was ALLE Clustermitglieder mit uns teilen: sonst traegt ein Zufallstreffer das Thema.
+        common = sorted(set.intersection(*[set(m[5]) for m in members]) if members else set())
+        context_usable, context_reason = topical_context(common, level, rel, members=len(members), channels=len(chans),
+                                                        own_data="own_traffic_mix" in families)
         write("cluster", label, vid, "suggested_opportunity" if score and rel >= .3 else "insufficient_evidence",
               {"external_audience_score": score, "subscriber_fit_score": subscriber_fit(vid, rel) if vid else None},
               {"components": comps}, {"members": [{"video_id": m[0], "title": m[1].title, "views": m[1].views} for m in members[:8]], "n_members": len(members),
@@ -771,7 +814,8 @@ def analyze(session, now):
                                      "actionable": level in ACTIONABLE_LEVELS, "score_capped": level != "own_analytics",
                                      "families": sorted(families), "family_labels": [FAMILIES[f] for f in sorted(families)],
                                      "missing_evidence": missing_evidence(families), "uncertainty": uncertainty(level, families),
-                                     "demand_source": demand_source(families),
+                                     "demand_source": demand_source(families), "shared_tokens": common,
+                                     "context_usable": context_usable, "context_reason": context_reason,
                                      "baseline_views_for_memory": real, "note": SCORE_NOTE})
     session.commit()
     return written
@@ -822,11 +866,13 @@ def best_for_video(session, video_id, day=None):
                                                                      DiscoveryOpportunity.gap != "insufficient_evidence")))
     if not rows:
         return None
-    best = max(rows, key=lambda r: (bool(r.evidence.get("actionable")), r.scores.get("external_audience_score") or 0))
+    best = max(rows, key=lambda r: (bool(r.evidence.get("actionable")), bool(r.evidence.get("context_usable")),
+                                    r.scores.get("external_audience_score") or 0))
     return {"kind": best.kind, "key": best.key, "gap": best.gap, "scores": best.scores, "evidence": best.evidence, "day": str(best.day),
             "score": best.scores.get("external_audience_score"), "demand_source": best.evidence.get("demand_source"),
             "evidence_level": best.evidence.get("evidence_level"), "actionable": bool(best.evidence.get("actionable")),
             "families": best.evidence.get("families") or [], "family_labels": best.evidence.get("family_labels") or [],
+            "context_usable": bool(best.evidence.get("context_usable")), "context_reason": best.evidence.get("context_reason"),
             "missing_evidence": best.evidence.get("missing_evidence") or [], "uncertainty": best.evidence.get("uncertainty"),
             "seed_quality": best.evidence.get("seed_quality"), "members": (best.evidence.get("members") or [])[:5],
             "channel": best.evidence.get("channel"), "own_source_views_90d": best.evidence.get("own_source_views_90d") or {},

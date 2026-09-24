@@ -107,11 +107,26 @@ def test_distribution_comes_first_when_the_package_already_works():
     assert d["target_metric"] == "discovery_views_7d" and d["window_days"] == 14
     assert any("Playlist" in s for s in d["steps"]) and any("Shine On" in s for s in d["steps"])
     # Thema und Oberflaeche bleiben getrennt: die Traffic-Route ist kein Playlist-Thema.
-    assert any("Playlist zum Thema dieses Videos" in s and "Ansatzpunkt laut eigenen Daten: Empfehlungen" in s for s in d["steps"])
+    # Bestehende eigene Playlist, kein erfundener fremder Kontext, plus die belegte eigene Route als Ansatzpunkt.
+    assert any("Bestehende, thematisch passende Sealand-Playlist" in s and "Ansatzpunkt laut eigenen Daten: Empfehlungen" in s
+               for s in d["steps"])
+    assert any("Keine neue Playlist anlegen" in s for s in d["steps"])
     # Mit benannter Audience steht das Thema im Schritt, nicht die Route.
     named = details_for("distribute_playlist_context", f, [], {"audience": "train journey music", "actionable": True,
-                                                              "evidence_level": "multi_signal_proxy", "score": 65})
-    assert any("Playlist zu „train journey music“" in s for s in named["steps"])
+                                                              "evidence_level": "multi_signal_proxy", "score": 65,
+                                                              "context_usable": True})
+    # Die belegte Audience hilft nur bei der AUSWAHL der bestehenden Playlist; Text wird nicht geaendert.
+    assert any("passend zu „train journey music“" in s for s in named["steps"])
+    assert "Beschreibung" in named["do_not_change"]
+    # Ohne belegtes Thema bleibt der Wortlaut neutral, obwohl eine Audience benannt waere.
+    unproven = details_for("distribute_playlist_context", f, [], {"audience": "Shine Jesus Shine", "actionable": True,
+                                                                 "evidence_level": "multi_signal_proxy", "score": 65,
+                                                                 "context_usable": False})
+    assert all("Shine Jesus Shine" not in s for s in unproven["steps"])
+    # Ein Hebel: die Beschreibung wird in diesem Experiment nicht angefasst.
+    assert "Beschreibung" in d["do_not_change"] and "interne Verlinkung" in d["primary_lever"]
+    assert any("Beschreibungstext" in x for x in d["deferred_levers"])
+    assert all("Beschreibung" not in s or "unverändert" in s for s in d["steps"])
     assert d["baseline"]["impressions_7d"] == 40 and d["baseline"]["ctr_7d"] == .08
     assert d["executed_automatically"] is False and "ändert nichts" in d["read_only"]
     assert d["route"]["key"] == "traffic_suggested"
@@ -161,8 +176,14 @@ def test_multi_signal_proxy_may_steer_the_action_but_a_single_proxy_may_not():
     strong = {"score": discovery.MULTI_PROXY_SCORE_CAP, "kind": "search", "key": "train journey music", "gap": "search_opportunity",
               "evidence_level": "multi_signal_proxy", "actionable": True, "demand_source": "own_traffic_plus_public_proxy",
               "audience": "train journey music", "families": ["own_traffic_mix", "search_probe"], "uncertainty": "mittel"}
+    strong["context_usable"] = True
     action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, strong)
     assert action == "target_search_opportunity" and "multi_signal_proxy" in notes[0]
+    # Dieselbe Chance ohne belegtes Thema: kein Wortlaut-Experiment, sondern der interne Verteilungstest.
+    hypothesis = {**strong, "context_usable": False, "context_reason": "Nur 1 gemeinsames Stichwort", "key": "shine"}
+    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, hypothesis)
+    assert action == "distribute_playlist_context"
+    assert any("bleibt Hypothese und lenkt keinen Wortlaut" in n for n in notes)
     weak = {**strong, "score": discovery.PROXY_SCORE_CAP, "evidence_level": "weak_proxy", "actionable": False,
             "families": ["search_probe"]}
     # Der einzelne Proxy lenkt nichts – die Verteilung bleibt trotzdem das Thema, nicht Beobachten.

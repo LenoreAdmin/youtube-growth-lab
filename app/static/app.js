@@ -67,11 +67,15 @@ function renderQueue(p){
   <p><strong>Erwartetes Signal:</strong> ${esc(e.expected_signal||"")} · <strong>Messfenster:</strong> ${e.window_days} Tage (ab ${esc(e.measure_from)}, Auswertung ${esc(e.evaluate_after)})</p>
   <p><strong>Erfolg:</strong> ${esc(e.success_criterion||"")}</p>
   <p><strong>Abbruch:</strong> ${esc(e.stop_criterion||"")}</p>
+  <p><strong>Primärer Hebel:</strong> ${esc(e.primary_lever||"—")} <small>${esc(e.one_lever_note||"")}</small></p>
+  ${(e.deferred_levers||[]).length?`<p class="muted">Bewusst nicht in diesem Experiment (eigene Experimente): ${e.deferred_levers.map(esc).join("; ")}</p>`:""}
+  <p><strong>Externer Kontext:</strong> ${esc(e.context_status||"kein externer Kontext")}${e.context_reason?" <small>"+esc(e.context_reason)+"</small>":""}</p>
   <p><strong>Nicht verändern:</strong> ${(e.do_not_change||[]).map(esc).join(", ")}</p>
   <p class="notice">${esc(e.note||"")}</p>
   ${e.action_id?`<button class="secondary start-experiment" data-action-id="${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren – Experiment starten")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>`:""}
   </article>`}).join("")||"<p class='muted'>Kein Vorschlag: geschützte oder laufende Videos, oder die Evidenz reicht nicht für ein konkretes Experiment.</p>";
  $("queueRunning").innerHTML=running.length?`<h3>Läuft – von dir als durchgeführt bestätigt (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
+ $("queueNotTestable").innerHTML=((p&&p.not_testable)||[]).length?`<h3>Derzeit nicht sinnvoll testbar</h3><ul>${p.not_testable.map(x=>`<li>${esc(x.title)}: ${esc(x.reason)}</li>`).join("")}</ul>`:"";
  $("queueResults").innerHTML=results.length?`<h3>Ergebnisse abgeschlossener Experimente</h3><ul>${results.map(r=>`<li>${esc(r.created_day)} ${esc(ACTION_LABELS[r.action]||r.action)} (${esc(r.video_id)}): <strong>${esc(OUTCOME_LABELS[r.outcome]||r.outcome||"offen")}</strong>${r.metric?` · ${esc(r.metric)} ${num(r.before)} → ${num(r.after)}${r.relative_change==null?"":" ("+(r.relative_change>=0?"+":"")+num(r.relative_change*100,0)+" %)"}`:""}${r.reason?" · "+esc(r.reason):""}<small>${esc(r.note||"")}</small></li>`).join("")}</ul>`:"";
 }
 function renderGrowth(g){

@@ -236,7 +236,8 @@ def test_observe_does_not_block_a_later_actionable_opportunity(monkeypatch, sess
     session.add(DiscoveryOpportunity(day=TODAY+timedelta(days=1), kind="suggested", key="ext_neighbour", video_id="a",
         gap="suggested_opportunity", scores={"external_audience_score": 82.0, "suggested_opportunity_score": 82.0},
         components={"components": []}, evidence={"demand_source": "own_analytics", "evidence_level": "own_analytics",
-                                                 "actionable": True, "own_suggested_views_90d": 25, "title": "Nachbarvideo"},
+                                                 "actionable": True, "own_suggested_views_90d": 25, "title": "Nachbarvideo",
+                                                 "context_usable": True, "context_reason": "eigene Analytics"},
         status="open"))
     session.commit()
     ge.run(session, NOW+timedelta(days=1), ctx(TODAY+timedelta(days=1)), base)

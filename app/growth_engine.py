@@ -64,9 +64,33 @@ DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags"
                  "target_suggested_cluster": ["Titel", "Thumbnail", "Videoinhalt"], "packaging_for_audience": ["Videoinhalt", "Sichtbarkeit"],
                  "revive_existing_video": ["Videoinhalt", "Sichtbarkeit"],
                  # Distribution-Experimente fassen das Paket ausdrücklich nicht an: sonst misst man zwei Dinge gleichzeitig.
-                 "distribute_playlist_context": ["Titel", "Thumbnail", "Videoinhalt", "Sichtbarkeit"],
-                 "probe_missing_evidence": ["Titel", "Thumbnail", "Videoinhalt", "Sichtbarkeit"]}
+                 "distribute_playlist_context": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit"],
+                 "probe_missing_evidence": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit"]}
 MIN_TRACK_RECORD = 3
+# Genau ein veraenderlicher Hebel je Experiment. Wer Beschreibung, Playlist und Endscreen gleichzeitig
+# anfasst, kann das Ergebnis keiner Ursache zuordnen; alles Weitere wird ein eigenes Experiment.
+LEVERS = {"protect_no_change": "keiner – bewusst keine Änderung", "observe": "keiner – nur messen",
+          "test_title": "Titel", "test_thumbnail": "Thumbnail",
+          "test_title_thumbnail": "Titel und Thumbnail gemeinsam (nicht trennbar, bewusst akzeptiert)",
+          "investigate_retention": "keiner – nur Analyse",
+          "improve_discovery": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video",
+          "cross_promote": "interne Verlinkung aus dem stärkeren eigenen Video",
+          "create_followup_content": "neues Video", "target_search_opportunity": "Wortlaut in Beschreibung und Kapiteln",
+          "target_suggested_cluster": "Wortlaut in Beschreibung und Playlist-Benennung",
+          "packaging_for_audience": "genau eine Packaging-Dimension",
+          "revive_existing_video": "interne Verlinkung und Playlist-Platzierung",
+          "distribute_playlist_context": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video",
+          "probe_missing_evidence": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video"}
+# Was bewusst NICHT mitgeändert wird, sondern ein eigenes Experiment bleibt.
+DEFERRED_LEVERS = {"distribute_playlist_context": ["Beschreibungstext auf ein belegtes Thema ausrichten",
+                                                  "Titel oder Thumbnail testen"],
+                   "probe_missing_evidence": ["Beschreibungstext auf ein belegtes Thema ausrichten",
+                                              "Titel oder Thumbnail testen"],
+                   "improve_discovery": ["Beschreibungstext auf ein belegtes Thema ausrichten"],
+                   "target_search_opportunity": ["Playlist-Platzierung", "Titel"],
+                   "target_suggested_cluster": ["Titel", "Thumbnail"]}
+MIN_MEASURABLE_VIEWS_7D = 3        # Darunter kann ein Effekt nicht von Rauschen getrennt werden.
+MIN_MEASURABLE_IMPRESSIONS_7D = 10
 # Lebenszyklus einer Maßnahme. Ohne Bestätigung durch den Menschen bleibt sie ein Vorschlag:
 # das System hat keine Schreibrechte auf YouTube und darf deshalb nichts als "läuft" ausgeben.
 PROPOSED, RUNNING, EVALUATED, SUPERSEDED = "proposed", "running", "evaluated", "superseded"
@@ -334,6 +358,17 @@ def distribution_scarce(f, base):
                                               "note": "Kanalmedian für Impressions noch nicht belastbar."}
 
 
+def measurable(baseline, target_metric=None):
+    """Ohne messbare Ausgangsbasis kann ein Experiment nur „unklar“ ergeben – dann ist es keine Aufgabe."""
+    views = (baseline or {}).get("views_7d") or 0
+    impressions = (baseline or {}).get("impressions_7d") or 0
+    if views >= MIN_MEASURABLE_VIEWS_7D or impressions >= MIN_MEASURABLE_IMPRESSIONS_7D:
+        return True, None
+    return False, (f"Keine messbare Ausgangsbasis ({views} Views und {impressions} Impressions in der letzten bekannten "
+                   f"Woche; nötig {MIN_MEASURABLE_VIEWS_7D} Views oder {MIN_MEASURABLE_IMPRESSIONS_7D} Impressions). "
+                   "Ein Experiment könnte hier nur „unklar“ ergeben.")
+
+
 def known_route(f):
     """The strongest real traffic route of the last known week – the concrete starting point for distribution."""
     total = (f or {}).get("traffic_total_7d") or 0
@@ -420,12 +455,17 @@ def distribution_action(f, base, external):
     route = known_route(f)
     _, detail = distribution_scarce(f, base)
     head = f"Auslieferung zu gering ({detail.get('basis')}): "+(f"Paket ist nicht der Engpass – {why}." if ok else why+".")
+    rejected = []
+    if external and external.get("actionable") and not external.get("context_usable"):
+        # Wortgleichheit ist keine Themengleichheit: die Chance bleibt sichtbar, gibt aber keinen Text vor.
+        rejected = [f"Externe Chance „{external.get('key')}“ bleibt Hypothese und lenkt keinen Wortlaut: "
+                    f"{external.get('context_reason') or 'thematische Relevanz nicht ausreichend belegt'}"]
     if route:
-        return "distribute_playlist_context", [head, f"Belegte eigene Route: {route['label']} "
+        return "distribute_playlist_context", [head]+rejected+[f"Belegte eigene Route: {route['label']} "
                 f"({route['share']*100:.0f} % von {route['views_7d']} Views der letzten bekannten Woche) – dort ansetzen, "
                 "ohne Titel oder Thumbnail anzufassen."]
     missing = [m["what"] for m in ((external or {}).get("missing_evidence") or [])][:3]
-    return "probe_missing_evidence", [head, "Keine belastbare Hypothese: "
+    return "probe_missing_evidence", [head]+rejected+["Keine belastbare Hypothese: "
             + ("Es fehlt " + "; ".join(missing)+"." if missing else
                f"Der eigene Quellenmix der letzten Woche hat weniger als {MIN_ROUTE_VIEWS} Views und nennt keine Route."),
             "Risikoarmes Experiment beschafft genau diese Evidenz, ohne das Paket zu verändern."]
@@ -503,7 +543,7 @@ def choose_action(state, f, rev, base, experiments, record, external=None):
     elif running:
         action, notes = "observe", [f"Experiment #{running[0]['decision_id']} läuft – erst messen, keine weitere Änderung stapeln."]
     elif (external and external.get("actionable") and (external.get("score") or 0) >= EXTERNAL_MIN_SCORE
-            and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS):
+            and external.get("context_usable") and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS):
         action = "revive_existing_video" if state == "revival_candidate" and external["gap"] != "packaging_opportunity" else GAP_ACTIONS[external["gap"]]
         notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Evidenz: "
                  f"{external.get('evidence_level')}) lenkt die Aktion."]
@@ -550,51 +590,60 @@ def experiment_steps(action, title, f, external, channel):
     leader = (channel or {}).get("delivery_leader")
     from_leader = (f"aus „{leader['title']}“" if leader else "aus deinem am besten ausgelieferten Video")
     route = known_route(f)
-    audience = (external or {}).get("audience") or (external or {}).get("key")
+    # Ein fremdes Thema darf den Wortlaut nur vorgeben, wenn es belegt ist (context_usable);
+    # sonst bleibt der Text neutral und die Chance ist nur eine zu pruefende Hypothese.
+    proven = bool(external and external.get("context_usable"))
+    audience = ((external or {}).get("audience") or (external or {}).get("key")) if proven else None
     # Thema, nicht Oberflaeche: eine Traffic-Route ist kein Playlist-Thema.
     topic = f"zu „{audience}“" if audience else "zum Thema dieses Videos"
     context = audience or "dieses Thema"
     surface = f" Ansatzpunkt laut eigenen Daten: {route['label']}." if route else ""
-    tokens = ", ".join((external or {}).get("shared_tokens") or []) or None
+    # Eine belegte Audience hilft bei der Auswahl der bestehenden Playlist; geschrieben wird dadurch nichts.
+    fit = f" (passend zu „{audience}“)" if audience else ""
     hold = "Während des Messfensters keine weitere Änderung an diesem Video – sonst misst du zwei Dinge gleichzeitig."
     steps = {
+        # Ein Hebel: interne Platzierung dieses Videos in bereits vorhandenen eigenen Oberflächen.
+        # Titel, Thumbnail und Beschreibung dieses Videos bleiben ausdrücklich unangetastet.
         "distribute_playlist_context": [
-            f"Playlist: „{title}“ in eine thematische Playlist {topic} aufnehmen (oder eine anlegen) und dort auf Position 1–3 setzen."+surface,
-            f"Endscreen und Info-Karte {from_leader} auf dieses Video verlinken.",
-            f"Beschreibung: zwei bis drei Sätze Themenkontext {topic} ergänzen"+(f" (vorhandene gemeinsame Begriffe: {tokens})" if tokens else "")
-            + "; Titel und Thumbnail bleiben unverändert.",
+            f"Bestehende, thematisch passende Sealand-Playlist{fit} wählen und „{title}“ dort aufnehmen (Position 1–3). "
+            "Keine neue Playlist anlegen, keine Playlist umbenennen."+surface,
+            f"Aus einem bestehenden, thematisch passenden eigenen Video ({leader['title'] if leader else 'dem am besten ausgelieferten'}) "
+            "per Endscreen oder Info-Karte auf dieses Video verlinken.",
+            f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert.",
             hold],
         "probe_missing_evidence": [
-            f"Auslieferung überhaupt erzeugen: „{title}“ in eine thematische Playlist aufnehmen und {from_leader} per Endscreen verlinken.",
-            "Beschreibung um zwei bis drei Sätze Themenkontext ergänzen; Paket (Titel, Thumbnail) bleibt unverändert.",
-            "Nach dem Messfenster entscheidet die Messung: Bleiben die Impressions praktisch null, ist die Auslieferung der Engpass "
-            "und ein Packaging-Test wäre Verschwendung gewesen. Steigen sie, liegt eine belastbare Basis für den nächsten Test vor.",
+            f"Bestehende, thematisch passende Sealand-Playlist wählen und „{title}“ dort aufnehmen (Position 1–3).",
+            f"Aus einem bestehenden eigenen Video ({leader['title'] if leader else 'dem am besten ausgelieferten'}) "
+            "per Endscreen oder Info-Karte auf dieses Video verlinken.",
+            f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert.",
+            "Nach dem Messfenster entscheidet die Messung: Bleiben die Impressions praktisch null, ist die Auslieferung der "
+            "Engpass und ein Packaging-Test wäre Verschwendung gewesen. Steigen sie, liegt eine belastbare Basis vor.",
             hold],
         "target_search_opportunity": [
-            f"Suchintention „{(external or {}).get('key')}“ im Wortlaut aufnehmen: Beschreibung (erste zwei Zeilen) und Kapitelnamen anpassen, ohne Clickbait.",
-            f"Playlist mit genau diesem Themenschnitt anlegen bzw. „{title}“ dort einsortieren.",
-            "Titel nur ändern, wenn der Begriff dort fehlt – dann als einzige Änderung.",
+            f"Nur den Wortlaut: Suchintention „{(external or {}).get('key')}“ in die ersten zwei Beschreibungszeilen und in die "
+            "Kapitelnamen aufnehmen, ohne Clickbait.",
+            "Titel, Thumbnail und Playlist-Platzierung bleiben in diesem Fenster unverändert – das sind eigene Experimente.",
             hold],
         "target_suggested_cluster": [
-            f"Themenkontext von „{context}“ in Beschreibung und Playlist spiegeln, damit die Empfehlung neben diesen Videos wahrscheinlicher wird."+surface,
-            f"Endscreen {from_leader} auf dieses Video setzen; Reihenfolge in der Playlist an den Cluster anpassen.",
-            "Keine Titel-/Thumbnail-Änderung in diesem Fenster.",
+            f"Nur den Wortlaut: Themenkontext {topic} in Beschreibung und Playlist-Benennung spiegeln."+surface,
+            "Titel, Thumbnail und Endscreens bleiben in diesem Fenster unverändert.",
             hold],
         "improve_discovery": [
-            f"Playlist-Kontext und Endscreens für „{title}“ setzen; Beschreibung mit konkretem Suchbezug {topic} ergänzen."+surface,
-            "Kapitelmarken setzen, damit Suchtreffer auf Abschnitte zeigen können.",
+            f"Interne Verlinkung: „{title}“ in eine bestehende passende Playlist aufnehmen und aus einem passenden eigenen "
+            "Video per Endscreen verlinken."+surface,
+            "Beschreibung, Titel und Thumbnail bleiben unverändert – Wortlaut ist ein eigenes Experiment.",
             hold],
         "cross_promote": [
             f"Endscreen und Info-Karte {from_leader} auf „{title}“ verlinken.",
-            "Playlist so ordnen, dass dieses Video direkt auf das stärkere folgt.",
+            "Am beworbenen Video selbst nichts ändern.",
             hold],
         "packaging_for_audience": [
-            f"Genau eine Dimension ändern (Thumbnail oder Titel) und dabei die Sprache der Zielgruppe „{context}“ verwenden.",
-            "Alte Fassung sichern, Zeitpunkt der Änderung notieren.",
+            f"Genau eine Dimension ändern (Thumbnail ODER Titel) und dabei die Sprache der Zielgruppe „{context}“ verwenden.",
+            "Alte Fassung sichern, Zeitpunkt der Änderung notieren; Beschreibung und Playlist bleiben unverändert.",
             hold],
         "revive_existing_video": [
-            f"„{title}“ für {context} reaktivieren: Playlist-Einordnung, Endscreens {from_leader}, Community-Post ohne Kaufaufforderung.",
-            "Titel nur anfassen, wenn der Zielbegriff fehlt – dann als einzige Änderung.",
+            f"„{title}“ in eine bestehende passende Playlist einsortieren und {from_leader} per Endscreen verlinken.",
+            "Titel, Thumbnail und Beschreibung bleiben in diesem Fenster unverändert.",
             hold],
         "test_thumbnail": [f"Nur das Thumbnail von „{title}“ tauschen, alte Fassung sichern, Zeitpunkt notieren.", hold],
         "test_title": [f"Nur den Titel von „{title}“ ändern, alte Fassung sichern, Zeitpunkt notieren.", hold],
@@ -677,6 +726,9 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
     return {"action": action, "state": state, "reason": reason, "notes": notes, "signals": signals, "against": against,
             "confidence": conf, "target_metric": target, "window_days": window, "success_criterion": success, "stop_criterion": stop,
             "steps": experiment_steps(action, title or "dieses Video", f, external, channel),
+            "primary_lever": LEVERS.get(action), "deferred_levers": DEFERRED_LEVERS.get(action, []),
+            "one_lever_note": "Genau ein veränderlicher Hebel. Weitere Änderungen wären eigene Experimente – "
+                              "sonst ist das Ergebnis keiner Ursache zuzuordnen.",
             "missing_evidence": missing, "route": known_route(f),
             "baseline": baseline_snapshot(f),
             "executed_automatically": False,
@@ -869,6 +921,7 @@ def run(session, now, contexts, base, budget=None):
             "target_metric": details["target_metric"], "success_criterion": details["success_criterion"], "objective": details["objective"],
             "stop_criterion": details["stop_criterion"], "steps": details.get("steps"), "baseline": details.get("baseline"),
             "missing_evidence": details.get("missing_evidence") or [], "route": details.get("route"),
+            "primary_lever": details.get("primary_lever"), "deferred_levers": details.get("deferred_levers") or [],
             "action_id": current.id if current else None, "action_status": current.status if current else PROPOSED,
             "started_day": str(current.started_day) if current and current.started_day else None,
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
@@ -926,6 +979,11 @@ def queue_entry(row, rank, today):
                          "confidence": row.get("confidence"), "own_route": row.get("route"),
                          "missing": row.get("missing_evidence") or []},
             "baseline": row.get("baseline"), "steps": row.get("steps") or [],
+            "primary_lever": row.get("primary_lever"), "deferred_levers": row.get("deferred_levers") or [],
+            "one_lever_note": "Genau ein veränderlicher Hebel; alles Weitere ist ein eigenes Experiment.",
+            "context_status": ("belegt" if (ext.get("context_usable") if ext else False) else
+                               "Hypothese – gibt keinen Wortlaut vor" if ext else "kein externer Kontext"),
+            "context_reason": ext.get("context_reason") if ext else None,
             "expected_signal": f"{row['target_metric']} steigt messbar über die Wochenschwankung des Kanals",
             "target_metric": row["target_metric"], "window_days": row["window_days"],
             "measure_from": str(today), "evaluate_after": row["next_evaluation"],
@@ -941,7 +999,7 @@ def queue_entry(row, rank, today):
 
 def experiment_queue(ranking, today):
     """A short daily queue: at most one experiment per video, winners protected, running tests untouched."""
-    queue, running, rank = [], [], 0
+    queue, running, not_testable, rank = [], [], [], 0
     # Reihenfolge: belegte Hypothesen zuerst, reine Evidenzbeschaffung danach - sie ist Vorarbeit, keine Chance.
     for row in sorted((r for r in ranking if r["active_eligible"]),
                       key=lambda r: (r["action"] == "probe_missing_evidence",
@@ -954,11 +1012,17 @@ def experiment_queue(ranking, today):
                             "evaluate_after": row["next_evaluation"], "target_metric": row["target_metric"],
                             "note": "Läuft seit deiner Bestätigung – bis zur Auswertung nichts weiter an diesem Video ändern."})
             continue
+        ok, why = measurable(row.get("baseline"), row.get("target_metric"))
+        if not ok:
+            # Ohne messbare Ausgangsbasis waere jedes Ergebnis "unklar": sichtbar machen, aber nicht priorisieren.
+            not_testable.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
+                                 "state": row["state"], "reason": why, "baseline": row.get("baseline")})
+            continue
         if len(queue) >= QUEUE_LIMIT or any(q["video_id"] == row["video_id"] for q in queue):
             continue
         rank += 1
         queue.append(queue_entry(row, rank, today))
-    return queue, running
+    return queue, running, not_testable
 
 
 def daily_plan(ranking, today, record, results=None):
@@ -983,11 +1047,12 @@ def daily_plan(ranking, today, record, results=None):
     momentum_top = ranking[0] if ranking else None
     subscriber = max((r for r in ranking if r["subscriber_score"] is not None), key=lambda r: r["subscriber_score"], default=None)
     viewer = max((r for r in ranking if r["viewer_score"] is not None), key=lambda r: r["viewer_score"], default=None)
-    queue, running = experiment_queue(ranking, today)
+    queue, running, not_testable = experiment_queue(ranking, today)
     base = {"day": str(today), "version": VERSION, "ranking": ranking, "momentum_ranking": [r["video_id"] for r in ranking],
             "protected": protected, "track_record": record, "note": SCORE_NOTE+" "+GENERALIZATION_NOTE,
             "read_only": "Keine automatischen Änderungen auf YouTube.",
             "queue": queue, "queue_limit": QUEUE_LIMIT, "running_experiments": running, "results": results or [],
+            "not_testable": not_testable,
             "now_do": queue[0] if queue else None,
             "queue_note": ("Ausführbare Experimente für heute – von dir auszuführen, das System ändert nichts auf YouTube. "
                            f"Höchstens {QUEUE_LIMIT} gleichzeitig und nie zwei am selben Video."
@@ -1028,7 +1093,9 @@ def daily_plan(ranking, today, record, results=None):
                       "evidence_level": ext.get("evidence_level") if ext else None, "actionable": bool(ext and ext.get("actionable")),
                       "note": "Externe Nachfrage-Signale sind Proxies, außer sie stammen aus eigenen Analytics."}
     combined = (f"Aktive Growth-Priorität #1: {top['title']} – interner Zustand {top['state']}"
-                + (f" + externe Chance „{ext['key']}“ ({ext['demand_source']})" if ext else " ohne externe Chance") + f" → {top['action']}."
+                + (f" + externe Chance „{ext.get('key')}“ ({ext.get('demand_source') or 'Herkunft unbekannt'}, "
+                   f"{'Thema belegt' if ext.get('context_usable') else 'Thema unbelegt: nur Hypothese'})"
+                   if ext else " ohne externe Chance") + f" → {top['action']}."
                 + (" Geschützt (keine Änderung): "+", ".join(p["title"] for p in protected)+"." if protected else ""))
     return {**base, "status": "ok", "active_status": "active", "priority_video_id": top["video_id"], "priority_title": top["title"],
             "why": top["reason"],

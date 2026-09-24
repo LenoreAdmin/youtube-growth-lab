@@ -195,7 +195,8 @@ def test_external_opportunity_steers_v5_action_but_never_overrides_protection():
     base = {"status": "ok", "medians": {}}
     f = {"ctr_7d": None, "age_days": 400}
     strong = {"score": 72, "kind": "search", "key": "train journey music", "gap": "existing_video_opportunity",
-              "demand_source": "own_analytics", "evidence_level": "own_analytics", "actionable": True, "audience": "train journey music"}
+              "demand_source": "own_analytics", "evidence_level": "own_analytics", "actionable": True, "audience": "train journey music",
+              "context_usable": True, "context_reason": "Eigene Analytics belegen das Thema."}
     action, notes = ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong)
     assert action == "target_search_opportunity" and "own_analytics" in notes[0]
     # Proxy-only Chance (keine unabhaengige Evidenz) loest niemals eine aktive Massnahme aus.
@@ -208,6 +209,9 @@ def test_external_opportunity_steers_v5_action_but_never_overrides_protection():
     assert ge.choose_action("paid_cooldown", {**f, "paid": {"days_until_clean": 5}}, {"signals": []}, base, [], {}, strong)[0] == "observe"
     assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "score": 40})[0] == "observe"
     assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "gap": "insufficient_evidence"})[0] == "observe"
+    # Thematisch nicht belegt (nur Wortueberschneidung): lenkt keinen Wortlaut, auch mit hohem Score.
+    assert ge.choose_action("observe", f, {"signals": []}, base, [], {},
+                            {**strong, "context_usable": False})[0] == "observe"
     assert ge.choose_action("observe", f, {"signals": []}, base, [{"status": "registered", "decision_id": 3}], {}, strong)[0] == "observe"
     details = ge.action_details("target_search_opportunity", "observe", f, {"regime": "stable"}, base, {}, {"candidate": False}, None,
                                 {"level": "low", "n_videos": 3}, notes, [], strong)
