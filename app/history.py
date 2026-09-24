@@ -187,6 +187,9 @@ def features_at(history, origin, lag=None):
         **shares, "traffic_total_7d": traffic_total if any_traffic else None,
         "retention_avg": retention_avg, "retention_window": [str(retention.start), str(retention.end)] if retention else None,
         "ctr_7d": sum(r.impressions*r.ctr for r in reach)/impressions if impressions else None,
+        # Ausgelieferte Impressions: unterscheidet ein Verpackungsproblem (viele Impressions, schwache CTR)
+        # von einem Distributionsproblem (kaum Impressions bei brauchbarer CTR).
+        "impressions_7d": impressions if reach else None, "reach_days_7d": len(reach),
         "paid_views_32d": history.paid_views(known_end-timedelta(days=PAID_WINDOW_DAYS-1), known_end),
         # Ads inside the analytics lag gap are unknown to Google's report but known to the channel owner.
         "paid_views_lag_gap": history.paid_views(known_end+timedelta(days=1), origin) if origin > known_end else 0,

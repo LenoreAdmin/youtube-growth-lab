@@ -170,15 +170,18 @@ def test_activity_floor_prevents_protect_momentum_on_a_dead_video(monkeypatch, s
     assert regime["min_weekly_views"] == regimes.MIN_WEEKLY_VIEWS and f["views_7d"] < regimes.MIN_WEEKLY_VIEWS
     assert regime["regime"] not in ge.PROTECT_REGIMES
     state = ge.state_of(f, regime, base, {"candidate": False})
-    assert state == "needs_discovery"                              # belegte Distributionslücke, kein Schutz
+    # Belegte Distributionslücke, kein Schutz: seit dem Actionable-Sprint praezise als Verteilungsproblem benannt.
+    assert state == "needs_distribution"
     board = ge.scores(f, regime, base, [{"horizon_hours": 168, "predicted_views": 30, "baseline_views": 10,
                                          "lower_views": 5, "upper_views": 90}], {"score": 95}, {"peak_velocity": 100})
     comps = {c["name"]: c for c in board["opportunity"]["components"]}
     for noisy in ("Tempo 7d vs 28d (Kanalquantile)", "Wochenbeschleunigung", "Regime V4",
                   "Live-Momentum (Snapshots, V2)", "V4-Prognose 7d vs Baseline"):
         assert comps[noisy]["available"] is False, noisy
-    action, _ = ge.choose_action(state, f, {"signals": []}, base, [], {})
-    assert action == "improve_discovery" and action not in ge.PASSIVE_ACTIONS
+    action, notes = ge.choose_action(state, f, {"signals": []}, base, [], {})
+    # Kein Packaging-Test und kein Beobachten: ein Distributions- oder Evidenzexperiment.
+    assert action in ("distribute_playlist_context", "probe_missing_evidence") and action not in ge.PASSIVE_ACTIONS
+    assert any("Auslieferung zu gering" in n for n in notes)
     # Und im Plan: niemals geschützt, sondern aktiv handelbar.
     row = {"video_id": "a", "title": "A", "state": state, "regime": regime["regime"], "breakout": False, "action": action,
            "opportunity_score": board["opportunity"]["score"], "viewer_score": None, "subscriber_score": None, "revival": False,
@@ -263,7 +266,7 @@ def test_seed_relevance_is_filter_only_and_proxy_scores_are_capped():
              discovery._component("Nachfrage-Proxy: Median-Views der Top-Ergebnisse", 0.9, 1.5, 30005, proxy=True)]
     assert discovery._score([comps[0]]) is None                      # allein liefert Relevanz keinen Score mehr
     raw = discovery._score(comps)
-    assert raw is not None and discovery.grade(raw, "probe") <= discovery.PROXY_SCORE_CAP
+    assert raw is not None and discovery.grade(raw, "weak_proxy") <= discovery.PROXY_SCORE_CAP
     assert discovery.grade(raw, "own_analytics") == raw
     assert discovery.grade(raw, "none") is None
     assert discovery.PROXY_SCORE_CAP < ge.EXTERNAL_MIN_SCORE          # Proxy kann keine Aktion auslösen
@@ -290,11 +293,11 @@ def test_proxy_only_chance_like_trans_mongolian_is_not_treated_as_proven(monkeyp
         gap="existing_video_opportunity",
         scores={"external_audience_score": discovery.PROXY_SCORE_CAP, "search_opportunity_score": discovery.PROXY_SCORE_CAP},
         components={"components": []},
-        evidence={"demand_source": "public_proxy", "evidence_level": "probe", "actionable": False, "score_capped": True,
+        evidence={"demand_source": "public_proxy", "evidence_level": "weak_proxy", "actionable": False, "score_capped": True,
                   "own_search_views_90d": 0, "probe": {"n": 25, "median_views": 30005, "our_rank": None}}, status="open"))
     session.commit()
     best = discovery.best_for_video(session, "a")
-    assert best["key"] == "trans mongolian" and best["actionable"] is False and best["evidence_level"] == "probe"
+    assert best["key"] == "trans mongolian" and best["actionable"] is False and best["evidence_level"] == "weak_proxy"
     assert best["score"] <= discovery.PROXY_SCORE_CAP
     f = features(views_7d=400)
     action, _ = ge.choose_action("observe", f, {"signals": []}, BASE0, [], {}, best)
@@ -347,8 +350,8 @@ assert.match(nodes.healthBanner.className,/down/);
 assert.match(nodes.healthBanner.textContent,/ACHTUNG - Jobs laufen nicht durch|ACHTUNG – Jobs laufen nicht durch/);
 assert.match(nodes.healthBanner.textContent,/Letzter Sync: deferred/);
 assert.match(nodes.healthBanner.textContent,/Serie ohne ok: 12/);
-assert.match(evidenceBadge({evidence_level:'probe',score_capped:true,actionable:false}),/nur Proxy/);
-assert.match(evidenceBadge({evidence_level:'probe',score_capped:true,actionable:false}),/gedeckelt/);
+assert.match(evidenceBadge({evidence_level:'weak_proxy',score_capped:true,actionable:false}),/nur Proxy/);
+assert.match(evidenceBadge({evidence_level:'weak_proxy',score_capped:true,actionable:false}),/gedeckelt/);
 assert.match(evidenceBadge({evidence_level:'own_analytics',actionable:true}),/belegt/);
 """
     subprocess.run(["node", "-"], input=prefix+"\n"+harness, text=True, encoding="utf-8", capture_output=True, check=True)

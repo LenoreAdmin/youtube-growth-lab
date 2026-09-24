@@ -37,8 +37,27 @@ SIGNAL_WINDOW_DAYS = 90
 MEMORY_DAYS = 28
 MIN_SEED_TOKENS = 2        # Single generic words ("pop", "note") are not search intents.
 MIN_RELEVANCE = 0.34       # Seed relevance is a filter only, never positive evidence.
-PROXY_SCORE_CAP = 45       # Proxy-only chances must not look like validated demand.
-EVIDENCE_LEVELS = ("own_analytics", "probe", "none")
+PROXY_SCORE_CAP = 45       # A single proxy family must not look like validated demand.
+MULTI_PROXY_SCORE_CAP = 70  # Several independent families may justify an experiment, but stay below own analytics.
+MIN_PROXY_FAMILIES = 2     # One proxy is never enough; two independent families may carry a hypothesis.
+RETIRED_PRIORITY = -1.0    # Generic legacy seeds keep their row for audit but are never probed again.
+EVIDENCE_LEVELS = ("own_analytics", "multi_signal_proxy", "weak_proxy", "none")
+ACTIONABLE_LEVELS = ("own_analytics", "multi_signal_proxy")
+LEVEL_CAPS = {"own_analytics": 100.0, "multi_signal_proxy": MULTI_PROXY_SCORE_CAP, "weak_proxy": PROXY_SCORE_CAP}
+# Unabhängige Evidenzfamilien. Die Herkunft bleibt sichtbar; ein aus dem eigenen Titel gewonnener Seed
+# ist zirkulär und ist niemals selbst eine Familie, wie gut er auch passt.
+# Familien sind Datenrouten, nicht Metriken: alles, was aus derselben Suchprobe abgeleitet ist
+# (Ergebnismenge, Median-Views, Wettbewerb, eigener Rang), bleibt EINE Familie. Sonst würde ein
+# einzelner Proxy durch Umbenennen seiner Kennzahlen wie mehrfache Evidenz aussehen.
+FAMILIES = {
+    "own_term_demand": "Eigene Analytics: Views aus genau diesem Suchbegriff bzw. über dieses empfehlende Video (Detailebene)",
+    "own_traffic_mix": "Eigene Analytics: reale organische Views aus dieser Traffic-Quelle in 90 Tagen (aggregiert, ohne Begriffsdetail)",
+    "search_probe": "Öffentliche Suchprobe (search.list): Ergebnismenge, Wettbewerb, eigener Rang – eine Beobachtung",
+    "neighbour_metadata": "Öffentliche Metadaten eines Nachbarvideos, das über die eigene Empfehlungsquelle entdeckt wurde",
+    "cluster_corroboration": "Mehrere Nachbarvideos verschiedener Kanäle, über mehrere Routen entdeckt",
+}
+OWN_FAMILIES = ("own_term_demand", "own_traffic_mix")
+SOURCE_FOR_KIND = {"search": "YT_SEARCH", "suggested": "RELATED_VIDEO", "cluster": "RELATED_VIDEO"}
 SOURCE_KINDS = {"YT_SEARCH": "own_search_term", "RELATED_VIDEO": "own_suggested_source", "EXT_URL": "own_external"}
 GAPS = ["existing_video_opportunity", "packaging_opportunity", "search_opportunity", "suggested_opportunity",
         "followup_content_opportunity", "insufficient_evidence"]
@@ -121,6 +140,24 @@ def own_vocabulary(session, videos, tags_by_video):
     return vocab
 
 
+def retire_generic_seeds(session, today):
+    """Seeds from before MIN_SEED_TOKENS ("pop", "note"): keep the row for audit, never probe it again.
+
+    A single generic word is not a search intent, and probing it costs 100 quota units that a specific
+    query needs. Real own search terms are exempt – YouTube reported them, so they are demand.
+    """
+    own_terms = {normalize(t) for t in session.scalars(select(DiscoverySignal.detail).where(DiscoverySignal.kind == "own_search_term"))}
+    retired = 0
+    for q in session.scalars(select(DiscoveryQuery).where(DiscoveryQuery.source != "own_search_term")):
+        if q.query in own_terms or len(q.query.split()) >= MIN_SEED_TOKENS or q.priority == RETIRED_PRIORITY:
+            continue
+        q.priority, q.next_probe_day = RETIRED_PRIORITY, today+timedelta(days=3650)
+        retired += 1
+    if retired:
+        session.commit()
+    return retired
+
+
 def seed_queries(session, videos, tags_by_video, today):
     """Candidate probes: real own search terms first, then brand-free title/tag phrases. Deduplicated by normalised text."""
     candidates = {}
@@ -145,6 +182,7 @@ def seed_queries(session, videos, tags_by_video, today):
                 add(f"{a} {b}", "title_bigram", v.id, 300)
         for tag in tags_by_video.get(v.id, [])[:8]:
             add(tag, "tag", v.id, 200)
+    retire_generic_seeds(session, today)
     existing = {row[0]: row[1] for row in session.execute(select(DiscoveryQuery.query, DiscoveryQuery.priority))}
     for c in candidates.values():
         priority = max(c["priority"], existing.get(c["query"], 0.0))
@@ -383,11 +421,90 @@ def _score(components):
     return round(50+50*sum(c["weight"]*c["signal"] for c in usable)/sum(c["weight"] for c in usable), 1)
 
 
-def grade(score, level):
-    """Cap proxy-only chances and drop those without any independent evidence."""
+def classify_evidence(families, circular=False, generic=False):
+    """Evidence level from independent families. One proxy alone never justifies an experiment.
+
+    generic: a single-word seed without own search-term demand is not a search intent, whatever else exists.
+    circular: the seed comes from our own title/tags; proxies alone then stay weak, because relevance to
+    ourselves is not demand. Own analytics or corroboration by several independent channels lifts it.
+    """
+    families = set(families)
+    if "own_term_demand" in families:
+        return "own_analytics"     # Real own demand for exactly this term; specificity is then proven, not assumed.
+    if generic:
+        return "none"
+    independent = {f for f in families if f != "own_term_demand"}
+    if len(independent) >= MIN_PROXY_FAMILIES and (not circular or independent & {"own_traffic_mix", "cluster_corroboration"}):
+        return "multi_signal_proxy"
+    return "weak_proxy" if independent else "none"
+
+
+def item_routes(item, has_metadata):
+    """On which independent routes did this neighbour video become visible?
+
+    Discovered through our own recommending-source traffic and additionally described by public
+    metadata is one route; appearing in a public search probe is another. The same probe never
+    counts twice, no matter how many of its numbers are used.
+    """
+    via = item.via or {}
+    routes = set()
+    if has_metadata and via.get("suggested_source"):
+        routes.add("neighbour_metadata")
+    if via.get("queries"):
+        routes.add("search_probe")
+    return routes
+
+
+def demand_source(families):
+    """Provenance in one word, so no proxy is ever read as measured demand."""
+    if "own_term_demand" in families:
+        return "own_analytics"
+    if "own_traffic_mix" in families:
+        return "own_traffic_plus_public_proxy"
+    return "public_proxy"
+
+
+def uncertainty(level, families):
+    return {"own_analytics": "moderat", "multi_signal_proxy": "mittel"}.get(level, "hoch") if families else "hoch"
+
+
+def grade(score, level, level_weights=None):
+    """Cap a chance by its evidence level and by what this level has actually delivered so far."""
     if level == "none" or score is None:
         return None
-    return round(min(PROXY_SCORE_CAP, score), 1) if level != "own_analytics" else score
+    weight = (level_weights or {}).get(level, 1.0)
+    return round(min(LEVEL_CAPS.get(level, PROXY_SCORE_CAP), score*weight), 1)
+
+
+def seed_quality(key, source, own_terms):
+    """Seed provenance and specificity: generic one-worders and self-derived terms are marked, not scored."""
+    parts = tokens(key, keep_brand=True)
+    is_own_term = key in own_terms or source == "own_search_term"
+    return {"tokens": len(parts), "source": source, "is_own_search_term": is_own_term,
+            "generic": len(parts) < MIN_SEED_TOKENS and not is_own_term,
+            "circular": source in ("title", "title_bigram", "tag"),
+            "note": ("Ein-Wort-Seed ohne eigene Suchnachfrage: keine Suchintention." if len(parts) < MIN_SEED_TOKENS and not is_own_term
+                     else "Aus eigenem Titel/Tag abgeleitet: Relevanz zu uns ist keine Nachfrage." if source in ("title", "title_bigram", "tag")
+                     else "Realer eigener Suchbegriff aus Analytics." if is_own_term else None)}
+
+
+def missing_evidence(families, generic=False):
+    """Which independent families are absent – the input for a low-risk evidence-gathering experiment."""
+    return [{"family": name, "what": label} for name, label in FAMILIES.items() if name not in families] if not generic else \
+           [{"family": "specific_seed", "what": "Ein spezifischerer Suchbegriff als ein einzelnes Wort"}]
+
+
+def own_source_views(session, end):
+    """Real own views per traffic source over the signal window: own analytics without term detail."""
+    start = end-timedelta(days=SIGNAL_WINDOW_DAYS-1)
+    out = defaultdict(dict)
+    for video_id, source, views in session.execute(
+            select(TrafficDaily.video_id, TrafficDaily.source, func.coalesce(func.sum(TrafficDaily.views), 0))
+            .where(TrafficDaily.day >= start, TrafficDaily.day <= end, TrafficDaily.paid.is_(False))
+            .group_by(TrafficDaily.video_id, TrafficDaily.source)):
+        if views:
+            out[video_id][source] = int(views)
+    return out
 
 
 def _latest_signals(session, kind):
@@ -422,22 +539,36 @@ def own_context(session, now):
     return ctx, base
 
 
-def memory_weights(session):
-    """Observed track record per opportunity kind → bounded prior (0.85–1.15); descriptive, not causal."""
-    rows = list(session.scalars(select(DiscoveryOpportunity).where(DiscoveryOpportunity.status == "evaluated")))
-    record = {}
-    for r in rows:
-        e = record.setdefault(r.kind, {"positive": 0, "negative": 0, "neutral": 0, "inconclusive": 0, "n": 0})
-        e[r.outcome or "inconclusive"] = e.get(r.outcome or "inconclusive", 0)+1
-        e["n"] += 1
+MIN_DECIDED_FOR_WEIGHT = 5   # Below this, an observed rate is noise: the weight stays neutral and says so.
+
+
+def _weight_from(record):
+    """Bounded prior 0.85–1.15 per bucket; neutral until enough decided outcomes exist."""
     weights = {}
-    for kind, e in record.items():
+    for key, e in record.items():
         decided = e["positive"]+e["negative"]+e["neutral"]
-        if decided >= 5:
-            rate = e["positive"]/decided
-            weights[kind] = round(0.85+0.3*rate, 3)
-        e["weight"] = weights.get(kind, 1.0)
-    return weights, record
+        e["decided"] = decided
+        if decided >= MIN_DECIDED_FOR_WEIGHT:
+            weights[key] = round(0.85+0.3*e["positive"]/decided, 3)
+            e["basis"] = f"{e['positive']} von {decided} entschiedenen Fällen positiv (beobachtet, nicht kausal)."
+        else:
+            e["basis"] = f"Nur {decided} entschiedene Fälle (< {MIN_DECIDED_FOR_WEIGHT}): Gewicht bleibt neutral, nichts bewiesen."
+        e["weight"] = weights.get(key, 1.0)
+    return weights
+
+
+def memory_weights(session):
+    """Observed track record per opportunity kind and per evidence level → bounded priors; descriptive, not causal."""
+    rows = list(session.scalars(select(DiscoveryOpportunity).where(DiscoveryOpportunity.status == "evaluated")))
+    record, by_level = {}, {}
+    for r in rows:
+        outcome = r.outcome or "inconclusive"
+        for bucket, key in ((record, r.kind), (by_level, (r.evidence or {}).get("evidence_level") or "unknown")):
+            e = bucket.setdefault(key, {"positive": 0, "negative": 0, "neutral": 0, "inconclusive": 0, "n": 0})
+            e[outcome] = e.get(outcome, 0)+1
+            e["n"] += 1
+    weights, level_weights = _weight_from(record), _weight_from(by_level)
+    return weights, level_weights, {"by_kind": record, "by_evidence_level": by_level}
 
 
 def match_video(query_tokens, ctx):
@@ -459,7 +590,10 @@ def analyze(session, now):
     suggested_signals, _ = _latest_signals(session, "own_suggested_source")
     max_search_views = max([v for per in search_signals.values() for v in per.values()] or [1])
     max_suggested_views = max([v for per in suggested_signals.values() for v in per.values()] or [1])
-    weights, _ = memory_weights(session)
+    weights, level_weights, _ = memory_weights(session)
+    # Reale eigene Views je Traffic-Quelle: vorhanden auch dort, wo YouTube keine Begriffsdetails liefert.
+    source_views = own_source_views(session, analytics_end(now))
+    own_terms_normalised = {normalize(t) for per in search_signals.values() for t in per}
     medians = base.get("medians", {})
     conv_ref = medians.get("subscriber_conversion_7d", {})
     items = {row.video_id: row for row in session.scalars(select(DiscoveryItem)) if row.video_id not in ctx}
@@ -517,8 +651,17 @@ def analyze(session, now):
         score = _score(comps)
         if score is not None:
             score = round(min(100, score*weights.get("search", 1.0)), 1)
-        level = "own_analytics" if real_ok else ("probe" if results.get("n") else "none")
-        score = grade(score, level)
+        quality = seed_quality(key, source, own_terms_normalised)
+        families = set()
+        if real_ok:
+            families.add("own_term_demand")
+        if vid and not paid_note(vid) and (source_views.get(vid, {}).get("YT_SEARCH") or 0) > 0:
+            families.add("own_traffic_mix")
+        if results.get("n"):
+            # Ergebnismenge, Median-Views, Wettbewerb und eigener Rang stammen aus derselben Probe: eine Familie.
+            families.add("search_probe")
+        level = classify_evidence(families, circular=quality["circular"], generic=quality["generic"])
+        score = grade(score, level, level_weights)
         missing_tokens = [t for t in qt if vid and t not in ctx[vid]["title_tokens"] and t not in BRAND]
         if score is None or (relevance < MIN_RELEVANCE and not real_ok):
             gap = "insufficient_evidence"
@@ -532,12 +675,15 @@ def analyze(session, now):
             gap = "followup_content_opportunity"
         else:
             gap = "insufficient_evidence"
-        evidence = {"demand_source": "own_analytics" if real_ok else "public_proxy", "evidence_level": level,
-                    "actionable": level == "own_analytics", "score_capped": level != "own_analytics",
-                    "own_search_views_90d": real_views, "probe": results,
+        evidence = {"demand_source": demand_source(families), "evidence_level": level,
+                    "actionable": level in ACTIONABLE_LEVELS, "score_capped": level != "own_analytics",
+                    "families": sorted(families), "family_labels": [FAMILIES[f] for f in sorted(families)],
+                    "seed_quality": quality, "missing_evidence": missing_evidence(families, quality["generic"]),
+                    "own_search_views_90d": real_views, "own_source_views_90d": source_views.get(vid, {}) if vid else {},
+                    "probe": results,
                     "query_source": source, "missing_title_tokens": missing_tokens, "matched_video_id": vid, "relevance": relevance,
                     "missing": [c["name"] for c in comps if not c["available"]], "paid_status": ctx[vid]["paid"] if vid else None,
-                    "uncertainty": "hoch" if sum(c["available"] for c in comps) <= 2 else "mittel" if not results else "moderat",
+                    "uncertainty": uncertainty(level, families),
                     "baseline_views_for_memory": real_views, "note": SCORE_NOTE}
         write("search", key, vid, gap, {"search_opportunity_score": score, "subscriber_fit_score": subscriber_fit(vid, relevance) if vid else None,
                                         "external_audience_score": score}, {"components": comps}, evidence)
@@ -566,19 +712,28 @@ def analyze(session, now):
         score = _score(comps)
         if score is not None:
             score = round(min(100, score*weights.get("suggested", 1.0)), 1)
-        level = "own_analytics" if real_ok else ("probe" if (item.views is not None or subs is not None) else "none")
-        score = grade(score, level)
+        families = set()
+        if real_ok:
+            families.add("own_term_demand")
+        if vid and not paid_note(vid) and (source_views.get(vid, {}).get("RELATED_VIDEO") or 0) > 0:
+            families.add("own_traffic_mix")
+        families |= item_routes(item, has_metadata=(item.views is not None or subs is not None))
+        level = classify_evidence(families, circular=False)
+        score = grade(score, level, level_weights)
         gap = "suggested_opportunity" if (relevance >= .3 or real_ok) and score is not None else "insufficient_evidence"
         shared = sorted(it & (ctx[vid]["vocab"] if vid else set()))
         label = " ".join(shared[:2]) if shared else (sorted(it)[:1] or ["unbekannt"])[0]
         cluster_members[label].append((ext_id, item, relevance, real_views, vid))
-        evidence = {"demand_source": "own_analytics" if real_ok else "public_proxy", "evidence_level": level,
-                    "actionable": level == "own_analytics", "score_capped": level != "own_analytics",
+        evidence = {"demand_source": demand_source(families), "evidence_level": level,
+                    "actionable": level in ACTIONABLE_LEVELS, "score_capped": level != "own_analytics",
+                    "families": sorted(families), "family_labels": [FAMILIES[f] for f in sorted(families)],
+                    "missing_evidence": missing_evidence(families),
+                    "own_source_views_90d": source_views.get(vid, {}) if vid else {},
                     "own_suggested_views_90d": real_views, "title": item.title,
                     "channel": item.channel_title, "channel_subscribers": subs, "views": item.views, "age_days": age_days, "shared_tokens": shared[:6],
                     "matched_video_id": vid, "relevance": relevance, "missing": [c["name"] for c in comps if not c["available"]],
                     "paid_status": ctx[vid]["paid"] if vid else None, "via": item.via, "baseline_views_for_memory": real_views,
-                    "uncertainty": "hoch" if not real_ok else "moderat", "note": SCORE_NOTE+" Keine Aussage über Ursachen des fremden Erfolgs; nichts kopieren."}
+                    "uncertainty": uncertainty(level, families), "note": SCORE_NOTE+" Keine Aussage über Ursachen des fremden Erfolgs; nichts kopieren."}
         write("suggested", ext_id, vid, gap, {"suggested_opportunity_score": score, "subscriber_fit_score": subscriber_fit(vid, relevance) if vid else None,
                                               "external_audience_score": score}, {"components": comps}, evidence)
 
@@ -595,14 +750,28 @@ def analyze(session, now):
         comps = [_component("Mittlere thematische Nähe", 2*rel-1, 3, rel), _component("Mittlere Reichweite (log Views)", tanh((reach-4)/1.5), 1.5, reach, proxy=True),
                  _component("Kanalvielfalt im Cluster", tanh(len(chans)/3-1), 1, len(chans), proxy=True),
                  _component("Eigene Views aus dem Cluster (real)", tanh(real/50) if real and vid and not paid_note(vid) else None, 2, real)]
-        level = "own_analytics" if (real and vid and not paid_note(vid)) else "probe"
-        score = grade(_score(comps), level)
+        families = set()
+        if real and vid and not paid_note(vid):
+            families.add("own_term_demand")
+        if vid and not paid_note(vid) and (source_views.get(vid, {}).get("RELATED_VIDEO") or 0) > 0:
+            families.add("own_traffic_mix")
+        routes = set()
+        for m in members:
+            routes |= item_routes(m[1], has_metadata=m[1].views is not None)
+        families |= routes
+        if len(chans) >= 2 and len(members) >= 3 and len(routes) >= 2:
+            # Mehrere Kanäle, über mehrere Routen entdeckt: Korroboration statt eines einzelnen Proxys.
+            families.add("cluster_corroboration")
+        level = classify_evidence(families, circular=False)
+        score = grade(_score(comps), level, level_weights)
         write("cluster", label, vid, "suggested_opportunity" if score and rel >= .3 else "insufficient_evidence",
               {"external_audience_score": score, "subscriber_fit_score": subscriber_fit(vid, rel) if vid else None},
               {"components": comps}, {"members": [{"video_id": m[0], "title": m[1].title, "views": m[1].views} for m in members[:8]], "n_members": len(members),
                                      "channels": len(chans), "matched_video_id": vid, "relevance": rel, "evidence_level": level,
-                                     "actionable": level == "own_analytics", "score_capped": level != "own_analytics",
-                                     "demand_source": "own_analytics" if level == "own_analytics" else "public_proxy",
+                                     "actionable": level in ACTIONABLE_LEVELS, "score_capped": level != "own_analytics",
+                                     "families": sorted(families), "family_labels": [FAMILIES[f] for f in sorted(families)],
+                                     "missing_evidence": missing_evidence(families), "uncertainty": uncertainty(level, families),
+                                     "demand_source": demand_source(families),
                                      "baseline_views_for_memory": real, "note": SCORE_NOTE})
     session.commit()
     return written
@@ -657,6 +826,10 @@ def best_for_video(session, video_id, day=None):
     return {"kind": best.kind, "key": best.key, "gap": best.gap, "scores": best.scores, "evidence": best.evidence, "day": str(best.day),
             "score": best.scores.get("external_audience_score"), "demand_source": best.evidence.get("demand_source"),
             "evidence_level": best.evidence.get("evidence_level"), "actionable": bool(best.evidence.get("actionable")),
+            "families": best.evidence.get("families") or [], "family_labels": best.evidence.get("family_labels") or [],
+            "missing_evidence": best.evidence.get("missing_evidence") or [], "uncertainty": best.evidence.get("uncertainty"),
+            "seed_quality": best.evidence.get("seed_quality"), "members": (best.evidence.get("members") or [])[:5],
+            "channel": best.evidence.get("channel"), "own_source_views_90d": best.evidence.get("own_source_views_90d") or {},
             "audience": best.evidence.get("title") or best.key, "shared_tokens": best.evidence.get("shared_tokens") or best.evidence.get("missing_title_tokens")}
 
 
@@ -694,7 +867,7 @@ def overview(session, now=None):
     usable = [o for o in opportunities if o["gap"] != "insufficient_evidence"]
     actionable = [o for o in usable if o["evidence"].get("actionable")]
     per_video = {vid: best_for_video(session, vid, latest) for vid in videos} if latest else {vid: None for vid in videos}
-    _, record = memory_weights(session)
+    _, level_weights, record = memory_weights(session)
     signals = {}
     for vid in videos:
         terms = list(session.execute(select(DiscoverySignal.detail, DiscoverySignal.views).where(DiscoverySignal.video_id == vid, DiscoverySignal.kind == "own_search_term",
@@ -706,10 +879,16 @@ def overview(session, now=None):
                         "demand_evidence": demand_evidence(session, vid, terms)}
     return {"version": VERSION, "day": str(latest) if latest else None, "best": (actionable or usable or [None])[0],
             "top": usable[:12], "insufficient": len(opportunities)-len(usable), "actionable": len(actionable),
-            "evidence_policy": {"proxy_score_cap": PROXY_SCORE_CAP, "min_seed_tokens": MIN_SEED_TOKENS,
-                                "min_relevance": MIN_RELEVANCE,
-                                "note": "Aktive Empfehlungen verlangen mindestens eine unabhängige Evidenzkomponente "
-                                        "(eigene Analytics-Nachfrage); Proxy-Chancen bleiben Hypothesen."},
+            "evidence_policy": {"levels": EVIDENCE_LEVELS, "actionable_levels": ACTIONABLE_LEVELS, "caps": LEVEL_CAPS,
+                                "families": FAMILIES, "min_proxy_families": MIN_PROXY_FAMILIES,
+                                "proxy_score_cap": PROXY_SCORE_CAP, "min_seed_tokens": MIN_SEED_TOKENS,
+                                "min_relevance": MIN_RELEVANCE, "level_weights": level_weights,
+                                "note": "Eigene Analytics-Nachfrage ist die stärkste Evidenz. Fehlt sie, dürfen mindestens "
+                                        f"{MIN_PROXY_FAMILIES} unabhängige Evidenzfamilien gemeinsam ein Experiment tragen "
+                                        f"(gedeckelt bei {MULTI_PROXY_SCORE_CAP}); ein einzelner Proxy bleibt Hypothese "
+                                        f"(gedeckelt bei {PROXY_SCORE_CAP}) und löst nie eine Maßnahme aus. Kein Suchvolumen, "
+                                        "keine erfundenen Nachfragewerte; Ein-Wort-Seeds und aus dem eigenen Titel "
+                                        "zurückgewonnene Begriffe zählen nicht als Nachfrage."},
             "per_video": per_video, "signals": signals,
             "clusters": [o for o in opportunities if o["kind"] == "cluster"][:8],
             "last_run": {"day": str(run_row.day), "status": run_row.status, "units_used": run_row.units_used, "issues": run_row.issues, "stats": run_row.stats,

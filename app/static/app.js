@@ -39,15 +39,41 @@ function renderHealth(h){
  node.textContent=(h.level==="critical"?"ACHTUNG – Jobs laufen nicht durch: ":"Hinweis: ")+(h.warnings||[]).join(" · ")
   +` · Letzter Sync: ${c.last_sync_status||"—"} (Serie ohne ok: ${c.deferred_streak??0}) · Plan ${c.plan_age_hours==null?"—":num(c.plan_age_hours,0)+" h"} · Discovery ${c.discovery_age_hours==null?"—":num(c.discovery_age_hours,0)+" h"} alt`;
 }
-const STATE_LABELS={protect_momentum:"Momentum schützen",scale_opportunity:"Chance skalieren",needs_packaging_test:"Packaging testen",needs_retention_analysis:"Retention analysieren",needs_discovery:"Discovery verbessern",revival_candidate:"Revival-Kandidat",observe:"Beobachten",paid_cooldown:"Paid-Cooldown",paid_excluded:"Aktuell Paid beeinflusst",insufficient_data:"Zu wenig Daten"};
+const STATE_LABELS={protect_momentum:"Momentum schützen",scale_opportunity:"Chance skalieren",needs_packaging_test:"Packaging testen",needs_retention_analysis:"Retention analysieren",needs_discovery:"Discovery verbessern",needs_distribution:"Verteilung fehlt – Distribution zuerst",revival_candidate:"Revival-Kandidat",observe:"Beobachten",paid_cooldown:"Paid-Cooldown",paid_excluded:"Aktuell Paid beeinflusst",insufficient_data:"Zu wenig Daten"};
 const PAID_LABELS={organic:"Aktuell organisch",organic_with_paid_history:"Aktuell organisch · historisch Werbung",paid_cooldown:"Paid-Cooldown",paid_excluded:"Aktuell Paid beeinflusst"};
 function paidCell(r){const p=r.paid||{};const s=r.paid_status||"organic";const extra=s==="paid_cooldown"||s==="paid_excluded"?` · noch ${p.days_until_clean??"?"} saubere Tage (${p.clean_days??0}/${p.required_clean_days||32})`:"";return `<span class="${s==="paid_excluded"?"down":s==="organic"?"up":""}">${esc(PAID_LABELS[s]||s)}</span><small>${esc(r.paid_note||"")}${esc(extra)}</small>`}
-const ACTION_LABELS={protect_no_change:"Nichts ändern – Momentum schützen",test_title:"Titel testen",test_thumbnail:"Thumbnail testen",test_title_thumbnail:"Titel + Thumbnail testen",investigate_retention:"Retention untersuchen",improve_discovery:"Discovery verbessern",cross_promote:"Quer bewerben",create_followup_content:"Folgevideo planen",observe:"Beobachten",target_search_opportunity:"Suchintention gezielt bedienen",target_suggested_cluster:"Suggested-Cluster ansteuern",packaging_for_audience:"Packaging für Ziel-Audience",revive_existing_video:"Bestehendes Video reaktivieren"};
+const ACTION_LABELS={protect_no_change:"Nichts ändern – Momentum schützen",test_title:"Titel testen",test_thumbnail:"Thumbnail testen",test_title_thumbnail:"Titel + Thumbnail testen",investigate_retention:"Retention untersuchen",improve_discovery:"Discovery verbessern",cross_promote:"Quer bewerben",create_followup_content:"Folgevideo planen",observe:"Beobachten",target_search_opportunity:"Suchintention gezielt bedienen",target_suggested_cluster:"Suggested-Cluster ansteuern",packaging_for_audience:"Packaging für Ziel-Audience",revive_existing_video:"Bestehendes Video reaktivieren",distribute_playlist_context:"Verteilung über Playlist/Endscreen erhöhen",probe_missing_evidence:"Fehlende Evidenz risikoarm beschaffen"};
 const OUTCOME_LABELS={positive:"positiv",negative:"negativ",neutral:"neutral",inconclusive:"unklar"};
 const stateClass=s=>s==="protect_momentum"||s==="scale_opportunity"||s==="revival_candidate"?"up":s==="paid_excluded"?"down":"";
 function scoreText(s){return s==null?"—":num(s,0)}
 function trackText(record,action){const r=record?.[action];return r?`${r.positive}+ / ${r.negative}− / ${r.neutral}= / ${r.inconclusive}?`:"noch keine"}
+function renderQueue(p){
+ // JETZT TUN: was ein Mensch heute ausführt. YouTube bleibt read-only – nichts davon passiert automatisch.
+ const q=(p&&p.queue)||[],running=(p&&p.running_experiments)||[],results=(p&&p.results)||[];
+ $("queueTitle").textContent=q.length?`Jetzt tun: ${q.length} Experiment${q.length>1?"e":""}`:"Heute kein ausführbares Experiment";
+ $("queueMeta").textContent=p?`Plan vom ${p.day||"—"} · höchstens ${p.queue_limit||3} gleichzeitig`:"";
+ $("queueNote").textContent=(p&&p.queue_note)||"";
+ $("queueList").innerHTML=q.map(e=>{
+  const ev=e.evidence||{},b=e.baseline||{};
+  return `<article class="queue-item"><h3>#${e.rank} ${esc(e.title)} — ${esc(ACTION_LABELS[e.action]||e.action)}</h3>
+  <p><strong>Ziel:</strong> ${esc(e.objective||"—")}${e.audience?" · <strong>Audience/Kontext:</strong> "+esc(e.audience):""}</p>
+  <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
+  <p><strong>Evidenz:</strong> ${esc(EVIDENCE_LABELS[ev.level]||"keine externe Chance")}${ev.demand_source?" · "+esc(evidenceText(ev)):""}${ev.uncertainty?" · Unsicherheit "+esc(ev.uncertainty):""}${ev.confidence?" · Confidence "+esc(ev.confidence):""}</p>
+  ${(ev.family_labels||[]).length?`<ul class="muted">${ev.family_labels.map(f=>"<li>"+esc(f)+"</li>").join("")}</ul>`:""}
+  ${ev.own_route?`<p class="muted">Belegte eigene Route: ${esc(ev.own_route.label)} (${num((ev.own_route.share||0)*100,0)} % von ${num(ev.own_route.views_7d)} Views)</p>`:""}
+  ${(ev.missing||[]).length?`<p><strong>Fehlende Evidenz:</strong> ${ev.missing.map(esc).join("; ")}</p>`:""}
+  <ol>${(e.steps||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>
+  <p><strong>Baseline:</strong> ${num(b.views_7d)} Views/7 T · ${b.impressions_7d==null?"Impressions unbekannt":num(b.impressions_7d)+" Impressions"} · CTR ${b.ctr_7d==null?"—":num(b.ctr_7d*100,1)+" %"} <small>${esc(b.note||"")}</small></p>
+  <p><strong>Erwartetes Signal:</strong> ${esc(e.expected_signal||"")} · <strong>Messfenster:</strong> ${e.window_days} Tage (ab ${esc(e.measure_from)}, Auswertung ${esc(e.evaluate_after)})</p>
+  <p><strong>Erfolg:</strong> ${esc(e.success_criterion||"")}</p>
+  <p><strong>Abbruch:</strong> ${esc(e.stop_criterion||"")}</p>
+  <p><strong>Nicht verändern:</strong> ${(e.do_not_change||[]).map(esc).join(", ")}</p>
+  <p class="notice">${esc(e.note||"")}</p></article>`}).join("")||"<p class='muted'>Kein Vorschlag: geschützte oder laufende Videos, oder die Evidenz reicht nicht für ein konkretes Experiment.</p>";
+ $("queueRunning").innerHTML=running.length?`<h3>Läuft gerade (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
+ $("queueResults").innerHTML=results.length?`<h3>Ergebnisse abgeschlossener Experimente</h3><ul>${results.map(r=>`<li>${esc(r.created_day)} ${esc(ACTION_LABELS[r.action]||r.action)} (${esc(r.video_id)}): <strong>${esc(OUTCOME_LABELS[r.outcome]||r.outcome||"offen")}</strong>${r.metric?` · ${esc(r.metric)} ${num(r.before)} → ${num(r.after)}${r.relative_change==null?"":" ("+(r.relative_change>=0?"+":"")+num(r.relative_change*100,0)+" %)"}`:""}${r.reason?" · "+esc(r.reason):""}<small>${esc(r.note||"")}</small></li>`).join("")}</ul>`:"";
+}
 function renderGrowth(g){
+ renderQueue(g&&g.plan);
  const p=g?.plan;
  if(!p){$("growthTitle").textContent="Noch kein Growth Plan";$("growthDay").textContent="";$("growthTop").innerHTML="";$("growthDetail").innerHTML="<p class='muted'>Der nächste stündliche Sync erzeugt den ersten Plan.</p>";$("growthRanking").innerHTML="";return}
  const top=(p.ranking||[]).find(r=>r.video_id===p.priority_video_id)||{};
@@ -61,8 +87,8 @@ function renderGrowth(g){
 }
 const GAP_LABELS={existing_video_opportunity:"Bestehendes Video sichtbar machen",packaging_opportunity:"Packaging für diese Audience",search_opportunity:"Search-Chance",suggested_opportunity:"Suggested/Browse-Chance",followup_content_opportunity:"Folgevideo-Chance",insufficient_evidence:"Zu wenig Evidenz"};
 const KIND_LABELS={search:"Suchintention",suggested:"Nachbarvideo",cluster:"Audience-Cluster"};
-const evidenceText=e=>e?.demand_source==="own_analytics"?"eigene Analytics (real)":"öffentlicher Proxy";
-const EVIDENCE_LABELS={own_analytics:"belegt (eigene Analytics)",probe:"nur Proxy – Hypothese",none:"keine Evidenz"};
+const evidenceText=e=>e?.demand_source==="own_analytics"?"eigene Analytics (real)":e?.demand_source==="own_traffic_plus_public_proxy"?"eigene Traffic-Quellen + öffentlicher Proxy":"öffentlicher Proxy";
+const EVIDENCE_LABELS={own_analytics:"belegt (eigene Analytics)",multi_signal_proxy:"mehrere unabhängige Signale",weak_proxy:"nur Proxy – Hypothese",probe:"nur Proxy – Hypothese",none:"keine Evidenz"};
 const evidenceBadge=e=>`${esc(EVIDENCE_LABELS[e?.evidence_level]||evidenceText(e))}${e?.score_capped?" · Score gedeckelt":""}${e?.actionable?"":" · nicht handlungsauslösend"}`;
 function trendText(t){const s=(t||[]).map(x=>x.score).filter(x=>x!=null);if(s.length<2)return "neu";const d=s.at(-1)-s[0];return (d>=0?"+":"")+num(d,0)+" über "+s.length+" Tage"}
 function renderDiscovery(d){

@@ -172,7 +172,7 @@ def test_opportunities_are_classified_with_evidence_and_paid_is_never_demand(mon
     shine = rows[("search", "shine acoustic")]
     assert shine.video_id == "b" and shine.evidence["paid_status"] == "paid_cooldown" and shine.evidence["demand_source"] == "public_proxy"
     # Proxy-only: gedeckelt, nicht handlungsauslösend.
-    assert shine.evidence["evidence_level"] == "probe" and shine.evidence["actionable"] is False
+    assert shine.evidence["evidence_level"] == "weak_proxy" and shine.evidence["actionable"] is False
     assert shine.scores["search_opportunity_score"] <= discovery.PROXY_SCORE_CAP
     demand = next(c for c in shine.components["components"] if c["name"].startswith("Eigene Views aus diesem Suchbegriff"))
     assert demand["available"] is False and "Werbephase" in (demand["note"] or "")
@@ -199,7 +199,7 @@ def test_external_opportunity_steers_v5_action_but_never_overrides_protection():
     action, notes = ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong)
     assert action == "target_search_opportunity" and "own_analytics" in notes[0]
     # Proxy-only Chance (keine unabhaengige Evidenz) loest niemals eine aktive Massnahme aus.
-    assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "actionable": False, "evidence_level": "probe"})[0] == "observe"
+    assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "actionable": False, "evidence_level": "weak_proxy"})[0] == "observe"
     assert ge.choose_action("needs_discovery", f, {"signals": []}, base, [], {}, {**strong, "gap": "suggested_opportunity", "kind": "suggested"})[0] == "target_suggested_cluster"
     assert ge.choose_action("needs_packaging_test", f, {"signals": []}, base, [], {}, {**strong, "gap": "packaging_opportunity"})[0] == "packaging_for_audience"
     assert ge.choose_action("revival_candidate", f, {"signals": ["x", "y"]}, base, [], {}, strong)[0] == "revive_existing_video"
@@ -250,13 +250,15 @@ def test_memory_scores_opportunities_after_window_and_weights_stay_bounded(monke
     assert rows[("suggested", "ext00000001")].outcome == "positive"        # 0 → 25
     assert rows[("cluster", "train")].outcome == "inconclusive"
     assert all(r.status == "evaluated" and "nicht kausal" in (r.evaluation.get("detail") or "") or r.outcome != "positive" for r in rows.values())
-    weights, record = discovery.memory_weights(session)
-    assert record["search"]["n"] == 2 and weights == {}  # fewer than five decided outcomes: no prior shift
+    weights, level_weights, record = discovery.memory_weights(session)
+    assert record["by_kind"]["search"]["n"] == 2 and weights == {}  # fewer than five decided outcomes: no prior shift
+    assert "Nur" in record["by_kind"]["search"]["basis"] and record["by_kind"]["search"]["weight"] == 1.0
+    assert record["by_evidence_level"], "Ergebnisse werden auch je Evidenzstufe gefuehrt"
     for i in range(5):
         session.add(DiscoveryOpportunity(day=old-timedelta(days=i+1), kind="search", key=f"k{i}", gap="search_opportunity", scores={}, components={}, evidence={},
                                          status="evaluated", outcome="positive"))
     session.commit()
-    weights, _ = discovery.memory_weights(session)
+    weights, _, _ = discovery.memory_weights(session)
     assert 0.85 <= weights["search"] <= 1.15
 
 

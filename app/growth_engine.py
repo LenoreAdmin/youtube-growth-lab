@@ -14,19 +14,27 @@ from .backfill import upsert
 from .history import pacific_day, lag_days, features_at, paid_profile, PAID_WINDOW_DAYS
 from .metrics import aware
 from .strategy import confidence as v4_confidence, NO_MANIPULATION, GENERALIZATION_NOTE
-from .regimes import usable_median
+from .regimes import usable_median, MIN_WEEKLY_VIEWS
 from .discovery import best_for_video as external_opportunity
 
 VERSION = "growth-v5"
 STATES = ["protect_momentum", "scale_opportunity", "needs_packaging_test", "needs_retention_analysis", "needs_discovery",
-          "revival_candidate", "observe", "paid_cooldown", "paid_excluded", "insufficient_data"]
+          "needs_distribution", "revival_candidate", "observe", "paid_cooldown", "paid_excluded", "insufficient_data"]
 PAID_LABELS = {"organic": "Aktuell organisch", "organic_with_paid_history": "Aktuell organisch – historisch Werbung vorhanden",
                "paid_cooldown": "Paid-Cooldown", "paid_excluded": "Aktuell Paid beeinflusst"}
 ACTIONS = ["protect_no_change", "test_title", "test_thumbnail", "test_title_thumbnail", "investigate_retention",
            "improve_discovery", "cross_promote", "create_followup_content", "observe",
-           "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video"]
+           "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video",
+           "distribute_playlist_context", "probe_missing_evidence"]
 EXTERNAL_MIN_SCORE = 60  # Relative external score needed before an external opportunity may drive the action.
-EXTERNAL_STATES = ("observe", "needs_discovery", "needs_packaging_test", "scale_opportunity", "revival_candidate")
+EXTERNAL_STATES = ("observe", "needs_discovery", "needs_distribution", "needs_packaging_test", "scale_opportunity", "revival_candidate")
+ABS_CTR_OK = 0.04         # Without a usable channel median, 4 % click-through is not a packaging problem.
+LOW_IMPRESSIONS_7D = 300  # Absolute delivery floor used only until the channel has its own impressions median.
+SCARCE_SHARE = 0.5        # Below half the channel median of impressions, delivery is the bottleneck.
+MIN_ROUTE_VIEWS = 10      # Below this the 7-day traffic mix is noise and names no route.
+QUEUE_LIMIT = 3           # A short daily queue: never ten simultaneous changes on one channel.
+ROUTE_LABELS = {"traffic_search": "YouTube-Suche", "traffic_suggested": "Empfehlungen neben anderen Videos",
+                "traffic_browse": "Kanalseite, Playlists, Startseite, Endscreens", "traffic_external": "externe Links"}
 GAP_ACTIONS = {"existing_video_opportunity": "target_search_opportunity", "search_opportunity": "target_search_opportunity",
                "suggested_opportunity": "target_suggested_cluster", "packaging_opportunity": "packaging_for_audience",
                "followup_content_opportunity": "create_followup_content"}
@@ -36,14 +44,17 @@ SCORE_NOTE = "Relativer Priorisierungswert für diesen Kanal (0–100), keine Wa
 OBJECTIVES = {"protect_no_change": "Discovery", "test_title": "Viewer", "test_thumbnail": "Viewer", "test_title_thumbnail": "Viewer",
               "investigate_retention": "Watchtime", "improve_discovery": "Discovery", "cross_promote": "Discovery",
               "create_followup_content": "Subscriber", "observe": "Watchtime", "target_search_opportunity": "Viewer",
-              "target_suggested_cluster": "Discovery", "packaging_for_audience": "Viewer", "revive_existing_video": "Viewer"}
+              "target_suggested_cluster": "Discovery", "packaging_for_audience": "Viewer", "revive_existing_video": "Viewer",
+              "distribute_playlist_context": "Discovery", "probe_missing_evidence": "Discovery"}
 WINDOWS = {"protect_no_change": 7, "test_title": 14, "test_thumbnail": 14, "test_title_thumbnail": 14, "investigate_retention": 14,
            "improve_discovery": 14, "cross_promote": 14, "create_followup_content": 30, "observe": 7,
-           "target_search_opportunity": 28, "target_suggested_cluster": 28, "packaging_for_audience": 14, "revive_existing_video": 28}
+           "target_search_opportunity": 28, "target_suggested_cluster": 28, "packaging_for_audience": 14, "revive_existing_video": 28,
+           "distribute_playlist_context": 14, "probe_missing_evidence": 14}
 TARGETS = {"protect_no_change": "views_7d", "test_title": "views_7d", "test_thumbnail": "ctr_or_views", "test_title_thumbnail": "ctr_or_views",
            "investigate_retention": "watch_minutes_7d", "improve_discovery": "discovery_views_7d", "cross_promote": "views_7d",
            "create_followup_content": "subscribers_7d", "observe": "views_7d", "target_search_opportunity": "discovery_views_7d",
-           "target_suggested_cluster": "discovery_views_7d", "packaging_for_audience": "ctr_or_views", "revive_existing_video": "views_7d"}
+           "target_suggested_cluster": "discovery_views_7d", "packaging_for_audience": "ctr_or_views", "revive_existing_video": "views_7d",
+           "distribute_playlist_context": "discovery_views_7d", "probe_missing_evidence": "impressions_7d"}
 DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags", "Sichtbarkeit", "Endscreens des Videos"],
                  "test_title": ["Thumbnail", "Beschreibung", "Kapitel"], "test_thumbnail": ["Titel", "Beschreibung", "Kapitel"],
                  "test_title_thumbnail": ["Beschreibung", "Videoinhalt", "Sichtbarkeit"],
@@ -51,7 +62,10 @@ DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags"
                  "cross_promote": ["Titel und Thumbnail des beworbenen Videos"], "create_followup_content": ["Bestehendes Video"],
                  "observe": ["Alles – zuerst messen"], "target_search_opportunity": ["Thumbnail", "Videoinhalt"],
                  "target_suggested_cluster": ["Titel", "Thumbnail", "Videoinhalt"], "packaging_for_audience": ["Videoinhalt", "Sichtbarkeit"],
-                 "revive_existing_video": ["Videoinhalt", "Sichtbarkeit"]}
+                 "revive_existing_video": ["Videoinhalt", "Sichtbarkeit"],
+                 # Distribution-Experimente fassen das Paket ausdrücklich nicht an: sonst misst man zwei Dinge gleichzeitig.
+                 "distribute_playlist_context": ["Titel", "Thumbnail", "Videoinhalt", "Sichtbarkeit"],
+                 "probe_missing_evidence": ["Titel", "Thumbnail", "Videoinhalt", "Sichtbarkeit"]}
 MIN_TRACK_RECORD = 3
 
 
@@ -276,6 +290,58 @@ def revival(f, regime, base, peak):
                       +(f" – organisches Revival nach Werbung (letzter Werbetag {profile.get('last_paid_day')}, {profile.get('clean_days')} saubere Tage; Peak nur aus werbefreien Wochen)." if paid == "organic_with_paid_history" else "")}
 
 
+def packaging_ok(f, base):
+    """Is the package (title/thumbnail) demonstrably not the bottleneck?
+
+    A video with a click-through rate at or above the channel median and retention that is not below it
+    is being clicked when it is shown. Forcing a thumbnail or title test there tests the wrong thing.
+    """
+    if not f:
+        return False, "Keine Features: Paketqualität unbekannt."
+    ctr, med = f.get("ctr_7d"), (base or {}).get("medians", {})
+    if ctr is None:
+        return False, "CTR unbekannt (keine Impressions-Daten im Fenster)."
+    ref = med.get("ctr_7d", {})
+    if usable_median(ref):
+        ok_ctr, why = ctr >= ref["median"], f"CTR {ctr*100:.1f} % vs Kanalmedian {ref['median']*100:.1f} %"
+    else:
+        ok_ctr, why = ctr >= ABS_CTR_OK, f"CTR {ctr*100:.1f} % (kein belastbarer Kanalmedian, Schwelle {ABS_CTR_OK*100:.0f} %)"
+    retention, rref = f.get("retention_avg"), med.get("retention_avg", {})
+    if retention is not None and usable_median(rref) and retention < rref["median"]*0.9:
+        return False, why+f"; Retention {retention:.2f} unter Kanalmedian {rref['median']:.2f}"
+    return bool(ok_ctr), why+("; Retention nicht unter Kanalmedian" if retention is not None else "; Retention unbekannt")
+
+
+def distribution_scarce(f, base):
+    """Is the video barely delivered at all? Measured against the channel's own impressions median."""
+    if not f:
+        return False, None
+    impressions, ref = f.get("impressions_7d"), (base or {}).get("medians", {}).get("impressions_7d", {})
+    if impressions is None:
+        # Ohne Impressions-Daten ersatzweise die ausgelieferte Menge: keine Views heißt keine Verteilung.
+        views = f.get("views_7d")
+        return (views is not None and views < MIN_WEEKLY_VIEWS,
+                {"basis": "views_7d", "views_7d": views, "threshold": MIN_WEEKLY_VIEWS, "impressions_7d": None})
+    if usable_median(ref):
+        return impressions < ref["median"]*SCARCE_SHARE, {"basis": "impressions_vs_channel_median", "impressions_7d": impressions,
+                                                          "channel_median": ref["median"], "share": SCARCE_SHARE}
+    return impressions < LOW_IMPRESSIONS_7D, {"basis": "impressions_absolute_floor", "impressions_7d": impressions,
+                                              "threshold": LOW_IMPRESSIONS_7D,
+                                              "note": "Kanalmedian für Impressions noch nicht belastbar."}
+
+
+def known_route(f):
+    """The strongest real traffic route of the last known week – the concrete starting point for distribution."""
+    total = (f or {}).get("traffic_total_7d") or 0
+    if total < MIN_ROUTE_VIEWS:
+        return None
+    key = max(ROUTE_LABELS, key=lambda k: (f.get(k) or 0))
+    share = f.get(key)
+    if not share:
+        return None
+    return {"key": key, "label": ROUTE_LABELS[key], "share": round(share, 3), "views_7d": total}
+
+
 def state_of(f, regime, base, rev):
     status = regime["regime"]
     if status == "paid_excluded":
@@ -283,13 +349,16 @@ def state_of(f, regime, base, rev):
         return "paid_excluded" if paid == "paid_excluded" else "paid_cooldown"
     if f is None:
         return "insufficient_data"
+    if status in PROTECT_REGIMES:
+        return "protect_momentum"     # Schutz geht allem voraus; low_activity kann nie ein Breakout sein.
     if regime.get("low_activity"):
         # Belegte Distributionslücke statt Rauschen-Momentum: handlungsfähig, aber nie geschützt.
-        return "needs_discovery"
+        return "needs_distribution"
+    scarce, _ = distribution_scarce(f, base)
     if status == "insufficient_data":
-        return "insufficient_data"
-    if status in PROTECT_REGIMES:
-        return "protect_momentum"
+        # Ohne belastbare Kanal-Baseline ist „zu wenig Daten“ kein Endzustand, wenn die Auslieferung
+        # nachweislich fast null ist: dann ist die Verteilung das Problem und messbar angreifbar.
+        return "needs_distribution" if scarce else "insufficient_data"
     if status == "growing":
         return "scale_opportunity"
     if rev.get("candidate"):
@@ -300,26 +369,79 @@ def state_of(f, regime, base, rev):
         return usable_median(ref) and f.get(key) is not None and f[key] < ref["median"]
     if status == "declining" and (below("retention_avg") or below("pct_7d")):
         return "needs_retention_analysis"
+    # Verteilung vor Verpackung: wer kaum ausgeliefert wird, hat kein Thumbnail-Problem, sondern ein Distributionsproblem.
+    if scarce and packaging_ok(f, base)[0]:
+        return "needs_distribution"
     if status == "declining" and (below("ctr_7d") or f.get("ctr_7d") is None):
         return "needs_packaging_test"
     share = discovery_share(f)
     ref = [med.get(k, {}) for k in DISCOVERY_KEYS]
     if share is not None and all(usable_median(r) for r in ref) and share < sum(r["median"] for r in ref)*0.8:
         return "needs_discovery"
+    if scarce:
+        # Auslieferung praktisch null: Beobachten ist hier kein Endzustand.
+        return "needs_distribution"
     return "observe"
 
 
 # ----------------------------------------------------------------------------- actions
 def track_record(session):
-    """Observed outcomes per action type; descriptive, not a causal effect estimate."""
-    record = {}
+    """Observed outcomes per action type and per evidence level; descriptive, not a causal effect estimate."""
+    record, by_level = {}, {}
     for row in session.scalars(select(GrowthAction).where(GrowthAction.status == "evaluated")):
         entry = record.setdefault(row.action, {"positive": 0, "negative": 0, "neutral": 0, "inconclusive": 0, "n": 0})
         entry[row.outcome] = entry.get(row.outcome, 0)+1
         entry["n"] += 1
-    for entry in record.values():
+        level = ((row.payload or {}).get("audience") or {}).get("evidence_level") or "ohne externe Evidenz"
+        bucket = by_level.setdefault(level, {"positive": 0, "negative": 0, "neutral": 0, "inconclusive": 0, "n": 0})
+        bucket[row.outcome] = bucket.get(row.outcome, 0)+1
+        bucket["n"] += 1
+    for entry in list(record.values())+list(by_level.values()):
         entry["net_negative"] = entry["n"] >= MIN_TRACK_RECORD and entry["negative"] > entry["positive"]
+        entry["proven"] = False
+        entry["basis"] = (f"{entry['positive']} positiv / {entry['negative']} negativ bei {entry['n']} ausgewerteten Fällen"
+                          if entry["n"] >= MIN_TRACK_RECORD else
+                          f"Nur {entry['n']} ausgewertete Fälle (< {MIN_TRACK_RECORD}): nichts bewiesen, keine Gewichtsänderung.")
+    record["by_evidence_level"] = by_level
     return record
+
+
+def distribution_action(f, base, external):
+    """Almost no delivery: run a low-risk distribution experiment, or fetch the evidence that is missing.
+
+    Never a packaging test here – with a working click-through rate the package is not the bottleneck,
+    and changing it would only contaminate the measurement of the distribution change.
+    """
+    ok, why = packaging_ok(f, base)
+    route = known_route(f)
+    _, detail = distribution_scarce(f, base)
+    head = f"Auslieferung zu gering ({detail.get('basis')}): "+(f"Paket ist nicht der Engpass – {why}." if ok else why+".")
+    if route:
+        return "distribute_playlist_context", [head, f"Belegte eigene Route: {route['label']} "
+                f"({route['share']*100:.0f} % von {route['views_7d']} Views der letzten bekannten Woche) – dort ansetzen, "
+                "ohne Titel oder Thumbnail anzufassen."]
+    missing = [m["what"] for m in ((external or {}).get("missing_evidence") or [])][:3]
+    return "probe_missing_evidence", [head, "Keine belastbare Hypothese: "
+            + ("Es fehlt " + "; ".join(missing)+"." if missing else
+               f"Der eigene Quellenmix der letzten Woche hat weniger als {MIN_ROUTE_VIEWS} Views und nennt keine Route."),
+            "Risikoarmes Experiment beschafft genau diese Evidenz, ohne das Paket zu verändern."]
+
+
+def recent_results(session, limit=6):
+    """Finished experiments with their observed outcome – the visible end of the learning loop."""
+    out = []
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.status.in_(["evaluated", "superseded"]))
+                               .order_by(GrowthAction.evaluated_at.desc()).limit(limit)):
+        detail = ((row.evaluation or {}).get("detail") or {}) if isinstance((row.evaluation or {}).get("detail"), dict) else {}
+        audience = (row.payload or {}).get("audience") or {}
+        out.append({"video_id": row.video_id, "action": row.action, "created_day": str(row.created_day),
+                    "window_days": row.window_days, "status": row.status, "outcome": row.outcome,
+                    "metric": detail.get("metric"), "before": detail.get("before"), "after": detail.get("after"),
+                    "relative_change": detail.get("relative_change"),
+                    "reason": detail.get("reason") or (row.evaluation or {}).get("reason"),
+                    "evidence_level": audience.get("evidence_level"), "demand_source": audience.get("demand_source"),
+                    "note": "Beobachtete Veränderung im Messfenster, keine nachgewiesene Ursache."})
+    return out
 
 
 def choose_action(state, f, rev, base, experiments, record, external=None):
@@ -340,6 +462,8 @@ def choose_action(state, f, rev, base, experiments, record, external=None):
         action = "revive_existing_video" if state == "revival_candidate" and external["gap"] != "packaging_opportunity" else GAP_ACTIONS[external["gap"]]
         notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Evidenz: "
                  f"{external.get('evidence_level')}) lenkt die Aktion."]
+    elif state == "needs_distribution":
+        action, notes = distribution_action(f, base, external)
     elif state == "scale_opportunity":
         action = "cross_promote"
     elif state == "needs_retention_analysis":
@@ -372,7 +496,71 @@ def choose_action(state, f, rev, base, experiments, record, external=None):
     return action, notes
 
 
-def action_details(action, state, f, regime, base, scoreboard, rev, momentum, conf, notes, experiments, external=None):
+def experiment_steps(action, title, f, external, channel):
+    """Executable steps for a human: which video, which audience, which surface, in which order.
+
+    Nothing here is performed by the system – YouTube stays read-only. Every step names a concrete
+    object (playlist, end screen, description, the own video to link from) instead of a category.
+    """
+    leader = (channel or {}).get("delivery_leader")
+    from_leader = (f"aus „{leader['title']}“" if leader else "aus deinem am besten ausgelieferten Video")
+    route = known_route(f)
+    audience = (external or {}).get("audience") or (external or {}).get("key")
+    context = audience or (route or {}).get("label") or "das Thema des Videos"
+    tokens = ", ".join((external or {}).get("shared_tokens") or []) or None
+    hold = "Während des Messfensters keine weitere Änderung an diesem Video – sonst misst du zwei Dinge gleichzeitig."
+    steps = {
+        "distribute_playlist_context": [
+            f"Playlist: „{title}“ in eine thematische Playlist zu {context} aufnehmen (oder eine anlegen) und dort auf Position 1–3 setzen.",
+            f"Endscreen und Info-Karte {from_leader} auf dieses Video verlinken.",
+            f"Beschreibung: zwei bis drei Sätze Themenkontext zu {context} ergänzen"+(f" (vorhandene gemeinsame Begriffe: {tokens})" if tokens else "")
+            + "; Titel und Thumbnail bleiben unverändert.",
+            hold],
+        "probe_missing_evidence": [
+            f"Auslieferung überhaupt erzeugen: „{title}“ in eine thematische Playlist aufnehmen und {from_leader} per Endscreen verlinken.",
+            "Beschreibung um zwei bis drei Sätze Themenkontext ergänzen; Paket (Titel, Thumbnail) bleibt unverändert.",
+            "Nach dem Messfenster entscheidet die Messung: Bleiben die Impressions praktisch null, ist die Auslieferung der Engpass "
+            "und ein Packaging-Test wäre Verschwendung gewesen. Steigen sie, liegt eine belastbare Basis für den nächsten Test vor.",
+            hold],
+        "target_search_opportunity": [
+            f"Suchintention „{(external or {}).get('key')}“ im Wortlaut aufnehmen: Beschreibung (erste zwei Zeilen) und Kapitelnamen anpassen, ohne Clickbait.",
+            f"Playlist mit genau diesem Themenschnitt anlegen bzw. „{title}“ dort einsortieren.",
+            "Titel nur ändern, wenn der Begriff dort fehlt – dann als einzige Änderung.",
+            hold],
+        "target_suggested_cluster": [
+            f"Themenkontext von „{context}“ in Beschreibung und Playlist spiegeln, damit die Empfehlung neben diesen Videos wahrscheinlicher wird.",
+            f"Endscreen {from_leader} auf dieses Video setzen; Reihenfolge in der Playlist an den Cluster anpassen.",
+            "Keine Titel-/Thumbnail-Änderung in diesem Fenster.",
+            hold],
+        "improve_discovery": [
+            f"Playlist-Kontext und Endscreens für „{title}“ setzen; Beschreibung mit konkretem Suchbezug zu {context} ergänzen.",
+            "Kapitelmarken setzen, damit Suchtreffer auf Abschnitte zeigen können.",
+            hold],
+        "cross_promote": [
+            f"Endscreen und Info-Karte {from_leader} auf „{title}“ verlinken.",
+            "Playlist so ordnen, dass dieses Video direkt auf das stärkere folgt.",
+            hold],
+        "packaging_for_audience": [
+            f"Genau eine Dimension ändern (Thumbnail oder Titel) und dabei die Sprache der Zielgruppe „{context}“ verwenden.",
+            "Alte Fassung sichern, Zeitpunkt der Änderung notieren.",
+            hold],
+        "revive_existing_video": [
+            f"„{title}“ für {context} reaktivieren: Playlist-Einordnung, Endscreens {from_leader}, Community-Post ohne Kaufaufforderung.",
+            "Titel nur anfassen, wenn der Zielbegriff fehlt – dann als einzige Änderung.",
+            hold],
+        "test_thumbnail": [f"Nur das Thumbnail von „{title}“ tauschen, alte Fassung sichern, Zeitpunkt notieren.", hold],
+        "test_title": [f"Nur den Titel von „{title}“ ändern, alte Fassung sichern, Zeitpunkt notieren.", hold],
+        "test_title_thumbnail": [f"Titel und Thumbnail von „{title}“ gemeinsam neu positionieren; beides dokumentieren.",
+                                 "Wirkung ist danach nicht mehr auf eine Dimension zurückführbar – bewusst akzeptiert.", hold],
+        "investigate_retention": [f"Retention-Kurve von „{title}“ auf Abbruchstellen prüfen (erste 30 Sekunden, Kapitelgrenzen).",
+                                  "Erst nach dieser Analyse über Änderungen entscheiden – in diesem Fenster nichts ändern."],
+        "create_followup_content": [f"Folgevideo zum Muster von „{title}“ planen und vor Veröffentlichung im Experiment Memory registrieren.",
+                                    "Bestehendes Video unverändert lassen."],
+    }
+    return steps.get(action)
+
+
+def action_details(action, state, f, regime, base, scoreboard, rev, momentum, conf, notes, experiments, external=None, channel=None, title=None):
     """Reason, signals, counterarguments, target metric, window, success and stop criteria."""
     signals = []
     if external:
@@ -408,26 +596,51 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
         "target_suggested_cluster": f"Nachbarvideo/-cluster „{(external or {}).get('audience', '')}“ erreicht eine passende Audience: Endscreens, Playlists und Beschreibung auf diesen Themenkontext ausrichten, damit die Empfehlung neben diesen Videos wahrscheinlicher wird.",
         "packaging_for_audience": f"Das Video passt zu „{(external or {}).get('key', '')}“, aber Titel/Thumbnail sprechen diese Audience nicht an: Packaging für diese Zielgruppe testen (eine Dimension).",
         "revive_existing_video": f"Altes Video mit Revival-Signalen und externer Chance „{(external or {}).get('key', '')}“: gezielt für diese Audience reaktivieren (Playlist, Endscreens, Community-Post, ggf. Titel).",
+        "distribute_playlist_context": "Kaum Auslieferung bei funktionierendem Paket: Verteilung über Playlist-Kontext und Endscreens erhöhen, "
+                                       "ohne Titel oder Thumbnail zu verändern – sonst wird das Distributionsergebnis unlesbar.",
+        "probe_missing_evidence": "Kaum Auslieferung und keine belastbare Hypothese: risikoarmes Distributionsexperiment, das genau die "
+                                  "fehlende Evidenz erzeugt (wird das Video überhaupt ausgeliefert, wenn ein Kontext existiert?).",
     }[action]
     window = WINDOWS[action]
     target = TARGETS[action]
     success = {
         "protect_no_change": "7-Tage-Views bleiben ≥ 85 % des Vorher-Fensters; Regime bleibt wachsend/beschleunigend.",
         "observe": "Datenlage vollständig (Retention, Traffic, ggf. CTR) und Regime unverändert oder besser.",
+        "probe_missing_evidence": "Impressions im Nachher-Fenster ≥ +15 % gegenüber Vorher und messbar über null; damit ist belegt, "
+                                  "dass Auslieferung über Playlist/Endscreen erzeugbar ist. Bleiben sie bei ~0, ist das ebenfalls ein "
+                                  "verwertbares Ergebnis: der Engpass liegt in der Verteilung, nicht im Paket.",
     }.get(action, f"{target} im Nachher-Fenster ≥ +15 % gegenüber Vorher-Fenster und über der typischen Wochenschwankung des Kanals; ohne Werbetraffic.")
     stop = ("Nicht anwendbar – keine Änderung." if action in ("protect_no_change", "observe") else
+            "Playlist-Einordnung oder Endscreen zurücknehmen, wenn Views oder Watchtime ≥ 15 % unter dem Vorher-Fenster liegen; "
+            "als negativ protokollieren. Titel und Thumbnail bleiben ohnehin unverändert."
+            if action in ("distribute_playlist_context", "probe_missing_evidence") else
             "Views oder Watchtime im Nachher-Fenster ≥ 15 % unter Vorher, oder Retention fällt unter Kanalmedian: Änderung zurücknehmen und als negativ protokollieren.")
+    missing = [m["what"] for m in ((external or {}).get("missing_evidence") or [])]
+    if action == "probe_missing_evidence" and not missing:
+        missing = [f"Eigener Quellenmix mit mindestens {MIN_ROUTE_VIEWS} Views in der letzten bekannten Woche",
+                   "Eigene Suchbegriff-Details aus Analytics (YouTube liefert sie unterhalb der Aggregationsschwelle nicht)",
+                   "Eine öffentliche Such-/Nachbarschaftsprobe zu einem spezifischen Begriff"]
     template = None
     if action in ("test_title", "test_thumbnail", "test_title_thumbnail", "create_followup_content", "improve_discovery", "cross_promote",
-                  "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video"):
+                  "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video",
+                  "distribute_playlist_context", "probe_missing_evidence"):
         template = {"hypothesis": f"{action}: {reason}", "horizon_hours": 168 if window <= 14 else 720,
                     "design": "observational", "note": "Vor der Änderung im Experiment Memory registrieren; Zeitpunkt protokollieren."}
     return {"action": action, "state": state, "reason": reason, "notes": notes, "signals": signals, "against": against,
             "confidence": conf, "target_metric": target, "window_days": window, "success_criterion": success, "stop_criterion": stop,
+            "steps": experiment_steps(action, title or "dieses Video", f, external, channel),
+            "missing_evidence": missing, "route": known_route(f),
+            "baseline": {"known_end": (f or {}).get("known_end"), "views_7d": (f or {}).get("views_7d"),
+                         "impressions_7d": (f or {}).get("impressions_7d"), "ctr_7d": (f or {}).get("ctr_7d"),
+                         "retention_avg": (f or {}).get("retention_avg"), "traffic_total_7d": (f or {}).get("traffic_total_7d"),
+                         "discovery_share": discovery_share(f) if f else None,
+                         "note": "Vorher-Fenster sind die letzten 7 bekannten Analytics-Tage; Werbetage machen die Auswertung ungültig."},
+            "executed_automatically": False,
             "do_not_change": DO_NOT_CHANGE[action]+[NO_MANIPULATION], "objective": OBJECTIVES[action],
             "experiment_template": template, "linked_decision_ids": [e["decision_id"] for e in experiments],
             "audience": {"target": external.get("audience"), "opportunity": external.get("key"), "kind": external.get("kind"), "gap": external.get("gap"),
                          "score": external.get("score"), "demand_source": external.get("demand_source"), "shared_tokens": external.get("shared_tokens"),
+                         "evidence_level": external.get("evidence_level"), "families": external.get("families") or [],
                          "evidence": {k: v for k, v in (external.get("evidence") or {}).items() if k in ("own_search_views_90d", "own_suggested_views_90d", "probe", "channel", "views", "uncertainty", "missing")}}
                         if external else None,
             "read_only": "Empfehlung – das System ändert nichts auf YouTube.", "generalization": GENERALIZATION_NOTE}
@@ -448,6 +661,7 @@ def _window_metrics(history, start, end):
     reach = [history.reach[d] for d in days if d in history.reach and history.reach[d].ctr is not None]
     impressions = sum(r.impressions for r in reach)
     return {"days": len(days), "observed_days": len(rows), "views": views, "velocity": views/len(days), "watch_minutes": sum(r.watch_minutes for r in rows),
+            "impressions": impressions if reach else None,
             "subscribers": subs, "subscriber_conversion": subs/views if views else None,
             "discovery_views": discovery if traffic_total else None, "discovery_share": discovery/traffic_total if traffic_total else None,
             "ctr": sum(r.impressions*r.ctr for r in reach)/impressions if impressions else None,
@@ -496,6 +710,9 @@ def _outcome(row, before, after, base):
         key, b, a = "watch_minutes", before["watch_minutes"], after["watch_minutes"]
     elif target == "discovery_views_7d":
         key, b, a = "discovery_views", before["discovery_views"], after["discovery_views"]
+    elif target == "impressions_7d":
+        # Auslieferung selbst ist die Zielgröße: ohne Impressions gibt es nichts zu verpacken.
+        key, b, a = "impressions", before["impressions"], after["impressions"]
     elif target == "subscribers_7d":
         key, b, a = "subscribers", before["subscribers"], after["subscribers"]
     else:
@@ -515,6 +732,19 @@ def _outcome(row, before, after, base):
 
 
 # ----------------------------------------------------------------------------- orchestration
+def delivery_leader(contexts, exclude_id):
+    """The own video that is actually delivered best – the only credible place to link a starved video from."""
+    best = None
+    for c in contexts:
+        video, f = c["history"].video, c.get("features") or {}
+        if video.id == exclude_id:
+            continue
+        key = ((f.get("impressions_7d") or 0), (f.get("views_7d") or 0))
+        if key > (0, 0) and (best is None or key > best[0]):
+            best = (key, video)
+    return {"video_id": best[1].id, "title": best[1].title, "impressions_7d": best[0][0], "views_7d": best[0][1]} if best else None
+
+
 def run(session, now, contexts, base, budget=None):
     """One growth pass: evaluate old actions, score, decide and write today's plan. Idempotent per day."""
     today = pacific_day(now)
@@ -543,7 +773,8 @@ def run(session, now, contexts, base, budget=None):
             details = {**pending.payload, "notes": notes, "held_since": str(pending.created_day)}
         else:
             action, notes = choose_action(state, f, rev, base, c.get("experiments", []), record, external)
-            details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, c.get("experiments", []), external)
+            details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, c.get("experiments", []), external,
+                                     channel={"delivery_leader": delivery_leader(contexts, video.id)}, title=video.title)
             if pending and (pending.action != action):
                 pending.status, pending.outcome = "superseded", "inconclusive"
                 pending.evaluation = {"reason": f"Ersetzt durch {action} wegen Zustand {state}.", "superseded_on": str(today)}
@@ -569,6 +800,8 @@ def run(session, now, contexts, base, budget=None):
             "subscriber_score": board["subscriber"]["score"], "revival": rev["candidate"], "revival_signals": rev["signals"],
             "confidence": conf["level"], "reason": details["reason"], "notes": details.get("notes", []), "window_days": details["window_days"],
             "target_metric": details["target_metric"], "success_criterion": details["success_criterion"], "objective": details["objective"],
+            "stop_criterion": details["stop_criterion"], "steps": details.get("steps"), "baseline": details.get("baseline"),
+            "missing_evidence": details.get("missing_evidence") or [], "route": details.get("route"),
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": details.get("held_since"), "momentum": momentum,
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
@@ -581,7 +814,7 @@ def run(session, now, contexts, base, budget=None):
         r["paid_note"] = (f"{r['paid'].get('paid_days_total', 0)} Werbetage in der Historie, zuletzt {r['paid'].get('last_paid_day')}" if r["paid"].get("paid_days_total") else "nie beworben")
     for i, r in enumerate(ranking):
         r["priority"] = i+1
-    plan = daily_plan(ranking, today, record)
+    plan = daily_plan(ranking, today, record, recent_results(session))
     # Momentum ranking keeps `priority`; `active_rank` marks the active growth priority.
     statement = upsert(session, GrowthPlan).values(day=today, version=VERSION, created_at=now, plan=plan)
     session.execute(statement.on_conflict_do_update(index_elements=["day", "version"], set_={"plan": statement.excluded.plan, "created_at": statement.excluded.created_at}))
@@ -610,7 +843,48 @@ def active_eligible(row):
     return row["state"] not in INACTIVE_STATES and row["action"] not in PASSIVE_ACTIONS
 
 
-def daily_plan(ranking, today, record):
+def queue_entry(row, rank, today):
+    """One executable experiment, complete enough to act on without opening the code."""
+    ext = row.get("external") or {}
+    return {"rank": rank, "video_id": row["video_id"], "title": row["title"], "state": row["state"], "action": row["action"],
+            "objective": row["objective"], "audience": ext.get("audience") or (row.get("route") or {}).get("label"),
+            "opportunity": {"kind": ext.get("kind"), "key": ext.get("key"), "gap": ext.get("gap"), "score": ext.get("score")} if ext else None,
+            "why": row["reason"], "notes": row.get("notes") or [],
+            "evidence": {"level": ext.get("evidence_level"), "demand_source": ext.get("demand_source"),
+                         "families": ext.get("families") or [], "family_labels": ext.get("family_labels") or [],
+                         "uncertainty": ext.get("uncertainty"), "actionable": bool(ext.get("actionable")),
+                         "confidence": row.get("confidence"), "own_route": row.get("route"),
+                         "missing": row.get("missing_evidence") or []},
+            "baseline": row.get("baseline"), "steps": row.get("steps") or [],
+            "expected_signal": f"{row['target_metric']} steigt messbar über die Wochenschwankung des Kanals",
+            "target_metric": row["target_metric"], "window_days": row["window_days"],
+            "measure_from": str(today), "evaluate_after": row["next_evaluation"],
+            "success_criterion": row["success_criterion"], "stop_criterion": row.get("stop_criterion"),
+            "do_not_change": row["do_not_change"], "executed_automatically": False,
+            "status": "offen – von dir auszuführen",
+            "note": "Empfehlung. Das System hat nichts auf YouTube geändert und kann es nicht (Read-only-Zugriff)."}
+
+
+def experiment_queue(ranking, today):
+    """A short daily queue: at most one experiment per video, winners protected, running tests untouched."""
+    queue, running, rank = [], [], 0
+    for row in sorted((r for r in ranking if r["active_eligible"]),
+                      key=lambda r: (-(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0))):
+        if row.get("held_since"):
+            # Läuft bereits und wird gemessen: sichtbar halten, aber nicht erneut anstoßen.
+            running.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
+                            "held_since": row["held_since"], "evaluate_after": row["next_evaluation"],
+                            "target_metric": row["target_metric"],
+                            "note": "Läuft – bis zur Auswertung nichts weiter an diesem Video ändern."})
+            continue
+        if len(queue) >= QUEUE_LIMIT or any(q["video_id"] == row["video_id"] for q in queue):
+            continue
+        rank += 1
+        queue.append(queue_entry(row, rank, today))
+    return queue, running
+
+
+def daily_plan(ranking, today, record, results=None):
     """Two separate concepts: the momentum/performance ranking (protection stays visible at the top) and the
     active growth priority – the changeable video with the best evidence for additional organic growth."""
     for r in ranking:
@@ -632,9 +906,15 @@ def daily_plan(ranking, today, record):
     momentum_top = ranking[0] if ranking else None
     subscriber = max((r for r in ranking if r["subscriber_score"] is not None), key=lambda r: r["subscriber_score"], default=None)
     viewer = max((r for r in ranking if r["viewer_score"] is not None), key=lambda r: r["viewer_score"], default=None)
+    queue, running = experiment_queue(ranking, today)
     base = {"day": str(today), "version": VERSION, "ranking": ranking, "momentum_ranking": [r["video_id"] for r in ranking],
             "protected": protected, "track_record": record, "note": SCORE_NOTE+" "+GENERALIZATION_NOTE,
             "read_only": "Keine automatischen Änderungen auf YouTube.",
+            "queue": queue, "queue_limit": QUEUE_LIMIT, "running_experiments": running, "results": results or [],
+            "now_do": queue[0] if queue else None,
+            "queue_note": ("Ausführbare Experimente für heute – von dir auszuführen, das System ändert nichts auf YouTube. "
+                           f"Höchstens {QUEUE_LIMIT} gleichzeitig und nie zwei am selben Video."
+                           if queue else "Heute kein ausführbares Experiment: geschützte oder laufende Videos, oder Evidenz reicht nicht."),
             "momentum_top": {"video_id": momentum_top["video_id"], "title": momentum_top["title"], "state": momentum_top["state"],
                              "opportunity_score": momentum_top["opportunity_score"]} if momentum_top else None,
             "subscriber_focus": subscriber["video_id"] if subscriber else None, "viewer_focus": viewer["video_id"] if viewer else None,
