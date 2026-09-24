@@ -560,6 +560,23 @@ def run(session, now=None, budget=None, http=None):
     log.info("acquisition surfaces=%s per_kind=%s proposed=%s blocked=%s evaluated=%s issues=%s",
              result.get("surfaces"), result.get("per_kind"), result.get("proposed"),
              len(result.get("blocked") or []), result.get("evaluated"), len(result.get("issues") or []))
+    # Betriebssichtbarkeit fuer einen PC-off-Betrieb: was schlaegt die Engine heute konkret vor und
+    # welche Flaechen stehen dahinter. Kanaleigene Daten, keine Secrets.
+    try:
+        view = overview(session, now)
+        for entry in view["traffic_queue"]:
+            log.info("acquisition proposal video=%r surface=%r source=%s metric=%s potential=%s expected_weekly=%s",
+                     entry["title"], entry["surface"], entry["traffic_source"], entry["target_metric"],
+                     entry["traffic_potential"], entry["expected_weekly_views"])
+        for surface in view["surfaces"][:6]:
+            log.info("acquisition surface kind=%s video=%s title=%r potential=%s expected_weekly=%s http=%s",
+                     surface["kind"], surface["video_id"], surface["title"], surface["traffic_potential"],
+                     surface["expected_weekly_views"], surface["http_status"])
+        for item in view["blocked"][:4]:
+            log.info("acquisition blocked video=%r surface=%r source=%s reason=%r",
+                     item["title"], item["surface"], item["traffic_source"], item["reason"][:120])
+    except Exception as exc:
+        log.info("Acquisition summary unavailable (%s)", type(exc).__name__)
     return result
 
 
