@@ -25,8 +25,8 @@ from .backfill import upsert
 from .budget import SyncBudgetExceeded
 from .config import settings
 from .history import pacific_day, lag_days
-from .models import (ChannelPlaylist, DiscoveryChannel, DiscoveryItem, DiscoverySignal, GrowthAction, TrafficDaily,
-                     TrafficSurface, Video, utcnow)
+from .models import (AudiencePool, ChannelPlaylist, DiscoveryChannel, DiscoveryItem, DiscoverySignal, GrowthAction,
+                     TrafficDaily, TrafficSurface, Video, utcnow)
 
 log = logging.getLogger(__name__)
 VERSION = "acquisition-v7"
@@ -36,6 +36,7 @@ MIN_ACTIONABLE_VIEWS = 5     # Vorgeschlagen wird erst, wenn dort in 90 Tagen wi
 MIN_CANDIDATE_VIEWS = 2000   # Öffentliche Reichweite, ab der ein fremdes Video als Fläche zählt.
 MIN_CANDIDATE_SUBSCRIBERS = 500
 MIN_SHARED_TOKENS = 2        # Ein gemeinsames Wort ist keine Themengleichheit (siehe V6).
+MIN_PLAYLIST_ITEMS = 5       # Unter fuenf Titeln ist es kein gepflegter Ort, sondern ein Entwurf.
 # Formatwörter beschreiben die Verpackung, nicht das Thema: „Album Teaser“ passt auf jedes Album-Teaser
 # der Welt. Der erste Lauf hat darüber ein BLACKPINK-Video als Fläche für unser Teaser-Video vorgeschlagen.
 FORMAT_WORDS = {"album", "teaser", "single", "trailer", "visual", "preview", "snippet", "clip", "extended",
@@ -75,6 +76,7 @@ ALL_SOURCES = DISCOVERY_SOURCES | {"EXT_URL", "SHORTS", "ADVERTISING", "NO_LINK_
 # impressions_7d zaehlt nur Auslieferungen auf YouTube-Oberflaechen: ein externer Link erzeugt Views,
 # aber keine Thumbnail-Impression. Deshalb ist externe Ansprache davon trennbar.
 METRIC_SOURCES = {"discovery_views_7d": DISCOVERY_SOURCES, "impressions_7d": IMPRESSION_SOURCES,
+                  "playlist_views_7d": {"PLAYLIST", "YT_PLAYLIST_PAGE"},
                   "external_views_7d": {"EXT_URL"}, "search_views_7d": {"YT_SEARCH"},
                   "suggested_views_7d": {"RELATED_VIDEO"}, "other_views_7d": {"YT_OTHER_PAGE", "NO_LINK_OTHER"}}
 SURFACE_KINDS = {
@@ -94,6 +96,14 @@ SURFACE_KINDS = {
     # Aussderhalb von YouTube: eine oeffentliche Seite, auf der die Zielgruppe zusammenkommt.
     "web_community": {"traffic_source": "EXT_URL", "lever_class": "external_community",
                       "action": "participate_in_web_community", "metric": "external_views_7d"},
+    # Neu gefundene Audiences, die uns noch nicht kennen – ueber die vorhandenen YouTube-APIs entdeckt.
+    "curated_playlist": {"traffic_source": "PLAYLIST", "lever_class": "playlist_placement",
+                         "action": "pitch_to_playlist_curator", "metric": "playlist_views_7d"},
+    "pool_channel": {"traffic_source": "YT_OTHER_PAGE", "lever_class": "community_participation",
+                     "action": "engage_pool_channel", "metric": "other_views_7d"},
+    # Fremde Seiten, die unser Video schon einbetten: gemessen in eigenen Analytics, ansprechbar.
+    "embed_site": {"traffic_source": "EXT_URL", "lever_class": "external_outreach",
+                   "action": "reach_out_to_embed_site", "metric": "external_views_7d"},
 }
 # Plattformen, über die Menschen Links privat weiterschicken. Sie sind Beleg dafür, dass geteilt wird,
 # aber keine Stelle, die man ansprechen kann – „whatsapp.com kontaktieren“ wäre ein Phantom-Auftrag.
@@ -103,6 +113,9 @@ SHARE_PLATFORMS = {"whatsapp.com", "t.co", "twitter.com", "x.com", "facebook.com
                    "tiktok.com", "snapchat.com", "discord.com", "mail.google.com", "outlook.com", "bing.com",
                    "duckduckgo.com", "yandex.ru", "baidu.com", "messenger.com", "reddit.com", "linktr.ee"}
 ACTION_LABELS = {"reach_out_to_referrer": "Externe Quelle ansprechen, die schon Zuschauer schickt",
+                 "pitch_to_playlist_curator": "Kurator einer fremden Playlist ansprechen",
+                 "engage_pool_channel": "Neu gefundenen Kanal mit passender Audience erreichen",
+                 "reach_out_to_embed_site": "Seite ansprechen, die unser Video schon einbettet",
                  "participate_in_web_community": "Externe Community erreichen, in der die Zielgruppe zusammenkommt",
                  "engage_candidate_video": "Bei einem reichweitenstarken passenden Video sichtbar werden",
                  "engage_candidate_channel": "Kanal mit belegter Reichweite echt beteiligen",
@@ -511,6 +524,112 @@ def collect_web_communities(session, vocab, learned, levers, store, now, day, bu
     return {"queries": queries, "checked": checked, "kept": len(kept), "reason": None}
 
 
+def specific(tokens_in, generic):
+    from .discovery import BRAND
+    return sorted({t for t in tokens_in if t not in generic and t not in BRAND and len(t) >= 4})
+
+
+def collect_pools(session, vocab, learned, generic, store):
+    """Gefundene Playlists und Kanäle prüfen: passt das Thema wirklich, ist der Ort gepflegt, wie groß ist er?
+
+    Zwei Wege zur Relevanz. Erstens mindestens zwei spezifische gemeinsame Begriffe. Zweitens – stärker –
+    die Playlist enthält ein Video aus einem Kanal, neben dem YouTube uns schon ausliefert: dann kuratiert
+    dort jemand genau unsere Nachbarschaft.
+    """
+    from .discovery import tokens as split
+    neighbours = {row.channel_title for row in session.scalars(select(DiscoveryItem)) if row.channel_title}
+    neighbour_titles = {row.title for row in session.scalars(select(DiscoveryItem)) if row.title}
+    for pool in session.scalars(select(AudiencePool)):
+        details = pool.details or {}
+        haystack = " ".join([pool.title or "", pool.description or "", details.get("keywords") or ""]
+                            + list(details.get("items") or []) + list(details.get("topics") or []))
+        words = set(split(haystack))
+        best, shared = None, []
+        for video_id, own in vocab.items():
+            common = specific(words & own, generic)
+            if len(common) > len(shared):
+                best, shared = video_id, common
+        overlap = [title for title in (details.get("items") or []) if title in neighbour_titles]
+        if best is None:
+            continue
+        if len(shared) < MIN_SHARED_TOKENS and not overlap:
+            continue        # Wortgleichheit reicht nicht, und ohne Nachbarschaftsbeleg gibt es keinen Grund.
+        if pool.kind == "playlist":
+            if (pool.item_count or 0) < MIN_PLAYLIST_ITEMS:
+                continue
+            entry = learned.get("curated_playlist", {})
+            if entry.get("retired"):
+                continue
+            reason = (f"Die Playlist „{pool.title}“ von „{pool.channel_title}“ enthält {pool.item_count} Titel"
+                      + (f" und teilt die Begriffe {', '.join(shared)} mit unserem Thema" if shared else "")
+                      + (f"; darin liegen Videos aus unserer belegten Nachbarschaft ({', '.join(overlap[:2])})"
+                         if overlap else "")
+                      + ". Wer sie pflegt, kuratiert für genau diese Zuschauer.")
+            store("curated_playlist", pool.key, best, pool.title, pool.url,
+                  {"item_count": pool.item_count, "owner": pool.channel_title, "owner_subscribers": pool.subscribers,
+                   "shared_tokens": shared, "neighbourhood_overlap": overlap[:3], "query": pool.query,
+                   "sample_items": (details.get("items") or [])[:5],
+                   "demand_source": "public_youtube_search", "why": reason,
+                   "uncertainty": ("mittel: Größe und Inhalt sind öffentlich belegt, ob der Kurator reagiert und ob "
+                                   "daraus Views entstehen, ist offen.")},
+                  {"traffic_potential": score_candidate(shared or ["nachbarschaft", "belegt"], pool.views,
+                                                        pool.subscribers, entry.get("weight", 1.0)),
+                   "expected_weekly_views": None, "item_count": pool.item_count, "owner_subscribers": pool.subscribers,
+                   "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
+                  {"actionable": True, "rules": NO_SPAM, "manual": True,
+                   "how": ("Den Kanal des Kurators öffnen, die Kontaktmöglichkeit suchen und sachlich fragen, ob das "
+                           "Video in die Playlist passt – mit Link zum Video, ohne Druck und ohne Gegenleistung.")})
+        elif pool.kind == "channel":
+            if (pool.subscribers or 0) < MIN_CANDIDATE_SUBSCRIBERS or len(shared) < MIN_SHARED_TOKENS:
+                continue
+            entry = learned.get("pool_channel", {})
+            if entry.get("retired"):
+                continue
+            store("pool_channel", pool.key, best, pool.title, pool.url,
+                  {"subscribers": pool.subscribers, "video_count": pool.item_count, "views": pool.views,
+                   "shared_tokens": shared, "topics": (details.get("topics") or [])[:4], "query": pool.query,
+                   "country": details.get("country"), "demand_source": "public_youtube_search",
+                   "why": (f"„{pool.title}“ hat {pool.subscribers} Abonnenten und beschreibt sich mit den Begriffen "
+                           f"{', '.join(shared)}, die auch unser Thema tragen. Dieses Publikum kennt uns nicht."),
+                   "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss nicht gemessen."},
+                  {"traffic_potential": score_candidate(shared, pool.views, pool.subscribers,
+                                                        entry.get("weight", 1.0)),
+                   "expected_weekly_views": None, "subscribers": pool.subscribers,
+                   "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
+                  {"actionable": True, "rules": NO_SPAM, "manual": True,
+                   "how": ("Die neueste thematisch passende Veröffentlichung ansehen und inhaltlich kommentieren; "
+                           "bei klarer Nähe eine sachliche Anfrage über die angegebene Kontaktmöglichkeit.")})
+
+
+def collect_embed_sites(session, learned, store, now, http=None):
+    """Seiten, die unser Video einbetten: gemessener eigener Traffic und ein Ort, den man ansprechen kann."""
+    embeds, ends = _latest_signals(session, "own_embed")
+    checked = 0
+    for video_id, details in embeds.items():
+        for detail, (views, minutes) in sorted(details.items(), key=lambda kv: -kv[1][0]):
+            url = as_url(detail)
+            if url is None or views < MIN_SURFACE_VIEWS:
+                continue
+            entry = learned.get("embed_site", {})
+            if entry.get("retired"):
+                continue
+            status_code = verify(url, http) if checked < MAX_VERIFY_PER_RUN else None
+            checked += 1
+            if status_code is not None and status_code >= 400:
+                continue
+            host = urlparse(url).netloc
+            store("embed_site", url, video_id, host, url,
+                  {"measured_views_90d": views, "measured_watch_minutes_90d": round(minutes, 1),
+                   "window_end": str(ends.get(video_id)), "demand_source": "own_analytics",
+                   "why": (f"{host} bettet unser Video ein: {views} Views und {round(minutes)} Minuten "
+                           "Wiedergabezeit in 90 Tagen kamen von dort. Dort ist Publikum, das uns schon sieht."),
+                   "verified": status_code is not None, "http_status": status_code},
+                  {"traffic_potential": score_surface(1.0, views, 0.8, 0.3, entry.get("weight", 1.0)),
+                   "expected_weekly_views": expected_weekly_views(views),
+                   "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit."},
+                  referrer_access(url, views), status_code, now)
+
+
 def collect_candidates(session, vocab, learned, store):
     """Neue Flächen, mehrfach bestätigt: mindestens zwei gemeinsame Begriffe und zwei verschiedene Kanäle.
 
@@ -758,6 +877,8 @@ def collect(session, now=None, budget=None, http=None):
         budget.check()
     vocab = own_vocabulary(session)
     collect_candidates(session, vocab, learned, store)
+    collect_embed_sites(session, learned, store, now, http)
+    collect_pools(session, vocab, learned, generic_tokens(session), store)
     # Audience-Pools ausserhalb der eigenen Reichweite: oeffentliche Suche.
     web = collect_web_communities(session, vocab, learned, levers, store, now, today, budget, http)
     session.commit()
@@ -808,6 +929,29 @@ def steps_for(kind, surface, video_title):
                 "Einen inhaltlichen Kommentar schreiben, der auch ohne Link Wert hat (konkreter Bezug, keine Werbung).",
                 "Keinen Eigenwerbe-Link setzen und nicht mehrfach kommentieren.",
                 NO_SPAM]
+    if kind == "curated_playlist":
+        evidence = surface.evidence or {}
+        return [f"Playlist ansehen: {surface.url} ({evidence.get('item_count')} Titel, Kurator „{evidence.get('owner')}“"
+                + (f", {evidence.get('owner_subscribers')} Abonnenten" if evidence.get("owner_subscribers") else "")
+                + ")",
+                "Prüfen, ob unser Titel dort wirklich hineinpasst – Stil, Länge, Sprache. Passt es nicht, verwerfen.",
+                f"Den Kanal des Kurators öffnen, Kontaktmöglichkeit suchen und kurz fragen, ob „{video_title}“ in die "
+                "Playlist passt. Link mitschicken, keine Gegenleistung anbieten, nicht nachfassen.",
+                "Datum und Zielstelle notieren. Nichts am Video selbst ändern.",
+                NO_SPAM]
+    if kind == "pool_channel":
+        evidence = surface.evidence or {}
+        return [f"Kanal öffnen: {surface.url} ({evidence.get('subscribers')} Abonnenten)",
+                "Die neueste thematisch passende Veröffentlichung ansehen und inhaltlich kommentieren – ohne Link, "
+                "ohne Eigenwerbung.",
+                "Bei klarer thematischer Nähe eine sachliche Anfrage über die angegebene Kontaktmöglichkeit.",
+                NO_SPAM]
+    if kind == "embed_site":
+        return [f"Seite öffnen, die unser Video einbettet: {surface.url}",
+                "Kontakt über Impressum oder Kontaktformular suchen und den bestehenden Bezug nennen.",
+                f"Sachlich anbieten, was für die Leser dort noch passt – etwa „{video_title}“ oder ein weiteres Video.",
+                "Nichts am Video selbst ändern. Datum und Ansprechpartner notieren.",
+                NO_SPAM]
     if kind == "web_community":
         evidence = surface.evidence or {}
         activity = {k: v for k, v in (evidence.get("activity") or {}).items() if k not in ("known", "note")}
@@ -854,6 +998,14 @@ def mechanism(kind, surface):
                                    "YouTube verstärkt die Nachbarschaft, wenn Zuschauer beide Videos sehen."),
             "recommending_channel": ("Der Kanal teilt unsere Audience. Echte Teilnahme macht uns bei dessen Zuschauern "
                                      "sichtbar und erhöht die Chance, häufiger neben seinen Videos empfohlen zu werden."),
+            "curated_playlist": ("Wer eine Playlist zu diesem Thema pflegt, hat Hörer, die genau solche Titel "
+                                 "durchlaufen lassen. Wird unser Video aufgenommen, spielt es in dieser Rotation mit; "
+                                 "die Views erscheinen in den Analytics als PLAYLIST-Quelle."),
+            "pool_channel": ("Der Kanal veröffentlicht für dieselbe Zielgruppe und kennt uns nicht. Sichtbarkeit dort "
+                             "führt einen Teil dieser Zuschauer zu uns; solche Klicks erscheinen als YT_OTHER_PAGE."),
+            "embed_site": ("Die Seite bettet unser Video bereits ein und hat Leser, die es sehen. Eine sachliche "
+                           "Ansprache kann zu einer weiteren oder besser platzierten Einbettung führen; die Views "
+                           "erscheinen als EXT_URL."),
             "web_community": ("Auf dieser Seite kommt eine Zielgruppe zusammen, die dasselbe Thema verfolgt und uns "
                               "nicht kennt. Ein passender eigener Beitrag dort führt Leser auf das Video; solche Klicks "
                               "erscheinen in den Analytics als EXT_URL-Views. Dass das für diesen Kanal funktioniert, "
@@ -1002,6 +1154,7 @@ def action_payload(surface, video_title, spec, levers=None):
                              + (["Beschreibung"] if surface.kind != "own_search_intent" else []),
             "primary_lever": {"external_outreach": "eine externe Quelle ansprechen",
                               "external_community": "in einer externen Community mitwirken",
+                              "playlist_placement": "Aufnahme in eine fremde Playlist erbitten",
                               "community_participation": "echte Teilnahme dort, wo die Audience ist",
                               "search_wording": "Wortlaut in Beschreibung und Kapiteln"}[surface.lever_class],
             "success_criterion": (f"Views aus {surface.traffic_source} im Nachher-Fenster messbar über dem gleich langen "

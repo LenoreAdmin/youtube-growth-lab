@@ -432,6 +432,32 @@ class ChannelPlaylist(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class AudiencePool(Base):
+    """A public playlist or channel found by probing YouTube – an audience that does not know us yet.
+
+    Persisted because the probe costs quota and may only run once a day, while the acquisition pass
+    runs hourly and must not re-buy the same knowledge.
+    """
+    __tablename__ = "audience_pools"
+    __table_args__ = (UniqueConstraint("kind", "key"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    key: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(300))
+    url: Mapped[str] = mapped_column(String(500))
+    channel_id: Mapped[str | None] = mapped_column(String(64))
+    channel_title: Mapped[str | None] = mapped_column(String(256))
+    item_count: Mapped[int | None] = mapped_column(Integer)
+    subscribers: Mapped[int | None] = mapped_column(BigInteger)
+    views: Mapped[int | None] = mapped_column(BigInteger)
+    description: Mapped[str | None] = mapped_column(String(1000))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    query: Mapped[str | None] = mapped_column(String(200))
+    first_seen_day: Mapped[date] = mapped_column(Date)
+    last_seen_day: Mapped[date] = mapped_column(Date, index=True)
+
+
 class WebSearchQuota(Base):
     """Own daily counter for public web searches so the free provider tier can never be exceeded."""
     __tablename__ = "web_search_quota"

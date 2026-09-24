@@ -1,0 +1,238 @@
+"""Audience-Discovery mit dem vorhandenen Stack: fremde Playlists, Kanäle und eigene Einbettungen.
+
+Kein zusätzlicher Anbieter, keine neue Infrastruktur: alles über die bereits autorisierten YouTube-APIs
+innerhalb des bestehenden Quota-Budgets. Geprüft wird vor allem, dass nur wirklich passende und
+nachprüfbare Orte durchkommen – und dass die Attribution je Quelle stimmt.
+"""
+from datetime import date, timedelta
+import pytest
+from sqlalchemy import select
+from app import acquisition as aq, discovery, growth_engine as ge
+from app.models import AudiencePool, DiscoveryItem, DiscoveryQuery, DiscoverySignal, GrowthAction, TrafficSurface, Video
+from test_learning_v4 import seed_history, wire, NOW, TODAY, LAG
+from test_acquisition import FakeHttp, signal
+
+WINDOW_END = TODAY-timedelta(days=LAG)
+
+
+class PoolClient:
+    """Liefert genau die öffentlichen Daten, die die echten API-Aufrufe liefern würden."""
+
+    def __init__(self, playlists=(), channels=(), items=None, owners=None, embeds=()):
+        self.playlists, self.channels = list(playlists), list(channels)
+        self.items, self.owners, self.embeds = items or {}, owners or {}, list(embeds)
+        self.calls = []
+
+    def search_playlists(self, query, max_results=25):
+        self.calls.append(("search_playlists", query))
+        return self.playlists
+
+    def search_channels(self, query, max_results=25):
+        self.calls.append(("search_channels", query))
+        return self.channels
+
+    def playlists_by_id(self, ids):
+        self.calls.append(("playlists_by_id", tuple(ids)))
+        return [{"id": p["playlist_id"],
+                 "snippet": {"title": p["title"], "channelId": p["channel_id"], "channelTitle": p["channel_title"],
+                             "description": p.get("description", "")},
+                 "contentDetails": {"itemCount": p.get("item_count", 12)},
+                 "status": {"privacyStatus": "public"}} for p in self.playlists if p["playlist_id"] in set(ids)]
+
+    def playlist_items(self, playlist_id, max_results=10):
+        self.calls.append(("playlist_items", playlist_id))
+        return [{"snippet": {"title": title}} for title in self.items.get(playlist_id, [])]
+
+    def channels_by_id(self, ids, part=None):
+        self.calls.append(("channels_by_id", tuple(ids)))
+        rows = []
+        for channel_id in ids:
+            data = self.owners.get(channel_id)
+            if data is None:
+                continue
+            rows.append({"id": channel_id,
+                         "snippet": {"title": data.get("title", channel_id), "description": data.get("description", ""),
+                                     "country": data.get("country")},
+                         "statistics": {"subscriberCount": str(data["subscribers"]), "videoCount": str(data.get("videos", 50)),
+                                        "viewCount": str(data.get("views", 1000))},
+                         "topicDetails": {"topicCategories": data.get("topics", [])},
+                         "brandingSettings": {"channel": {"keywords": data.get("keywords", "")}}})
+        return rows
+
+    def embedded_locations(self, video, start, end, max_results=25):
+        self.calls.append(("embedded_locations", video))
+        return [{"insightPlaybackLocationDetail": url, "views": views, "estimatedMinutesWatched": views*2.0}
+                for url, views in self.embeds]
+
+
+def seed_theme(session):
+    """Ein Video mit belegter Nachbarschaft, damit ein Thema überhaupt existiert."""
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.add(DiscoveryItem(video_id="NEIGHBOUR01", channel_id="UCN", title="Night train ambient journey",
+                              channel_title="Rail Nights", views=120000, tags=[],
+                              via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY, last_seen_day=TODAY,
+                              seen_count=1))
+    session.commit()
+    signal(session, "a", "own_suggested_source", "NEIGHBOUR01", 4)
+
+
+# ---------------------------------------------------------------------------- Probe im Quota-Rahmen
+def test_the_probe_finds_foreign_playlists_and_channels_within_the_existing_quota(session):
+    session.add(DiscoveryQuery(query="night train ambient", source="title_bigram", seed_video_id="a", priority=500.0,
+                               created_at=NOW, probe_count=0, failures=0, results={}))
+    session.add(DiscoveryQuery(query="ambient journey", source="title_bigram", seed_video_id="a", priority=400.0,
+                               created_at=NOW, probe_count=0, failures=0, results={}))
+    session.commit()
+    client = PoolClient(
+        playlists=[{"playlist_id": "PL1", "title": "Night Train Ambient Journeys", "channel_id": "UCcur",
+                    "channel_title": "Slow Travel Sounds", "published_at": "2026-01-01T00:00:00Z",
+                    "description": "ambient night train journey playlist", "item_count": 40}],
+        channels=[{"channel_id": "UCpool", "title": "Night Train Radio", "description": "ambient night train journey",
+                   "published_at": "2024-01-01T00:00:00Z"}],
+        items={"PL1": ["Night train ambient journey", "Rails at midnight"]},
+        owners={"UCcur": {"title": "Slow Travel Sounds", "subscribers": 82000, "views": 9000000},
+                "UCpool": {"title": "Night Train Radio", "subscribers": 45000, "views": 5000000,
+                           "keywords": "night train ambient journey", "topics": ["https://en.wikipedia.org/wiki/Ambient_music"]}})
+    quota = discovery.Quota(session, TODAY, limit=1500)
+    stats = {}
+    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, stats)
+    pools = {(p.kind, p.key): p for p in session.scalars(select(AudiencePool))}
+    assert set(pools) == {("playlist", "PL1"), ("channel", "UCpool")}
+    playlist = pools[("playlist", "PL1")]
+    assert playlist.item_count == 40 and playlist.subscribers == 82000
+    assert playlist.url == "https://www.youtube.com/playlist?list=PL1"
+    assert playlist.details["items"][:1] == ["Night train ambient journey"]
+    channel = pools[("channel", "UCpool")]
+    assert channel.subscribers == 45000 and "Ambient_music" in channel.details["topics"][0]
+    # Zwei Suchen zu je 100 Einheiten plus wenige Detailabfragen – weit unter dem Budget.
+    assert quota.spent_now <= 2*discovery.SEARCH_COST+5*discovery.LIST_COST
+    assert stats["pools"] == 2
+    assert sum(1 for call in client.calls if call[0].startswith("search")) == 2
+
+
+def test_the_probe_stops_before_spending_a_budget_it_does_not_have(session):
+    session.add(DiscoveryQuery(query="night train ambient", source="title_bigram", seed_video_id="a", priority=500.0,
+                               created_at=NOW, probe_count=0, failures=0, results={}))
+    session.commit()
+    client = PoolClient(playlists=[{"playlist_id": "PL1", "title": "x", "channel_id": "UCc", "channel_title": "c",
+                                    "published_at": "2026-01-01T00:00:00Z"}])
+    quota = discovery.Quota(session, TODAY, limit=50)      # weniger als eine Suche kostet
+    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, {})
+    assert not list(session.scalars(select(AudiencePool))) and client.calls == []
+
+
+def test_own_embeds_are_collected_from_analytics_without_data_api_quota(session):
+    client = PoolClient(embeds=[("bahnblog.example/nachtzug", 9), ("", 3)])
+    stats = {}
+    discovery.collect_embeds(session, client, list(session.scalars(select(Video))), NOW, None, stats)
+    rows = list(session.scalars(select(DiscoverySignal).where(DiscoverySignal.kind == "own_embed")))
+    assert [r.detail for r in rows if r.video_id == "a"] == ["bahnblog.example/nachtzug"]
+    assert rows[0].views == 9 and stats["embeds"] >= 1
+
+
+# ---------------------------------------------------------------------------- Relevanz der Pools
+def pool(session, kind, key, title, **fields):
+    session.add(AudiencePool(**{**{"kind": kind, "key": key, "title": title,
+                                   "url": f"https://www.youtube.com/playlist?list={key}" if kind == "playlist"
+                                          else f"https://www.youtube.com/channel/{key}",
+                                   "first_seen_day": TODAY, "last_seen_day": TODAY, "details": {}}, **fields}))
+    session.commit()
+
+
+def test_a_playlist_needs_a_real_theme_or_a_proven_neighbourhood(session):
+    seed_theme(session)
+    pool(session, "playlist", "PLgood", "Night train ambient journeys", item_count=30, subscribers=50000,
+         channel_title="Slow Travel", description="ambient night train journey")
+    pool(session, "playlist", "PLgeneric", "Best Album Teaser Playlist", item_count=30, subscribers=900000,
+         channel_title="Mainstream", description="album teaser single visual")
+    pool(session, "playlist", "PLtiny", "Night train ambient", item_count=2, subscribers=50000,
+         channel_title="Entwurf", description="ambient night train journey")
+    pool(session, "playlist", "PLneighbour", "Zugfahrten", item_count=12, subscribers=3000,
+         channel_title="Kurator", description="Sammlung",
+         details={"items": ["Night train ambient journey", "Etwas anderes"]})
+    aq.collect(session, NOW, http=FakeHttp())
+    kept = {r.key for r in session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "curated_playlist"))}
+    assert "PLgood" in kept, "spezifische gemeinsame Begriffe genuegen"
+    assert "PLneighbour" in kept, "ein Video aus der belegten Nachbarschaft genuegt ebenfalls"
+    assert "PLgeneric" not in kept, "Formatwoerter sind kein Thema"
+    assert "PLtiny" not in kept, "zwei Titel sind kein gepflegter Ort"
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "PLneighbour"))
+    assert surface.evidence["neighbourhood_overlap"] == ["Night train ambient journey"]
+    assert "belegten Nachbarschaft" in surface.evidence["why"]
+    assert surface.traffic_source == "PLAYLIST" and surface.lever_class == "playlist_placement"
+
+
+def test_a_found_channel_needs_theme_and_real_size(session):
+    seed_theme(session)
+    pool(session, "channel", "UCbig", "Night Train Radio", subscribers=45000, item_count=300, views=5000000,
+         description="ambient night train journey radio",
+         details={"keywords": "night train ambient", "topics": ["https://en.wikipedia.org/wiki/Ambient_music"]})
+    pool(session, "channel", "UCsmall", "Night Train Tiny", subscribers=12, item_count=3,
+         description="ambient night train journey")
+    pool(session, "channel", "UCoff", "Kochkanal", subscribers=900000, item_count=800, description="Rezepte und Kuchen")
+    aq.collect(session, NOW, http=FakeHttp())
+    kept = {r.key for r in session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "pool_channel"))}
+    assert kept == {"UCbig"}
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "pool_channel"))
+    assert surface.evidence["subscribers"] == 45000 and surface.traffic_source == "YT_OTHER_PAGE"
+    assert "kennt uns nicht" in surface.evidence["why"]
+
+
+def test_an_embedding_site_becomes_an_actionable_external_surface(session):
+    signal(session, "a", "own_embed", "bahnblog.example/nachtzug", 12)
+    aq.collect(session, NOW, http=FakeHttp())
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "embed_site"))
+    assert surface.traffic_source == "EXT_URL" and surface.lever_class == "external_outreach"
+    assert surface.access["actionable"] is True and surface.http_status == 200
+    assert "bettet unser Video ein" in surface.evidence["why"] and surface.evidence["measured_views_90d"] == 12
+    steps = aq.steps_for("embed_site", surface, "Trainstories")
+    assert any("einbettet" in step for step in steps) and any("Impressum" in step for step in steps)
+
+
+# ---------------------------------------------------------------------------- Attribution und Konflikte
+def test_each_new_surface_is_attributed_to_its_own_source(session):
+    assert aq.SURFACE_KINDS["curated_playlist"]["metric"] == "playlist_views_7d"
+    assert aq.METRIC_SOURCES["playlist_views_7d"] == {"PLAYLIST", "YT_PLAYLIST_PAGE"}
+    assert aq.SURFACE_KINDS["embed_site"]["metric"] == "external_views_7d"
+    assert aq.SURFACE_KINDS["pool_channel"]["metric"] == "other_views_7d"
+
+
+def test_the_running_impressions_test_blocks_only_the_youtube_surfaces(session):
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence",
+                             target_metric="impressions_7d", window_days=14, evaluate_after=TODAY+timedelta(days=16),
+                             status="running", started_day=TODAY-timedelta(days=1), started_at=NOW,
+                             lever_class="internal_link", traffic_source="END_SCREEN", payload={}))
+    session.commit()
+    # Eine Playlist-Platzierung erzeugt Impressionen auf der Playlist-Seite: nicht trennbar.
+    blocked, reason = aq.blocking(session, "a", "playlist_placement", "PLAYLIST", "playlist_views_7d")
+    assert blocked is not None and "impressions_7d" in reason
+    # Eine fremde Seite und ein Kommentar auf einer Videoseite erzeugen keine Impression: trennbar.
+    assert aq.blocking(session, "a", "external_outreach", "EXT_URL", "external_views_7d")[0] is None
+    assert aq.blocking(session, "a", "community_participation", "YT_OTHER_PAGE", "other_views_7d")[0] is None
+
+
+def test_a_playlist_pitch_becomes_an_executable_proposal(session):
+    # Nachbarschaft nur als Themenquelle, ohne eigene Reichweite – damit die Playlist die beste Flaeche ist.
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.add(DiscoveryItem(video_id="NEIGHBOUR01", channel_id="UCN", title="Night train ambient journey",
+                              channel_title="Rail Nights", views=400, tags=[],
+                              via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY, last_seen_day=TODAY,
+                              seen_count=1))
+    session.commit()
+    signal(session, "a", "own_suggested_source", "NEIGHBOUR01", 4)
+    pool(session, "playlist", "PLgood", "Night train ambient journeys", item_count=30, subscribers=50000,
+         channel_title="Slow Travel Sounds", description="ambient night train journey")
+    aq.collect(session, NOW, http=FakeHttp())
+    assert aq.propose(session, NOW)["proposed"] == 1
+    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
+    assert row.action == "pitch_to_playlist_curator" and row.target_metric == "playlist_views_7d"
+    payload = row.payload
+    assert "Slow Travel Sounds" in payload["why"] and "30 Titel" in payload["why"]
+    assert any("Kurator" in step for step in payload["steps"])
+    assert any("keine Gegenleistung" in step for step in payload["steps"])
+    assert payload["mechanism_status"] == "hypothese"
+    assert "PLAYLIST" in payload["primary_metric"]
+    entry = aq.overview(session, NOW)["traffic_queue"][0]
+    assert entry["surface_url"] == "https://www.youtube.com/playlist?list=PLgood"
+    assert entry["traffic_source"] == "PLAYLIST"

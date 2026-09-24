@@ -10,6 +10,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from .config import settings
 from .budget import Budget
 
@@ -125,11 +126,61 @@ class YouTube:
                  "channel_title": item["snippet"].get("channelTitle", ""), "published_at": item["snippet"]["publishedAt"]}
                 for item in result.get("items", []) if item.get("id", {}).get("videoId")]
 
-    def videos_by_id(self, ids):
+    def search_playlists(self, query, max_results=25):
+        """Öffentliche Playlists anderer Kanäle zu einem Thema (100 Einheiten wie jede Suche).
+
+        Eine kuratierte Playlist ist eine echte fremde Audience: sie hat einen Betreiber, den man
+        ansprechen kann, und eine nachprüfbare Größe."""
+        result = self.execute(self.data.search().list(part="snippet", q=query, type="playlist",
+                                                      maxResults=min(50, max_results), safeSearch="none"))
+        return [{"playlist_id": item["id"]["playlistId"], "title": item["snippet"]["title"],
+                 "channel_id": item["snippet"]["channelId"], "channel_title": item["snippet"].get("channelTitle", ""),
+                 "published_at": item["snippet"]["publishedAt"], "description": item["snippet"].get("description", "")}
+                for item in result.get("items", []) if item.get("id", {}).get("playlistId")]
+
+    def search_channels(self, query, max_results=25):
+        """Kanäle statt Videos: Audience-Pools mit öffentlich belegter Größe (100 Einheiten)."""
+        result = self.execute(self.data.search().list(part="snippet", q=query, type="channel",
+                                                      maxResults=min(50, max_results), safeSearch="none"))
+        return [{"channel_id": item["id"]["channelId"], "title": item["snippet"]["title"],
+                 "description": item["snippet"].get("description", ""),
+                 "published_at": item["snippet"]["publishedAt"]}
+                for item in result.get("items", []) if item.get("id", {}).get("channelId")]
+
+    def playlists_by_id(self, ids):
+        """Größe und Herkunft einer Playlist (1 Einheit je 50)."""
         rows = []
         ids = list(dict.fromkeys(ids))
         for offset in range(0, len(ids), 50):
-            result = self.execute(self.data.videos().list(part="snippet,contentDetails,statistics", id=",".join(ids[offset:offset+50])))
+            result = self.execute(self.data.playlists().list(part="snippet,contentDetails,status",
+                                                             id=",".join(ids[offset:offset+50])))
+            rows.extend(result.get("items", []))
+        return rows
+
+    def playlist_items(self, playlist_id, max_results=10):
+        """Was steckt in der Playlist und wird sie gepflegt (1 Einheit)."""
+        result = self.execute(self.data.playlistItems().list(part="snippet,contentDetails", playlistId=playlist_id,
+                                                             maxResults=min(50, max_results)))
+        return result.get("items", [])
+
+    def comment_activity(self, video_id, max_results=20):
+        """Öffentliche Kommentaraktivität eines fremden Videos (1 Einheit): wie lebendig ist der Ort wirklich."""
+        try:
+            result = self.execute(self.data.commentThreads().list(part="snippet", videoId=video_id,
+                                                                  maxResults=min(100, max_results), order="time",
+                                                                  textFormat="plainText"))
+        except HttpError:
+            return None            # Kommentare deaktiviert oder nicht abrufbar: keine Aussage, keine Erfindung.
+        items = result.get("items", [])
+        newest = max((i["snippet"]["topLevelComment"]["snippet"]["publishedAt"] for i in items), default=None)
+        return {"sampled": len(items), "newest_comment_at": newest,
+                "total": result.get("pageInfo", {}).get("totalResults")}
+
+    def videos_by_id(self, ids, part="snippet,contentDetails,statistics"):
+        rows = []
+        ids = list(dict.fromkeys(ids))
+        for offset in range(0, len(ids), 50):
+            result = self.execute(self.data.videos().list(part=part, id=",".join(ids[offset:offset+50])))
             rows.extend(result.get("items", []))
         return rows
 
@@ -147,13 +198,23 @@ class YouTube:
                 break
         return rows
 
-    def channels_by_id(self, ids):
+    def channels_by_id(self, ids, part="snippet,statistics,topicDetails,brandingSettings"):
         rows = []
         ids = list(dict.fromkeys(ids))
         for offset in range(0, len(ids), 50):
-            result = self.execute(self.data.channels().list(part="snippet,statistics", id=",".join(ids[offset:offset+50])))
+            result = self.execute(self.data.channels().list(part=part, id=",".join(ids[offset:offset+50])))
             rows.extend(result.get("items", []))
         return rows
+
+    def embedded_locations(self, video, start, end, max_results=25):
+        """Fremde Seiten, auf denen unser Video eingebettet abgespielt wurde – eigene Analytics, keine Quota."""
+        request = self.analytics.reports().query(ids="channel==MINE", startDate=str(start), endDate=str(end),
+            metrics="views,estimatedMinutesWatched", dimensions="insightPlaybackLocationDetail",
+            filters=f"video=={video};insightPlaybackLocationType==EMBEDDED", sort="-views",
+            maxResults=min(25, max_results))
+        result = self.execute(request)
+        headers = [h["name"] for h in result.get("columnHeaders", [])]
+        return [dict(zip(headers, row)) for row in result.get("rows", [])]
 
     def reach_reports(self):
         """Discover current reach report type instead of hardcoding a retired ID."""
