@@ -6,6 +6,7 @@ actions follow V4 regimes and video-balanced channel baselines. Every action is 
 recommendation with success and stop criteria and is later scored against observed
 analytics. Confidence inherits the V4 caps: with few videos it never exceeds "low".
 """
+from copy import deepcopy
 from datetime import date, timedelta
 from math import tanh
 from sqlalchemy import select
@@ -1314,6 +1315,57 @@ def live_paid_profiles(session, now=None):
     return {h.video.id: paid_profile(h, today) for h in load_histories(session)}
 
 
+def reconcile_plan(session, plan, titles):
+    """The stored plan is a snapshot; the status of its actions is live.
+
+    Without this the dashboard keeps showing "Vorschlag – noch nicht gestartet" after a confirmation,
+    because only the next hourly run rewrites the snapshot. The queue must never contradict the database.
+    """
+    if not plan:
+        return plan
+    plan = deepcopy(plan)
+    rows = list(session.scalars(select(GrowthAction).where(GrowthAction.status.in_([PROPOSED, RUNNING]))))
+    by_id = {r.id: r for r in rows}
+    open_by_video = {}
+    for row in rows:
+        if row.status != PROPOSED:
+            continue
+        current = open_by_video.get(row.video_id)
+        if current is None or (row.created_day, row.id) > (current.created_day, current.id):
+            open_by_video[row.video_id] = row
+    queue, notes = [], []
+    for entry in plan.get("queue") or []:
+        row = by_id.get(entry.get("action_id"))
+        if row is None or row.status != PROPOSED:
+            live = open_by_video.get(entry.get("video_id"))
+            if live is None:
+                # Gestartet, ausgewertet oder ersetzt: keine offene Aufgabe mehr.
+                notes.append(f"{entry.get('title')}: nicht mehr offen (Status live abgeglichen).")
+                continue
+            entry = {**entry, "action_id": live.id, "status": live.status}
+        queue.append(entry)
+    for rank, entry in enumerate(queue, 1):
+        entry["rank"] = rank
+        confirm = entry.get("confirm") or {}
+        entry["confirm"] = {**confirm, "endpoint": f"/api/growth/actions/{entry['action_id']}/start"}
+    running = [{"video_id": r.video_id, "title": titles.get(r.video_id, r.video_id), "action": r.action,
+                "action_id": r.id, "started_day": str(r.started_day) if r.started_day else None,
+                "held_since": str(r.started_day) if r.started_day else None,
+                "evaluate_after": str(r.evaluate_after), "target_metric": r.target_metric,
+                "baseline": r.baseline or {},
+                "note": "Läuft seit deiner Bestätigung – bis zur Auswertung nichts weiter an diesem Video ändern."}
+               for r in sorted((x for x in rows if x.status == RUNNING), key=lambda x: (x.started_day or x.created_day, x.id))]
+    plan["queue"], plan["running_experiments"] = queue, running
+    plan["now_do"] = queue[0] if queue else None
+    plan["live_status_note"] = ("Status der Maßnahmen live aus der Datenbank abgeglichen; der Plan selbst ist die "
+                               "Momentaufnahme des letzten Laufs." if not notes else
+                               "Status live abgeglichen: "+" ".join(notes))
+    if not queue and running:
+        plan["queue_note"] = ("Alle offenen Vorschläge sind bestätigt und laufen. Bis zur Auswertung nichts weiter "
+                              "an diesen Videos ändern.")
+    return plan
+
+
 def overview(session, now=None):
     try:
         live = live_paid_profiles(session, now)
@@ -1333,7 +1385,9 @@ def overview(session, now=None):
             scores_by_video[video.id] = {"day": row.day, "state": row.state, "action": row.action, "opportunity": row.opportunity,
                                          "viewer": row.viewer, "subscriber": row.subscriber, "revival": row.revival, "momentum": row.momentum,
                                          "paid_live": live.get(video.id), "paid_stored": (row.momentum or {}).get("paid")}
-    return {"version": VERSION, "plan": plan.plan if plan else None, "plan_day": plan.day if plan else None,
+    titles = {v.id: v.title for v in session.scalars(select(Video))}
+    return {"version": VERSION, "plan": reconcile_plan(session, plan.plan if plan else None, titles),
+            "plan_day": plan.day if plan else None,
             "paid_live": live,
             "scores": scores_by_video, "actions": {k: v[:10] for k, v in actions.items()}, "track_record": track_record(session),
             "states": STATES, "actions_catalog": ACTIONS, "read_only": True}

@@ -47,7 +47,12 @@ const OUTCOME_LABELS={positive:"positiv",negative:"negativ",neutral:"neutral",in
 const stateClass=s=>s==="protect_momentum"||s==="scale_opportunity"||s==="revival_candidate"?"up":s==="paid_excluded"?"down":"";
 function scoreText(s){return s==null?"—":num(s,0)}
 function trackText(record,action){const r=record?.[action];return r?`${r.positive}+ / ${r.negative}− / ${r.neutral}= / ${r.inconclusive}?`:"noch keine"}
+let startNotice = null;   // letzte Rueckmeldung zum Experiment-Start, direkt in der Karte sichtbar
 function renderQueue(p){
+ const notice=$("queueStart");
+ notice.textContent=startNotice?startNotice.text:"";
+ notice.className="notice"+(startNotice&&startNotice.failed?" down":"");
+ notice.hidden=!startNotice;
  // JETZT TUN: was ein Mensch heute ausführt. YouTube bleibt read-only – nichts davon passiert automatisch.
  const q=(p&&p.queue)||[],running=(p&&p.running_experiments)||[],results=(p&&p.results)||[];
  $("queueTitle").textContent=q.length?`Jetzt tun: ${q.length} Experiment${q.length>1?"e":""}`:"Heute kein ausführbares Experiment";
@@ -74,7 +79,7 @@ function renderQueue(p){
   <p><strong>Externer Kontext:</strong> ${esc(e.context_status||"kein externer Kontext")}${e.context_reason?" <small>"+esc(e.context_reason)+"</small>":""}</p>
   <p><strong>Nicht verändern:</strong> ${(e.do_not_change||[]).map(esc).join(", ")}</p>
   <p class="notice">${esc(e.note||"")}</p>
-  ${e.action_id?`<button class="secondary start-experiment" data-action-id="${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren – Experiment starten")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>`:""}
+  ${e.action_id?`<button class="secondary start-experiment" data-action-id="${e.action_id}" title="Maßnahme #${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren – Experiment starten")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>`:""}
   </article>`}).join("")||"<p class='muted'>Kein Vorschlag: geschützte oder laufende Videos, oder die Evidenz reicht nicht für ein konkretes Experiment.</p>";
  $("queueRunning").innerHTML=running.length?`<h3>Läuft – von dir als durchgeführt bestätigt (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
  $("queueNotTestable").innerHTML=((p&&p.not_testable)||[]).length?`<h3>Derzeit nicht sinnvoll testbar</h3><ul>${p.not_testable.map(x=>`<li>${esc(x.title)}: ${esc(x.reason)}</li>`).join("")}</ul>`:"";
@@ -232,10 +237,24 @@ $("discoveryRun").onclick=()=>guarded(discoveryRun);
 async function startExperiment(button){
  // Bestaetigung der Durchfuehrung durch den Menschen - das System aendert nichts auf YouTube.
  if(button.disabled)return;
- const label=button.textContent;
+ const label=button.textContent, id=button.dataset.actionId;
  button.disabled=true;button.textContent="Wird gestartet…";
- try{await api(`/api/growth/actions/${button.dataset.actionId}/start`,{});await load()}
- finally{button.disabled=false;button.textContent=label}
+ try{
+  let result;
+  try{
+   result=await api(`/api/growth/actions/${id}/start`,{});
+  }catch(error){
+   // Kein stilles Fehlschlagen: die Ursache steht direkt an der Karte.
+   startNotice={failed:true,text:`Start fehlgeschlagen (Maßnahme #${id}): ${error.message}`};
+   renderQueue(state&&state.growth_v5?state.growth_v5.plan:null);
+   throw error;
+  }
+  startNotice={failed:result.status!=="running",
+   text:result.status==="running"
+    ?`Bestätigt: Maßnahme #${result.id} läuft seit ${result.started_day}, Auswertung ${result.evaluate_after}. Baseline eingefroren.`
+    :`Unerwarteter Status „${result.status}“ für Maßnahme #${result.id} – nicht als laufend gewertet.`};
+  await load();
+ }finally{button.disabled=false;button.textContent=label}
 }
 $("queueList").addEventListener("click",e=>{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))});
 async function load(){
