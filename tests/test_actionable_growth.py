@@ -106,6 +106,12 @@ def test_distribution_comes_first_when_the_package_already_works():
     assert "Titel" in d["do_not_change"] and "Thumbnail" in d["do_not_change"]
     assert d["target_metric"] == "discovery_views_7d" and d["window_days"] == 14
     assert any("Playlist" in s for s in d["steps"]) and any("Shine On" in s for s in d["steps"])
+    # Thema und Oberflaeche bleiben getrennt: die Traffic-Route ist kein Playlist-Thema.
+    assert any("Playlist zum Thema dieses Videos" in s and "Ansatzpunkt laut eigenen Daten: Empfehlungen" in s for s in d["steps"])
+    # Mit benannter Audience steht das Thema im Schritt, nicht die Route.
+    named = details_for("distribute_playlist_context", f, [], {"audience": "train journey music", "actionable": True,
+                                                              "evidence_level": "multi_signal_proxy", "score": 65})
+    assert any("Playlist zu „train journey music“" in s for s in named["steps"])
     assert d["baseline"]["impressions_7d"] == 40 and d["baseline"]["ctr_7d"] == .08
     assert d["executed_automatically"] is False and "ändert nichts" in d["read_only"]
     assert d["route"]["key"] == "traffic_suggested"
@@ -190,10 +196,12 @@ def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone
                                                    "before": 5, "after": 20, "relative_change": 3.0}])
     queue = plan["queue"]
     assert 0 < len(queue) <= ge.QUEUE_LIMIT == 3
-    assert [q["video_id"] for q in queue] == ["a", "b", "e"], "nach aktiver Prioritaet, je Video hoechstens eines"
+    # Belegte Hypothesen zuerst; "b" beschafft nur Evidenz und rutscht dahinter, trotz hoeherem Score als "e".
+    assert [q["video_id"] for q in queue] == ["a", "e", "b"], "nach aktiver Prioritaet, je Video hoechstens eines"
     assert len({q["video_id"] for q in queue}) == len(queue)
     assert all(q["video_id"] not in ("c", "d", "f") for q in queue), "geschuetzt, laufend oder passiv bleibt draussen"
     assert plan["now_do"]["video_id"] == "a" and plan["now_do"]["rank"] == 1
+    assert queue[-1]["action"] == "probe_missing_evidence"
     entry = queue[0]
     for key in ("steps", "baseline", "success_criterion", "stop_criterion", "window_days", "evaluate_after", "measure_from",
                 "expected_signal", "evidence", "do_not_change", "objective", "target_metric", "why"):

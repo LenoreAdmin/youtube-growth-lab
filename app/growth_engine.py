@@ -506,14 +506,17 @@ def experiment_steps(action, title, f, external, channel):
     from_leader = (f"aus „{leader['title']}“" if leader else "aus deinem am besten ausgelieferten Video")
     route = known_route(f)
     audience = (external or {}).get("audience") or (external or {}).get("key")
-    context = audience or (route or {}).get("label") or "das Thema des Videos"
+    # Thema, nicht Oberflaeche: eine Traffic-Route ist kein Playlist-Thema.
+    topic = f"zu „{audience}“" if audience else "zum Thema dieses Videos"
+    context = audience or "dieses Thema"
+    surface = f" Ansatzpunkt laut eigenen Daten: {route['label']}." if route else ""
     tokens = ", ".join((external or {}).get("shared_tokens") or []) or None
     hold = "Während des Messfensters keine weitere Änderung an diesem Video – sonst misst du zwei Dinge gleichzeitig."
     steps = {
         "distribute_playlist_context": [
-            f"Playlist: „{title}“ in eine thematische Playlist zu {context} aufnehmen (oder eine anlegen) und dort auf Position 1–3 setzen.",
+            f"Playlist: „{title}“ in eine thematische Playlist {topic} aufnehmen (oder eine anlegen) und dort auf Position 1–3 setzen."+surface,
             f"Endscreen und Info-Karte {from_leader} auf dieses Video verlinken.",
-            f"Beschreibung: zwei bis drei Sätze Themenkontext zu {context} ergänzen"+(f" (vorhandene gemeinsame Begriffe: {tokens})" if tokens else "")
+            f"Beschreibung: zwei bis drei Sätze Themenkontext {topic} ergänzen"+(f" (vorhandene gemeinsame Begriffe: {tokens})" if tokens else "")
             + "; Titel und Thumbnail bleiben unverändert.",
             hold],
         "probe_missing_evidence": [
@@ -528,12 +531,12 @@ def experiment_steps(action, title, f, external, channel):
             "Titel nur ändern, wenn der Begriff dort fehlt – dann als einzige Änderung.",
             hold],
         "target_suggested_cluster": [
-            f"Themenkontext von „{context}“ in Beschreibung und Playlist spiegeln, damit die Empfehlung neben diesen Videos wahrscheinlicher wird.",
+            f"Themenkontext von „{context}“ in Beschreibung und Playlist spiegeln, damit die Empfehlung neben diesen Videos wahrscheinlicher wird."+surface,
             f"Endscreen {from_leader} auf dieses Video setzen; Reihenfolge in der Playlist an den Cluster anpassen.",
             "Keine Titel-/Thumbnail-Änderung in diesem Fenster.",
             hold],
         "improve_discovery": [
-            f"Playlist-Kontext und Endscreens für „{title}“ setzen; Beschreibung mit konkretem Suchbezug zu {context} ergänzen.",
+            f"Playlist-Kontext und Endscreens für „{title}“ setzen; Beschreibung mit konkretem Suchbezug {topic} ergänzen."+surface,
             "Kapitelmarken setzen, damit Suchtreffer auf Abschnitte zeigen können.",
             hold],
         "cross_promote": [
@@ -868,8 +871,10 @@ def queue_entry(row, rank, today):
 def experiment_queue(ranking, today):
     """A short daily queue: at most one experiment per video, winners protected, running tests untouched."""
     queue, running, rank = [], [], 0
+    # Reihenfolge: belegte Hypothesen zuerst, reine Evidenzbeschaffung danach - sie ist Vorarbeit, keine Chance.
     for row in sorted((r for r in ranking if r["active_eligible"]),
-                      key=lambda r: (-(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0))):
+                      key=lambda r: (r["action"] == "probe_missing_evidence",
+                                     -(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0))):
         if row.get("held_since"):
             # Läuft bereits und wird gemessen: sichtbar halten, aber nicht erneut anstoßen.
             running.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
