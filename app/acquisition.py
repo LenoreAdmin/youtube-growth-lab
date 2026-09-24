@@ -43,6 +43,20 @@ FORMAT_WORDS = {"album", "teaser", "single", "trailer", "visual", "preview", "sn
                 "compilation", "collection", "megamix", "session", "sessions", "acoustic", "unplugged"}
 GENERIC_SHARE = 0.05         # Ein Begriff in mehr als 5 % aller fremden Titel ist ein Formatwort, kein Thema.
 GENERIC_MIN_CORPUS = 50
+MAX_WEB_QUERIES_PER_RUN = 6   # Weit unter dem eigenen Tageslimit; der Rest folgt am naechsten Tag.
+MAX_WEB_RESULTS_PER_QUERY = 10
+HYPOTHESIS_CAP = 60.0         # Ein unbelegter Mechanismus kommt nicht ueber diesen Wert.
+UNPROVEN_FACTOR = 0.85
+# Orte, an denen eine Zielgruppe wirklich zusammenkommt – erkennbar an der Struktur, nicht am Namen.
+COMMUNITY_MARKERS = ("forum", "community", "board", "thread", "topic", "viewtopic", "showthread", "/r/",
+                     "discussion", "diskussion", "comments", "kommentare", "blog", "review", "kritik",
+                     "playlist", "subreddit", "mitglieder", "members", "posts", "beitr", "replies", "antworten")
+# Handel, Streaming, Nachschlagewerke: dort gibt es keine Community, die man beteiligen kann.
+WEB_DENY_HOSTS = {"spotify.com", "open.spotify.com", "music.apple.com", "apple.com", "amazon.de", "amazon.com",
+                  "deezer.com", "tidal.com", "wikipedia.org", "de.wikipedia.org", "en.wikipedia.org", "imdb.com",
+                  "genius.com", "azlyrics.com", "songtexte.com", "lyrics.com", "shazam.com", "chartmasters.org",
+                  "ebay.de", "ebay.com", "etsy.com", "aliexpress.com", "temu.com", "booking.com"}
+WEB_QUERY_TEMPLATES = ('"{theme}" forum', '"{theme}" community', '{theme} blog empfehlung', '{theme} playlist blog')
 MAX_VERIFY_PER_RUN = 8       # Bounded HTTP-Prüfung je Lauf; der Rest folgt am nächsten Tag.
 VERIFY_TTL_DAYS = 7
 QUEUE_LIMIT = 3
@@ -54,10 +68,13 @@ WINDOW_DAYS = 14
 # wenn die Quelle der neuen Maßnahme nicht in der Zielmetrik einer laufenden liegt.
 DISCOVERY_SOURCES = {"YT_SEARCH", "RELATED_VIDEO", "YT_CHANNEL", "SUBSCRIBER", "NOTIFICATION", "END_SCREEN",
                      "PLAYLIST", "YT_PLAYLIST_PAGE", "YT_OTHER_PAGE"}
+# Impressionen entstehen dort, wo unser Thumbnail auf einer YouTube-Oberflaeche gezeigt wird. Ein Klick aus
+# einem Kommentar oder von einer fremden Seite ist keine Impression – solche Quellen sind davon trennbar.
+IMPRESSION_SOURCES = DISCOVERY_SOURCES-{"YT_OTHER_PAGE"}
 ALL_SOURCES = DISCOVERY_SOURCES | {"EXT_URL", "SHORTS", "ADVERTISING", "NO_LINK_OTHER", "NO_LINK_EMBEDDED"}
 # impressions_7d zaehlt nur Auslieferungen auf YouTube-Oberflaechen: ein externer Link erzeugt Views,
 # aber keine Thumbnail-Impression. Deshalb ist externe Ansprache davon trennbar.
-METRIC_SOURCES = {"discovery_views_7d": DISCOVERY_SOURCES, "impressions_7d": DISCOVERY_SOURCES,
+METRIC_SOURCES = {"discovery_views_7d": DISCOVERY_SOURCES, "impressions_7d": IMPRESSION_SOURCES,
                   "external_views_7d": {"EXT_URL"}, "search_views_7d": {"YT_SEARCH"},
                   "suggested_views_7d": {"RELATED_VIDEO"}, "other_views_7d": {"YT_OTHER_PAGE", "NO_LINK_OTHER"}}
 SURFACE_KINDS = {
@@ -74,6 +91,9 @@ SURFACE_KINDS = {
                         "action": "engage_candidate_video", "metric": "other_views_7d"},
     "candidate_channel": {"traffic_source": "YT_OTHER_PAGE", "lever_class": "community_participation",
                           "action": "engage_candidate_channel", "metric": "other_views_7d"},
+    # Aussderhalb von YouTube: eine oeffentliche Seite, auf der die Zielgruppe zusammenkommt.
+    "web_community": {"traffic_source": "EXT_URL", "lever_class": "external_community",
+                      "action": "participate_in_web_community", "metric": "external_views_7d"},
 }
 # Plattformen, über die Menschen Links privat weiterschicken. Sie sind Beleg dafür, dass geteilt wird,
 # aber keine Stelle, die man ansprechen kann – „whatsapp.com kontaktieren“ wäre ein Phantom-Auftrag.
@@ -83,6 +103,7 @@ SHARE_PLATFORMS = {"whatsapp.com", "t.co", "twitter.com", "x.com", "facebook.com
                    "tiktok.com", "snapchat.com", "discord.com", "mail.google.com", "outlook.com", "bing.com",
                    "duckduckgo.com", "yandex.ru", "baidu.com", "messenger.com", "reddit.com", "linktr.ee"}
 ACTION_LABELS = {"reach_out_to_referrer": "Externe Quelle ansprechen, die schon Zuschauer schickt",
+                 "participate_in_web_community": "Externe Community erreichen, in der die Zielgruppe zusammenkommt",
                  "engage_candidate_video": "Bei einem reichweitenstarken passenden Video sichtbar werden",
                  "engage_candidate_channel": "Kanal mit belegter Reichweite echt beteiligen",
                  "engage_recommending_channel": "Kanal mit passender Audience echt beteiligen",
@@ -231,6 +252,51 @@ def weights(session):
     return out
 
 
+def lever_record(session):
+    """Was hat ein Hebel bisher wirklich gebracht? Unbelegt heisst unbelegt – kein Vertrauensvorschuss."""
+    record = {}
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.version == VERSION,
+                                                          GrowthAction.status == "evaluated")):
+        lever = row.lever_class or "unbekannt"
+        entry = record.setdefault(lever, {"trials": 0, "with_traffic": 0, "views_gained": 0})
+        gained = ((row.evaluation or {}).get("attribution") or {}).get("views_delta")
+        entry["trials"] += 1
+        if gained and gained > 0:
+            entry["with_traffic"] += 1
+            entry["views_gained"] += gained
+    for lever in set(list(record)+[spec["lever_class"] for spec in SURFACE_KINDS.values()]):
+        entry = record.setdefault(lever, {"trials": 0, "with_traffic": 0, "views_gained": 0})
+        proven = entry["trials"] >= MIN_TRIALS_FOR_WEIGHT and entry["with_traffic"] > 0
+        entry["proven"] = proven
+        entry["status"] = "belegt" if proven else "hypothese"
+        low, high = WEIGHT_RANGE
+        entry["weight"] = (round(low+(high-low)*entry["with_traffic"]/max(1, entry["trials"]), 3) if proven
+                           else UNPROVEN_FACTOR)
+        entry["basis"] = (f"{entry['with_traffic']} von {entry['trials']} ausgewerteten Versuchen brachten "
+                          f"attribuierte Views (+{entry['views_gained']})." if entry["trials"] else
+                          "Noch kein ausgewerteter Versuch: der Mechanismus ist für diesen Kanal unbelegt.")
+        entry["upgrade_rule"] = ("Erst attribuierte Views aus dieser Quelle werten den Hebel auf; "
+                                f"dafür braucht es mindestens {MIN_TRIALS_FOR_WEIGHT} ausgewertete Versuche.")
+    return record
+
+
+def mechanism_status(surface, levers):
+    """Ist der Wirkmechanismus für diesen Kanal gemessen oder eine Hypothese?"""
+    lever = levers.get(surface.lever_class, {})
+    measured = (surface.evidence or {}).get("measured_views_90d") or 0
+    if lever.get("proven"):
+        return {"status": "belegt", "why": lever.get("basis")}
+    if measured >= MIN_ACTIONABLE_VIEWS:
+        return {"status": "teilweise belegt",
+                "why": (f"Aus dieser Quelle kamen real {measured} Views – dass sie sich durch eine Ansprache "
+                        "erhöhen lassen, ist noch unbelegt."),
+                "upgrade_rule": lever.get("upgrade_rule")}
+    return {"status": "hypothese",
+            "why": ("Für diesen Kanal ist nicht gemessen, dass dieser Hebel zusätzliche Views erzeugt. "
+                    "Die Maßnahme ist ein Test dieser Hypothese, kein bewiesener Mechanismus."),
+            "upgrade_rule": lever.get("upgrade_rule")}
+
+
 def scoreboard(session):
     """The only number this system is judged by: additional attributed views per source, measured."""
     rows = list(session.scalars(select(GrowthAction).where(GrowthAction.version == VERSION)))
@@ -334,6 +400,117 @@ def candidate_matches(session, vocab, generic=None):
     return matches
 
 
+ACTIVITY_PATTERNS = ((r"([\d.,]+)\s*(?:k\s*)?(?:members|mitglieder|subscribers|abonnenten)", "members"),
+                     (r"([\d.,]+)\s*(?:posts|beitr\w+|messages)", "posts"),
+                     (r"([\d.,]+)\s*(?:replies|antworten|kommentare|comments)", "replies"),
+                     (r"([\d.,]+)\s*(?:topics|themen|threads)", "threads"),
+                     (r"([\d.,]+)\s*(?:views|aufrufe)", "views"))
+
+
+def activity_signals(text):
+    """Größen- und Aktivitätsindikatoren aus Titel und Snippet – nur wenn sie dort wirklich stehen."""
+    found, lowered = {}, (text or "").lower()
+    for pattern, name in ACTIVITY_PATTERNS:
+        match = re.search(pattern, lowered)
+        if not match:
+            continue
+        raw, suffix = match.group(1), lowered[match.end(1):match.end()]
+        scale = 1000 if "k" in suffix else 1
+        # „1.2k“ ist eine Dezimalzahl, „1.200“ eine Tausendertrennung – beides kommt in Snippets vor.
+        text_value = raw.replace(",", ".") if scale > 1 else raw.replace(".", "").replace(",", "")
+        try:
+            value = float(text_value)
+        except ValueError:
+            continue
+        found[name] = int(value*scale)
+    return {"known": bool(found), **found,
+            "note": ("Aus Titel und Snippet der Suchtreffer gelesen, nicht von der Seite selbst."
+                     if found else "Keine Größenangabe im Suchtreffer; Aktivität unbekannt.")}
+
+
+def community_page(url, title, snippet):
+    """Sieht die Seite nach einem Ort aus, an dem eine Zielgruppe zusammenkommt – und nicht nach Handel?"""
+    host = urlparse(url).netloc.lower()
+    host = host[4:] if host.startswith("www.") else host
+    if host in WEB_DENY_HOSTS or host in SHARE_PLATFORMS:
+        return False, f"{host} ist Handel, Streaming oder Nachschlagewerk – keine Community."
+    haystack = f"{url} {title} {snippet}".lower()
+    if not any(marker in haystack for marker in COMMUNITY_MARKERS):
+        return False, "Kein Hinweis auf Forum, Community, Blog oder Diskussion."
+    return True, f"{host}: Struktur weist auf einen Ort mit Publikum hin."
+
+
+def collect_web_communities(session, vocab, learned, levers, store, now, day, budget=None, http=None):
+    """Audience-Pools außerhalb der eigenen Reichweite: öffentliche Suche, dann streng filtern.
+
+    Keyword-Übereinstimmung allein genügt nicht: ein Treffer muss mindestens zwei spezifische Begriffe
+    mit unserem Thema teilen, strukturell nach Community aussehen, erreichbar sein und darf nicht auf
+    einer Handels-, Streaming- oder Teilen-Plattform liegen.
+    """
+    from . import websearch
+    from .discovery import tokens as split
+    if not websearch.configured():
+        return {"queries": 0, "checked": 0, "kept": 0, "reason": websearch.status()["reason"]}
+    generic = generic_tokens(session)
+    queries, checked, kept = 0, 0, set()
+    for video_id, words in sorted(vocab.items()):
+        specific = [w for w in sorted(words) if w not in generic and len(w) >= 4]
+        if len(specific) < MIN_SHARED_TOKENS:
+            continue        # Ohne eigenes Thema keine Suche – sonst sucht man nach Formatwörtern.
+        theme = " ".join(specific[:3])
+        for template in WEB_QUERY_TEMPLATES:
+            if queries >= MAX_WEB_QUERIES_PER_RUN or websearch.remaining(session, day) <= 0:
+                break
+            if budget:
+                budget.check()
+            try:
+                results = websearch.search(session, template.format(theme=theme), day,
+                                           MAX_WEB_RESULTS_PER_QUERY, http)
+            except websearch.SearchUnavailable as exc:
+                log.info("Web search unavailable (%s)", exc)
+                return {"queries": queries, "checked": checked, "kept": len(kept), "reason": str(exc)}
+            queries += 1
+            for result in results:
+                checked += 1
+                shared = sorted({t for t in split(f"{result['title']} {result['snippet']}")
+                                 if t in words and t not in generic and len(t) >= 4})
+                if len(shared) < MIN_SHARED_TOKENS:
+                    continue
+                ok, why_structure = community_page(result["url"], result["title"], result["snippet"])
+                if not ok:
+                    continue
+                status_code = verify(result["url"], http)
+                if status_code is not None and status_code >= 400:
+                    continue
+                activity = activity_signals(f"{result['title']} {result['snippet']}")
+                entry = learned.get("web_community", {})
+                if entry.get("retired"):
+                    continue
+                host = urlparse(result["url"]).netloc
+                score = score_candidate(shared, activity.get("members") or activity.get("posts") or 0,
+                                        activity.get("members"), entry.get("weight", 1.0))
+                store("web_community", result["url"], video_id, result["title"], result["url"],
+                      {"host": host, "query": result["query"], "snippet": result["snippet"],
+                       "shared_tokens": shared, "activity": activity, "structure": why_structure,
+                       "demand_source": "public_web_search",
+                       "why": (f"Diese Seite behandelt {', '.join(shared)} – dieselben Begriffe, über die unser Video "
+                               f"in der YouTube-Nachbarschaft läuft. {why_structure} "
+                               + (f"Angaben im Treffer: {', '.join(f'{k}={v}' for k, v in activity.items() if k not in ('known', 'note'))}."
+                                  if activity["known"] else "Größe der Community steht nicht im Treffer.")),
+                       "uncertainty": ("hoch: Relevanz aus Titel und Snippet, die Seite wurde nicht gelesen; "
+                                       "vor dem Handeln selbst prüfen.")},
+                      {"traffic_potential": score, "expected_weekly_views": None,
+                       "activity": {k: v for k, v in activity.items() if k not in ("known", "note")},
+                       "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
+                      {"actionable": True, "rules": NO_SPAM, "manual": True,
+                       "how": ("Die Seite lesen und prüfen, ob das Thema wirklich passt. Nur dort beitragen, wo ein "
+                               "eigener inhaltlicher Beitrag Wert hat; einen Link nur setzen, wenn die Regeln der "
+                               "Seite das ausdrücklich erlauben. Sonst Kontakt suchen und sachlich anfragen.")},
+                      status_code, now)
+                kept.add(result["url"])
+    return {"queries": queries, "checked": checked, "kept": len(kept), "reason": None}
+
+
 def collect_candidates(session, vocab, learned, store):
     """Neue Flächen, mehrfach bestätigt: mindestens zwei gemeinsame Begriffe und zwei verschiedene Kanäle.
 
@@ -413,6 +590,7 @@ def collect(session, now=None, budget=None, http=None):
     now = now or utcnow()
     today = pacific_day(now)
     learned = weights(session)
+    levers = lever_record(session)
     videos = {v.id: v for v in session.scalars(select(Video).where(Video.active.is_(True)))}
     items = {row.video_id: row for row in session.scalars(select(DiscoveryItem))}
     channels = {row.channel_id: row for row in session.scalars(select(DiscoveryChannel))}
@@ -434,6 +612,18 @@ def collect(session, now=None, budget=None, http=None):
     def store(kind, key, video_id, title, url, evidence, scores, access, http_status=None, verified_at=None):
         nonlocal written
         spec = SURFACE_KINDS[kind]
+        # Ein unbelegter Mechanismus darf nicht aussehen wie eine belegte Quelle: sichtbar gekennzeichnet
+        # und mit Abschlag bewertet, bis attribuierte Views ihn aufwerten.
+        lever = levers.get(spec["lever_class"], {})
+        potential = (scores or {}).get("traffic_potential")
+        if potential is not None:
+            proven = bool(lever.get("proven"))
+            factor = lever.get("weight", UNPROVEN_FACTOR)
+            scores = {**scores, "traffic_potential": round(min(100.0 if proven else HYPOTHESIS_CAP,
+                                                              potential*factor), 1),
+                      "mechanism": lever.get("status", "hypothese"),
+                      "adjusted_by": (f"Hebel {spec['lever_class']}: {lever.get('status', 'hypothese')} "
+                                      f"(Faktor {factor}{'' if proven else f', Deckel {HYPOTHESIS_CAP:.0f}'})")}
         statement = upsert(session, TrafficSurface).values(
             day=today, kind=kind, key=str(key)[:300], video_id=video_id, title=str(title)[:300],
             url=url[:500] if url else None, traffic_source=spec["traffic_source"], lever_class=spec["lever_class"],
@@ -566,11 +756,15 @@ def collect(session, now=None, budget=None, http=None):
     # Neue Flächen aus den Suchproben: Publikum, das uns noch nicht erreicht.
     if budget:
         budget.check()
-    collect_candidates(session, own_vocabulary(session), learned, store)
+    vocab = own_vocabulary(session)
+    collect_candidates(session, vocab, learned, store)
+    # Audience-Pools ausserhalb der eigenen Reichweite: oeffentliche Suche.
+    web = collect_web_communities(session, vocab, learned, levers, store, now, today, budget, http)
     session.commit()
     if owned_http is not None:
         owned_http.close()
-    return {"surfaces": written, "verified": verified, "day": str(today), "per_kind": dict(per_kind)}
+    return {"surfaces": written, "verified": verified, "day": str(today), "per_kind": dict(per_kind),
+            "web_search": web}
 
 
 # ----------------------------------------------------------------------------- conflicts
@@ -614,6 +808,18 @@ def steps_for(kind, surface, video_title):
                 "Einen inhaltlichen Kommentar schreiben, der auch ohne Link Wert hat (konkreter Bezug, keine Werbung).",
                 "Keinen Eigenwerbe-Link setzen und nicht mehrfach kommentieren.",
                 NO_SPAM]
+    if kind == "web_community":
+        evidence = surface.evidence or {}
+        activity = {k: v for k, v in (evidence.get("activity") or {}).items() if k not in ("known", "note")}
+        return [f"Seite öffnen und lesen: {surface.url}",
+                f"Prüfen, ob das Thema wirklich passt (gemeinsame Begriffe: {', '.join(evidence.get('shared_tokens') or [])}"
+                + (f"; Angaben im Treffer: {', '.join(f'{k}={v}' for k, v in activity.items())}" if activity else "")
+                + "). Passt es nicht, diese Fläche verwerfen – das ist ein gültiges Ergebnis.",
+                "Wenn es passt: einen eigenen inhaltlichen Beitrag leisten (Antwort, Kommentar, Empfehlung im "
+                "Kontext). Einen Link auf das Video nur setzen, wenn die Regeln der Seite das erlauben; sonst "
+                "Kontakt suchen und sachlich anfragen.",
+                "Datum und Zielstelle notieren. Nichts am Video selbst ändern.",
+                NO_SPAM]
     if kind == "candidate_video":
         return [f"Das Video ansehen: {surface.url} ({(surface.evidence or {}).get('public_views')} öffentliche Views)",
                 "Einen inhaltlichen Kommentar schreiben, der auch ohne Link Wert hat – konkreter Bezug zum Video, "
@@ -648,6 +854,10 @@ def mechanism(kind, surface):
                                    "YouTube verstärkt die Nachbarschaft, wenn Zuschauer beide Videos sehen."),
             "recommending_channel": ("Der Kanal teilt unsere Audience. Echte Teilnahme macht uns bei dessen Zuschauern "
                                      "sichtbar und erhöht die Chance, häufiger neben seinen Videos empfohlen zu werden."),
+            "web_community": ("Auf dieser Seite kommt eine Zielgruppe zusammen, die dasselbe Thema verfolgt und uns "
+                              "nicht kennt. Ein passender eigener Beitrag dort führt Leser auf das Video; solche Klicks "
+                              "erscheinen in den Analytics als EXT_URL-Views. Dass das für diesen Kanal funktioniert, "
+                              "ist eine Hypothese und genau das, was diese Maßnahme prüft."),
             "candidate_video": ("Unter diesem Video ist ein Publikum versammelt, das thematisch zu uns passt und uns "
                                 "noch nicht kennt. Ein inhaltlich sichtbarer Kommentar führt einen Teil dieser Zuschauer "
                                 "auf unseren Kanal; solche Klicks erscheinen in den Analytics als YT_OTHER_PAGE."),
@@ -669,7 +879,8 @@ def propose(session, now=None, budget=None):
                       key=lambda s: -(s.scores or {}).get("traffic_potential", 0)) if latest else []
     current = {(s.kind, s.key): s for s in surfaces}
     # Zuerst pruefen, dann neu vorschlagen - auch wenn heute gar keine Flaeche uebrig bleibt.
-    dropped = review_open_proposals(session, current, titles, now)
+    levers = lever_record(session)
+    dropped = review_open_proposals(session, current, titles, now, levers)
     if not surfaces:
         session.commit()
         return {"proposed": 0, "blocked": [], "dropped": dropped, "day": str(latest) if latest else None}
@@ -693,7 +904,7 @@ def propose(session, now=None, budget=None):
             GrowthAction.status.in_(["proposed", "running"])))
         if open_row is not None or per_video[surface.video_id] >= 1:
             continue
-        payload = action_payload(surface, titles[surface.video_id], spec)
+        payload = action_payload(surface, titles[surface.video_id], spec, levers)
         # Je Video und Tag existiert genau eine Zeile. Eine heute zurueckgezogene darf wieder aufleben,
         # sonst blockierte eine verworfene Quelle den Platz fuer die bessere bis zum naechsten Tag.
         row = session.scalar(select(GrowthAction).where(GrowthAction.version == VERSION,
@@ -721,7 +932,7 @@ def propose(session, now=None, budget=None):
 UPGRADE_MARGIN = 10.0        # Erst ein klar besseres Potenzial ersetzt einen offenen Vorschlag.
 
 
-def review_open_proposals(session, current, titles, now):
+def review_open_proposals(session, current, titles, now, levers=None):
     """Offene Vorschläge gegen die heutige Datenlage prüfen: zurückziehen, aktualisieren oder ersetzen.
 
     Ohne das bliebe eine schwache Quelle für immer stehen und blockierte den Platz für eine bessere – und
@@ -763,21 +974,24 @@ def review_open_proposals(session, current, titles, now):
         elif surface is not None:
             # Derselbe Ort, aber die Lage ist neu bewertet: Text, Zielmetrik und Baseline nachziehen.
             spec = SURFACE_KINDS[surface.kind]
-            row.payload = action_payload(surface, titles.get(row.video_id, row.video_id), spec)
+            row.payload = action_payload(surface, titles.get(row.video_id, row.video_id), spec, levers)
             row.baseline = row.payload["baseline"]
             row.target_metric, row.window_days = spec["metric"], WINDOW_DAYS
             row.traffic_source, row.lever_class = surface.traffic_source, surface.lever_class
     return dropped
 
 
-def action_payload(surface, video_title, spec):
+def action_payload(surface, video_title, spec, levers=None):
     evidence, scores = surface.evidence or {}, surface.scores or {}
+    status = mechanism_status(surface, levers or {})
     return {"engine": VERSION, "surface_kind": surface.kind, "surface_key": surface.key,
             "surface_title": surface.title, "surface_url": surface.url,
             "traffic_source": surface.traffic_source, "lever_class": surface.lever_class,
             "action_label": ACTION_LABELS[spec["action"]],
             "why": evidence.get("why"), "evidence": evidence,
             "mechanism": mechanism(surface.kind, surface),
+            "mechanism_status": status["status"], "mechanism_note": status["why"],
+            "upgrade_rule": status.get("upgrade_rule"),
             "steps": steps_for(surface.kind, surface, video_title),
             "primary_metric": (f"zusätzliche qualifizierte Views aus {surface.traffic_source} auf dieses Video "
                                f"({spec['metric']})"),
@@ -787,6 +1001,7 @@ def action_payload(surface, video_title, spec):
             "do_not_change": ["Titel", "Thumbnail", "Videoinhalt", "Sichtbarkeit"]
                              + (["Beschreibung"] if surface.kind != "own_search_intent" else []),
             "primary_lever": {"external_outreach": "eine externe Quelle ansprechen",
+                              "external_community": "in einer externen Community mitwirken",
                               "community_participation": "echte Teilnahme dort, wo die Audience ist",
                               "search_wording": "Wortlaut in Beschreibung und Kapiteln"}[surface.lever_class],
             "success_criterion": (f"Views aus {surface.traffic_source} im Nachher-Fenster messbar über dem gleich langen "
@@ -859,30 +1074,42 @@ def run(session, now=None, budget=None, http=None):
             session.rollback()
             result["issues"].append(f"{name}: {type(exc).__name__}")
             log.error("Acquisition step %s failed (%s); raw data omitted", name, type(exc).__name__)
-    log.info("acquisition surfaces=%s per_kind=%s proposed=%s blocked=%s evaluated=%s issues=%s",
+    log.info("acquisition surfaces=%s per_kind=%s proposed=%s blocked=%s evaluated=%s issues=%s web=%s",
              result.get("surfaces"), result.get("per_kind"), result.get("proposed"),
-             len(result.get("blocked") or []), result.get("evaluated"), len(result.get("issues") or []))
+             len(result.get("blocked") or []), result.get("evaluated"), len(result.get("issues") or []),
+             result.get("web_search"))
     # Betriebssichtbarkeit fuer einen PC-off-Betrieb: was schlaegt die Engine heute konkret vor und
     # welche Flaechen stehen dahinter. Kanaleigene Daten, keine Secrets.
     try:
         view = overview(session, now)
         for entry in view["traffic_queue"]:
-            log.info("acquisition proposal video=%r surface=%r source=%s metric=%s potential=%s expected_weekly=%s",
-                     entry["title"], entry["surface"], entry["traffic_source"], entry["target_metric"],
-                     entry["traffic_potential"], entry["expected_weekly_views"])
-        for surface in view["surfaces"][:6]:
-            log.info("acquisition surface kind=%s video=%s title=%r potential=%s expected_weekly=%s http=%s",
-                     surface["kind"], surface["video_id"], surface["title"], surface["traffic_potential"],
-                     surface["expected_weekly_views"], surface["http_status"])
+            log.info("acquisition proposal video=%r surface=%r url=%s source=%s metric=%s potential=%s mechanism=%s",
+                     entry["title"], entry["surface"], entry.get("surface_url"), entry["traffic_source"],
+                     entry["target_metric"], entry["traffic_potential"], entry.get("mechanism_status"))
+        for surface in view["surfaces"][:8]:
+            log.info("acquisition surface kind=%s video=%s title=%r url=%s potential=%s http=%s",
+                     surface["kind"], surface["video_id"], surface["title"], surface.get("url"),
+                     surface["traffic_potential"], surface["http_status"])
         for item in view["blocked"][:4]:
             log.info("acquisition blocked video=%r surface=%r source=%s reason=%r",
                      item["title"], item["surface"], item["traffic_source"], item["reason"][:120])
     except Exception as exc:
         log.info("Acquisition summary unavailable (%s)", type(exc).__name__)
+    web = result.get("web_search") or {}
+    if web:
+        log.info("acquisition websearch queries=%s checked=%s kept=%s reason=%s",
+                 web.get("queries"), web.get("checked"), web.get("kept"), web.get("reason"))
     return result
 
 
 # ----------------------------------------------------------------------------- read model
+def _web_status(session, day):
+    from . import websearch
+    state = websearch.status()
+    return {**state, "used_today": websearch.used_today(session, day),
+            "remaining_today": websearch.remaining(session, day)}
+
+
 def overview(session, now=None):
     """The traffic queue: only executable acquisition actions, ranked by traffic potential."""
     now = now or utcnow()
@@ -945,13 +1172,15 @@ def overview(session, now=None):
                           "expected_weekly_views": (s.scores or {}).get("expected_weekly_views"),
                           "why": (s.evidence or {}).get("why")}
                          for s in sorted(surfaces, key=lambda s: -(s.scores or {}).get("traffic_potential", 0))[:12]],
-            "scoreboard": scoreboard(session), "learning": weights(session),
+            "scoreboard": scoreboard(session), "learning": weights(session), "levers": lever_record(session),
+            "web_search": _web_status(session, today),
             "capabilities": {"used": ["Eigene Analytics: externe Referrer (EXT_URL-Detail)",
                                       "Eigene Analytics: empfehlende Videos und deren Kanäle",
                                       "Eigene Analytics: reale Suchbegriffe",
-                                      "HTTP-Prüfung, dass eine externe Seite erreichbar ist"],
-                             "not_used": ["Web-/Foren-/Blog-Suche nach neuen Communities: benötigt einen Such-Provider "
-                                          "mit API-Key, in diesem Sprint ausgeschlossen. Es werden deshalb nur Flächen "
-                                          "vorgeschlagen, die den Kanal nachweislich schon berühren."]},
+                                      "Öffentliche Suchproben (YouTube Data API) für thematisch nahe Videos/Kanäle",
+                                      "Öffentliche Web-Suche nach Communities außerhalb der eigenen Reichweite",
+                                      "HTTP-Prüfung, dass eine Seite erreichbar ist"],
+                             "not_used": ["Automatisches Posten, Kommentieren oder Anschreiben: findet nicht statt.",
+                                          "Bezahlte Reichweite, Bots, Engagement-Pods: ausgeschlossen."]},
             "read_only": "Das System postet nichts und ändert nichts auf YouTube.",
             "goal": "Zusätzliche qualifizierte organische Views; gemessen wird die Quelle, nicht die Aktivität."}

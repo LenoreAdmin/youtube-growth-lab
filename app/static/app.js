@@ -54,7 +54,10 @@ function renderTraffic(a){
  $("trafficTitle").textContent=q.length?`Jetzt tun: ${q.length} Traffic-Aktion${q.length>1?"en":""}`:
   (run.length?"Alle gefundenen Quellen laufen bereits":"Keine ausführbare Trafficquelle gefunden");
  $("trafficMeta").textContent=`Flächen vom ${esc(a.day||"—")} · ${num(a.surfaces_found)} geprüfte Quellen`;
- $("trafficGoal").textContent=a.goal||"";
+ const web=a.web_search||{};
+ $("trafficGoal").textContent=(a.goal||"")+(web.configured?` · Externe Suche aktiv (${num(web.used_today)}/${num(web.daily_limit)} Abfragen heute)`:" · Externe Suche nicht konfiguriert");
+ $("trafficSearch").innerHTML=web.configured?"":`<h3>Externe Suche einschalten</h3><p>${esc(web.reason||"")}</p><ol>${(web.setup||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>`;
+ $("trafficSearch").hidden=!!web.configured;
  $("trafficKpi").innerHTML=[["Zusätzliche Views (attribuiert)",num(board.attributed_views_delta),"aus gemessenen Quellen seit Start"],
   ["Laufende Traffic-Aktionen",num(board.running),"von dir bestätigt"],
   ["Ausgewertet",num(board.evaluated),"mit Quellen-Attribution"],
@@ -63,6 +66,7 @@ function renderTraffic(a){
  $("trafficQueue").innerHTML=q.map(e=>`<article class="queue-item"><h3>#${e.rank} ${esc(e.title)} — ${esc(e.action_label||e.action)}</h3>
   <p><strong>Trafficquelle:</strong> ${esc(e.surface||"—")}${e.surface_url?` <a href="${esc(e.surface_url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""} <small>${esc(e.traffic_source||"")}${e.verified?" · erreichbar geprüft":""}</small></p>
   <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
+  <p><strong>Wirkmechanismus:</strong> ${esc(e.mechanism_status||"unbekannt")}${e.mechanism_note?" – "+esc(e.mechanism_note):""}${e.upgrade_rule?" <small>"+esc(e.upgrade_rule)+"</small>":""}</p>
   <p><strong>Aktion:</strong></p><ol>${(e.steps||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>
   <p><strong>Erwarteter Mechanismus:</strong> ${esc(e.mechanism||"")}</p>
   <p><strong>Primärmetrik:</strong> ${esc(e.primary_metric||"")} · <strong>Messfenster:</strong> ${e.window_days} Tage (Auswertung ${esc(e.evaluate_after)})</p>

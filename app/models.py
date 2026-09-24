@@ -432,6 +432,14 @@ class ChannelPlaylist(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class WebSearchQuota(Base):
+    """Own daily counter for public web searches so the free provider tier can never be exceeded."""
+    __tablename__ = "web_search_quota"
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    queries: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class TrafficSurface(Base):
     """A concrete, verifiable place where an audience for one of our videos already exists.
 

@@ -202,6 +202,15 @@ def acquisition_overview(s=Depends(db)):
     return jsonable_encoder(acquisition_module.overview(s))
 
 
+@app.post("/api/acquisition/run", dependencies=[Depends(authenticate)])
+def acquisition_run(s=Depends(db)):
+    """Einen Acquisition-Durchlauf sofort ausfuehren, ohne auf den Jobs-Cron zu warten. Nach aussen read-only."""
+    if settings.vercel_env == "preview":
+        raise HTTPException(403, "In Preview-Deployments deaktiviert.")
+    from .budget import Budget
+    return jsonable_encoder(acquisition_module.run(s, utcnow(), Budget(settings.sync_budget_seconds)))
+
+
 @app.get("/api/discovery", dependencies=[Depends(authenticate)])
 def discovery_overview(s=Depends(db)):
     return jsonable_encoder(discovery_module.overview(s))

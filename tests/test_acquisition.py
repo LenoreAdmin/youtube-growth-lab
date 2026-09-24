@@ -121,7 +121,10 @@ def test_the_traffic_queue_contains_no_observation_or_protection(session):
         assert entry["action"] not in ("observe", "probe_missing_evidence", "protect_no_change")
         assert entry["surface"] and entry["why"] and entry["steps"] and entry["primary_metric"]
         assert entry["confirm"]["endpoint"].endswith("/start")
-    assert "Web-/Foren-/Blog-Suche" in " ".join(view["capabilities"]["not_used"])
+    assert "Automatisches Posten" in " ".join(view["capabilities"]["not_used"])
+    # Der Suchstatus sagt, ob die externe Suche laeuft – und wenn nicht, was zu tun ist.
+    assert view["web_search"]["configured"] is False and view["web_search"]["setup"]
+    assert view["web_search"]["remaining_today"] == view["web_search"]["daily_limit"]
 
 
 # ---------------------------------------------------------------------------- Konflikte nach Hebel/Quelle
