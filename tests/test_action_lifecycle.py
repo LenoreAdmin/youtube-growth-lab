@@ -175,3 +175,25 @@ def test_a_changed_decision_on_the_same_day_keeps_one_startable_proposal(monkeyp
     # Und dieser Vorschlag laesst sich tatsaechlich starten.
     started = ge.start_action(session, entry["action_id"], NOW)
     assert started.status == ge.RUNNING
+
+
+def test_an_open_proposal_always_carries_the_current_steps(monkeypatch, session):
+    """Sonst zeigte die Queue neue Schritte, waehrend der Start die alten einfriert."""
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=3, trend=0)
+    stale = action_row(session, "a", created_day=TODAY, payload={"steps": ["Alter Schritt"], "baseline": {}})
+    rows, _ = history.build(history.load(session), 168, LAG)
+    base = regimes.baselines(rows)
+    histories = {h.video.id: h for h in history.load(session)}
+    contexts = [{"video": session.get(Video, "a"), "history": histories["a"],
+                 "features": history.features_at(histories["a"], TODAY),
+                 "regime": regimes.classify(history.features_at(histories["a"], TODAY), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}}]
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    row = session.get(GrowthAction, stale.id)
+    assert row.status == ge.PROPOSED and row.payload["steps"] != ["Alter Schritt"]
+    assert row.payload["primary_lever"] and "Beschreibung" in row.payload["do_not_change"]
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
+    entry = next(q for q in plan["queue"] if q["video_id"] == "a")
+    assert entry["steps"] == row.payload["steps"], "Queue und gespeicherte Maßnahme zeigen dasselbe"

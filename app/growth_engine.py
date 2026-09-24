@@ -898,11 +898,14 @@ def run(session, now, contexts, base, budget=None):
                     proposed = GrowthAction(video_id=video.id, created_day=today, created_at=now, version=VERSION,
                                             state=state, action=action, status=PROPOSED)
                     session.add(proposed)
-                if proposed.status == PROPOSED:
-                    proposed.target_metric, proposed.window_days = details["target_metric"], details["window_days"]
-                    proposed.evaluate_after = today+timedelta(days=details["window_days"]+lag_days())
-                    proposed.payload, proposed.baseline = details, details.get("baseline") or {}
-                    session.flush()
+            if proposed is not None and proposed.status == PROPOSED:
+                # Ein offener Vorschlag traegt immer den aktuellen Stand: sonst zeigte die Queue neue Schritte,
+                # waehrend die gespeicherte Maßnahme noch die alten festhielte und beim Start einfriere.
+                proposed.state, proposed.version = state, VERSION
+                proposed.target_metric, proposed.window_days = details["target_metric"], details["window_days"]
+                proposed.evaluate_after = today+timedelta(days=details["window_days"]+lag_days())
+                proposed.payload, proposed.baseline = details, details.get("baseline") or {}
+                session.flush()
             current = proposed
         paid, profile = paid_state(f)
         if f is None:
