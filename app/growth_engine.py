@@ -37,6 +37,7 @@ ABS_CTR_OK = 0.04         # Without a usable channel median, 4 % click-through i
 LOW_IMPRESSIONS_7D = 300  # Absolute delivery floor used only until the channel has its own impressions median.
 SCARCE_SHARE = 0.5        # Below half the channel median of impressions, delivery is the bottleneck.
 MIN_ROUTE_VIEWS = 10      # Below this the 7-day traffic mix is noise and names no route.
+WEAK_SOURCE_VIEWS_7D = 20 # A source below this can barely pass on traffic – say so before anyone spends effort.
 QUEUE_LIMIT = 3           # A short daily queue: never ten simultaneous changes on one channel.
 ROUTE_LABELS = {"traffic_search": "YouTube-Suche", "traffic_suggested": "Empfehlungen neben anderen Videos",
                 "traffic_browse": "Kanalseite, Playlists, Startseite, Endscreens", "traffic_external": "externe Links"}
@@ -661,7 +662,7 @@ def choices_for(action, channel):
     return None
 
 
-def link_steps(title, channel, hold):
+def link_steps(title, channel, hold, f=None):
     """Link from a named own video – or let a human pick from the real candidates instead of guessing."""
     channel = channel or {}
     chosen, candidates = channel.get("source"), channel.get("source_candidates") or []
@@ -674,10 +675,17 @@ def link_steps(title, channel, hold):
                  f"Info-Karte auf „{title}“ setzen: {options}. Das System wählt hier bewusst nicht für dich.")
     else:
         return None      # Ohne belegte Quelle gibt es keinen ausfuehrbaren Schritt - die Aktion wird gar nicht erst gewaehlt.
-    return [first,
-            f"Am Quellvideo sonst nichts ändern – Titel, Thumbnail und Beschreibung dort bleiben unverändert.",
-            f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert.",
-            hold]
+    steps = [first,
+             "Am Quellvideo sonst nichts ändern – Titel, Thumbnail und Beschreibung dort bleiben unverändert.",
+             f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert."]
+    reach = max((c["views_7d"] or 0) for c in candidates)
+    if reach < WEAK_SOURCE_VIEWS_7D:
+        # Ehrlich vor dem Aufwand: aus einer schwach ausgelieferten Quelle kann kaum Verkehr kommen.
+        steps.append(f"Erwartungsmanagement: die beste verfügbare Quelle liefert selbst nur {reach} Views in der letzten "
+                     "bekannten Woche. Der mögliche Effekt ist entsprechend klein und schwer von Rauschen zu trennen; "
+                     "das Ergebnis zeigt vor allem, ob interne Verlinkung überhaupt Auslieferung erzeugt.")
+    steps.append(hold)
+    return steps
 
 
 def playlist_steps(title, channel, hold, fit=""):
@@ -710,7 +718,7 @@ def experiment_steps(action, title, f, external, channel):
     # Eine belegte Audience hilft bei der Auswahl der bestehenden Playlist; geschrieben wird dadurch nichts.
     fit = f" (passend zu „{audience}“)" if audience else ""
     hold = "Während des Messfensters keine weitere Änderung an diesem Video – sonst misst du zwei Dinge gleichzeitig."
-    link = link_steps(title, channel, hold)      # None, wenn keine belegte Quelle existiert
+    link = link_steps(title, channel, hold, f)      # None, wenn keine belegte Quelle existiert
     steps = {
         # Ein Hebel, und nur belegte Ressourcen: was nicht nachweislich existiert, kommt in keinem Schritt vor.
         "link_from_own_video": link,

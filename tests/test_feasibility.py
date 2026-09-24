@@ -145,3 +145,16 @@ def test_the_plan_offers_the_named_link_experiment_end_to_end(monkeypatch, sessi
     assert any(session.get(Video, "b").title in s for s in entry["steps"])
     stored = session.get(GrowthAction, entry["action_id"])
     assert stored.status == ge.PROPOSED and stored.payload["requires"]["verified"] is True
+
+
+def test_a_weakly_delivered_source_is_flagged_before_the_work_starts():
+    f = starved()
+    weak = {"video_id": "b", "title": "Shine On", "impressions_7d": 11, "views_7d": 5,
+            "evidence": "5 Views und 11 Impressions in der letzten bekannten Woche"}
+    channel = {"playlists": NO_PLAYLISTS, "source_candidates": [weak], "source": weak}
+    steps = ge.experiment_steps("link_from_own_video", "Trainstories", f, None, channel)
+    assert any("Erwartungsmanagement" in s and "nur 5 Views" in s for s in steps)
+    strong = {**SOURCE, "views_7d": 120}
+    fine = ge.experiment_steps("link_from_own_video", "Trainstories", f, None,
+                               {"playlists": NO_PLAYLISTS, "source_candidates": [strong], "source": strong})
+    assert not any("Erwartungsmanagement" in s for s in fine)
