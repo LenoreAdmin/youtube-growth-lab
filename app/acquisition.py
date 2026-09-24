@@ -219,6 +219,7 @@ def collect(session, now=None, budget=None, http=None):
     suggested, _ = _latest_signals(session, "own_suggested_source")
     searched, _ = _latest_signals(session, "own_search_term")
     written, verified = 0, 0
+    per_kind = defaultdict(int)
 
     def store(kind, key, video_id, title, url, evidence, scores, access, http_status=None, verified_at=None):
         nonlocal written
@@ -234,6 +235,7 @@ def collect(session, now=None, budget=None, http=None):
             "access": statement.excluded.access, "http_status": statement.excluded.http_status,
             "verified_at": statement.excluded.verified_at}))
         written += 1
+        per_kind[kind] += 1
 
     known = {(r.kind, r.key): r for r in session.scalars(select(TrafficSurface))}
 
@@ -343,7 +345,7 @@ def collect(session, now=None, budget=None, http=None):
     session.commit()
     if owned_http is not None:
         owned_http.close()
-    return {"surfaces": written, "verified": verified, "day": str(today)}
+    return {"surfaces": written, "verified": verified, "day": str(today), "per_kind": dict(per_kind)}
 
 
 # ----------------------------------------------------------------------------- conflicts
@@ -552,6 +554,9 @@ def run(session, now=None, budget=None, http=None):
             session.rollback()
             result["issues"].append(f"{name}: {type(exc).__name__}")
             log.error("Acquisition step %s failed (%s); raw data omitted", name, type(exc).__name__)
+    log.info("acquisition surfaces=%s per_kind=%s proposed=%s blocked=%s evaluated=%s issues=%s",
+             result.get("surfaces"), result.get("per_kind"), result.get("proposed"),
+             len(result.get("blocked") or []), result.get("evaluated"), len(result.get("issues") or []))
     return result
 
 
