@@ -270,6 +270,21 @@ $("refresh").onclick=()=>guarded(manualSync);
 $("backfillRun").onclick=()=>guarded(backfill);
 $("learningRun").onclick=()=>guarded(learningRun);
 $("discoveryRun").onclick=()=>guarded(discoveryRun);
+async function acquisitionRun(){
+ // Erst Discovery (fremde Playlists/Kanaele, kostet Quota), dann die Auswertung zu Flaechen und Aktionen.
+ const button=$("acquisitionRun");
+ if(button.disabled)return;
+ const label=button.textContent;
+ button.disabled=true;button.textContent="Suche läuft…";
+ try{
+  let failure=null;
+  try{await api("/api/discovery/run",{})}catch(error){failure=error}
+  try{await api("/api/acquisition/run",{})}catch(error){failure=failure||error}
+  try{await load()}catch(error){failure=failure||error}
+  if(failure)throw failure;
+ }finally{button.disabled=false;button.textContent=label}
+}
+$("acquisitionRun").onclick=()=>guarded(acquisitionRun);
 async function startExperiment(button){
  // Bestaetigung der Durchfuehrung durch den Menschen - das System aendert nichts auf YouTube.
  if(button.disabled)return;
