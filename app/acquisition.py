@@ -1129,6 +1129,8 @@ def overview(session, now=None):
                  "lever_class": row.lever_class, "surface": payload.get("surface_title"),
                  "surface_url": payload.get("surface_url"), "surface_kind": payload.get("surface_kind"),
                  "why": payload.get("why"), "mechanism": payload.get("mechanism"), "steps": payload.get("steps") or [],
+                 "mechanism_status": payload.get("mechanism_status"), "mechanism_note": payload.get("mechanism_note"),
+                 "upgrade_rule": payload.get("upgrade_rule"), "activity": (payload.get("evidence") or {}).get("activity"),
                  "primary_metric": payload.get("primary_metric"), "target_metric": row.target_metric,
                  "window_days": row.window_days, "evaluate_after": str(row.evaluate_after),
                  "do_not_change": payload.get("do_not_change") or [], "primary_lever": payload.get("primary_lever"),

@@ -132,6 +132,10 @@ def test_a_found_pool_becomes_an_executable_proposal_with_external_attribution(s
     assert "Test dieser Hypothese" in payload["mechanism_note"]
     assert "attribuierte Views" in payload["upgrade_rule"]
     assert "EXT_URL" in payload["primary_metric"]
+    # Und der Status ist auch dort sichtbar, wo das Dashboard liest.
+    entry = aq.overview(session, NOW)["traffic_queue"][0]
+    assert entry["mechanism_status"] == "hypothese" and entry["mechanism_note"]
+    assert entry["upgrade_rule"] and entry["activity"]["members"] == 3400
 
 
 def test_an_unproven_lever_is_capped_and_only_real_results_lift_it(session, configured):
