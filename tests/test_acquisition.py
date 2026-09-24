@@ -578,3 +578,19 @@ def test_an_open_proposal_is_updated_or_replaced_by_a_better_surface(session):
     fresh = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION,
                                                      GrowthAction.status == "proposed"))
     assert fresh.id != row.id and fresh.payload["surface_title"] in ("Rail Nights", "Night train ambient")
+
+
+def test_a_withdrawn_proposal_does_not_block_a_better_one_on_the_same_day(session):
+    """Sonst bliebe die Queue bis zum naechsten Tag leer, obwohl eine handelbare Flaeche vorliegt."""
+    signal(session, "a", "own_external", "kleinblog.example", 1)          # zu schwach
+    aq.collect(session, NOW, http=FakeHttp())
+    assert aq.propose(session, NOW)["proposed"] == 0
+    # Spaeter am selben Tag liefert eine echte Flaeche Evidenz.
+    signal(session, "a", "own_external", "musikblog.example", 40)
+    aq.collect(session, NOW, http=FakeHttp())
+    result = aq.propose(session, NOW)
+    assert result["proposed"] == 1, "die bessere Flaeche kommt noch heute in die Queue"
+    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
+    assert row.status == "proposed" and row.surface_key == "https://musikblog.example"
+    assert row.outcome is None and row.evaluation is None
+    assert aq.overview(session, NOW)["traffic_queue"][0]["surface"] == "musikblog.example"

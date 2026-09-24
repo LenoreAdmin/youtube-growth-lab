@@ -694,15 +694,18 @@ def propose(session, now=None, budget=None):
         if open_row is not None or per_video[surface.video_id] >= 1:
             continue
         payload = action_payload(surface, titles[surface.video_id], spec)
+        # Je Video und Tag existiert genau eine Zeile. Eine heute zurueckgezogene darf wieder aufleben,
+        # sonst blockierte eine verworfene Quelle den Platz fuer die bessere bis zum naechsten Tag.
         row = session.scalar(select(GrowthAction).where(GrowthAction.version == VERSION,
                                                         GrowthAction.video_id == surface.video_id,
                                                         GrowthAction.created_day == today))
-        if row is not None and row.status not in ("proposed",):
+        if row is not None and row.status in ("running", "evaluated"):
             continue
         if row is None:
             row = GrowthAction(video_id=surface.video_id, created_day=today, created_at=now, version=VERSION,
                                state="traffic_acquisition", action=spec["action"], status="proposed")
             session.add(row)
+        row.status, row.outcome, row.evaluation, row.evaluated_at = "proposed", None, None, None
         row.action, row.state = spec["action"], "traffic_acquisition"
         row.target_metric, row.window_days = spec["metric"], WINDOW_DAYS
         row.evaluate_after = today+timedelta(days=WINDOW_DAYS+lag_days())
