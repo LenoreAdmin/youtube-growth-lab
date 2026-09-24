@@ -16,6 +16,7 @@ read-only and outreach is prepared for a human.
 """
 import logging
 import re
+from math import log10
 from collections import defaultdict
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -30,7 +31,11 @@ from .models import (ChannelPlaylist, DiscoveryChannel, DiscoveryItem, Discovery
 log = logging.getLogger(__name__)
 VERSION = "acquisition-v7"
 SIGNAL_WINDOW_DAYS = 90
-MIN_SURFACE_VIEWS = 1        # Eine Fläche braucht mindestens einen real gemessenen View von dort.
+MIN_SURFACE_VIEWS = 1        # Sichtbar wird eine Fläche ab einem gemessenen View von dort.
+MIN_ACTIONABLE_VIEWS = 5     # Vorgeschlagen wird erst, wenn dort in 90 Tagen wirklich Publikum war.
+MIN_CANDIDATE_VIEWS = 2000   # Öffentliche Reichweite, ab der ein fremdes Video als Fläche zählt.
+MIN_CANDIDATE_SUBSCRIBERS = 500
+MIN_SHARED_TOKENS = 2        # Ein gemeinsames Wort ist keine Themengleichheit (siehe V6).
 MAX_VERIFY_PER_RUN = 8       # Bounded HTTP-Prüfung je Lauf; der Rest folgt am nächsten Tag.
 VERIFY_TTL_DAYS = 7
 QUEUE_LIMIT = 3
@@ -43,8 +48,11 @@ WINDOW_DAYS = 14
 DISCOVERY_SOURCES = {"YT_SEARCH", "RELATED_VIDEO", "YT_CHANNEL", "SUBSCRIBER", "NOTIFICATION", "END_SCREEN",
                      "PLAYLIST", "YT_PLAYLIST_PAGE", "YT_OTHER_PAGE"}
 ALL_SOURCES = DISCOVERY_SOURCES | {"EXT_URL", "SHORTS", "ADVERTISING", "NO_LINK_OTHER", "NO_LINK_EMBEDDED"}
-METRIC_SOURCES = {"discovery_views_7d": DISCOVERY_SOURCES, "external_views_7d": {"EXT_URL"},
-                  "search_views_7d": {"YT_SEARCH"}, "suggested_views_7d": {"RELATED_VIDEO"}}
+# impressions_7d zaehlt nur Auslieferungen auf YouTube-Oberflaechen: ein externer Link erzeugt Views,
+# aber keine Thumbnail-Impression. Deshalb ist externe Ansprache davon trennbar.
+METRIC_SOURCES = {"discovery_views_7d": DISCOVERY_SOURCES, "impressions_7d": DISCOVERY_SOURCES,
+                  "external_views_7d": {"EXT_URL"}, "search_views_7d": {"YT_SEARCH"},
+                  "suggested_views_7d": {"RELATED_VIDEO"}, "other_views_7d": {"YT_OTHER_PAGE", "NO_LINK_OTHER"}}
 SURFACE_KINDS = {
     "own_external_referrer": {"traffic_source": "EXT_URL", "lever_class": "external_outreach",
                               "action": "reach_out_to_referrer", "metric": "external_views_7d"},
@@ -54,8 +62,22 @@ SURFACE_KINDS = {
                            "action": "engage_recommending_video", "metric": "suggested_views_7d"},
     "own_search_intent": {"traffic_source": "YT_SEARCH", "lever_class": "search_wording",
                           "action": "serve_search_intent", "metric": "search_views_7d"},
+    # Neu gefundene Flächen: Publikum, das uns noch nicht erreicht, dessen Existenz aber öffentlich belegt ist.
+    "candidate_video": {"traffic_source": "YT_OTHER_PAGE", "lever_class": "community_participation",
+                        "action": "engage_candidate_video", "metric": "other_views_7d"},
+    "candidate_channel": {"traffic_source": "YT_OTHER_PAGE", "lever_class": "community_participation",
+                          "action": "engage_candidate_channel", "metric": "other_views_7d"},
 }
+# Plattformen, über die Menschen Links privat weiterschicken. Sie sind Beleg dafür, dass geteilt wird,
+# aber keine Stelle, die man ansprechen kann – „whatsapp.com kontaktieren“ wäre ein Phantom-Auftrag.
+SHARE_PLATFORMS = {"whatsapp.com", "t.co", "twitter.com", "x.com", "facebook.com", "l.facebook.com", "m.facebook.com",
+                   "instagram.com", "l.instagram.com", "telegram.org", "web.telegram.org", "google.com",
+                   "news.google.com", "youtube.com", "m.youtube.com", "youtu.be", "linkedin.com", "pinterest.com",
+                   "tiktok.com", "snapchat.com", "discord.com", "mail.google.com", "outlook.com", "bing.com",
+                   "duckduckgo.com", "yandex.ru", "baidu.com", "messenger.com", "reddit.com", "linktr.ee"}
 ACTION_LABELS = {"reach_out_to_referrer": "Externe Quelle ansprechen, die schon Zuschauer schickt",
+                 "engage_candidate_video": "Bei einem reichweitenstarken passenden Video sichtbar werden",
+                 "engage_candidate_channel": "Kanal mit belegter Reichweite echt beteiligen",
                  "engage_recommending_channel": "Kanal mit passender Audience echt beteiligen",
                  "engage_recommending_video": "Beim empfehlenden Video sichtbar werden",
                  "serve_search_intent": "Belegte Suchintention im Wortlaut bedienen"}
@@ -88,6 +110,36 @@ def as_url(detail):
     if not parsed.netloc or "." not in parsed.netloc:
         return None
     return parsed.geturl()
+
+
+def measured_access(views, how):
+    """Gemessene Flächen brauchen einen belastbaren Traffic-Pfad, sonst bleiben sie Beleg statt Aufgabe."""
+    if views < MIN_ACTIONABLE_VIEWS:
+        return {"actionable": False, "rules": NO_SPAM, "manual": True,
+                "why_not": (f"Nur {views} Views in 90 Tagen von dieser Fläche: zu wenig für einen belastbaren "
+                            f"Traffic-Pfad. Ab {MIN_ACTIONABLE_VIEWS} Views wird daraus eine Aufgabe.")}
+    return {"actionable": True, "rules": NO_SPAM, "manual": True, "how": how}
+
+
+def referrer_access(url, views):
+    """Kann man dort überhaupt etwas tun – und lohnt es sich nach gemessenem Publikum?"""
+    host = urlparse(url).netloc.lower()
+    host = host[4:] if host.startswith("www.") else host
+    if host in SHARE_PLATFORMS or host.startswith("android-app") or "." not in host:
+        return {"actionable": False, "platform": host,
+                "why_not": (f"{host} ist eine Weiterleitungs- oder Teilen-Plattform, keine Redaktion: dort gibt es "
+                            "niemanden, den man ansprechen kann. Der Eintrag bleibt als Beleg, dass Zuschauer den "
+                            "Link privat weitergeben."),
+                "rules": NO_SPAM, "manual": True}
+    if views < MIN_ACTIONABLE_VIEWS:
+        return {"actionable": False, "platform": host,
+                "why_not": (f"Nur {views} Views in 90 Tagen von {host}: zu wenig für einen belastbaren Traffic-Pfad. "
+                            f"Ab {MIN_ACTIONABLE_VIEWS} Views wird daraus eine Aufgabe."),
+                "rules": NO_SPAM, "manual": True}
+    return {"actionable": True, "platform": host,
+            "how": (f"Die Seite {host} verlinkt oder erwähnt uns bereits. Kontakt über Impressum, Kontaktformular "
+                    "oder die dort genannte Adresse suchen und den konkreten Themenbezug nennen."),
+            "rules": NO_SPAM, "manual": True}
 
 
 def verify(url, client=None):
@@ -187,6 +239,104 @@ def expected_weekly_views(measured_views, window_days=SIGNAL_WINDOW_DAYS):
     return round(per_week, 2)
 
 
+def score_candidate(shared_tokens, item_views, subscribers, weight=1.0):
+    """Öffentlich belegte Reichweite, bewusst mit Abschlag: dieses Publikum hat uns noch nicht erreicht."""
+    fit = min(1.0, len(shared_tokens)/3)
+    reach = min(1.0, log10((item_views or 0)+1)/6)
+    subs = min(1.0, log10((subscribers or 0)+1)/5)
+    raw = 100*(0.30*fit + 0.30*reach + 0.10*subs + 0.10*0.45)*0.8
+    return round(max(0.0, min(100.0, raw*weight)), 1)
+
+
+def own_vocabulary(session):
+    """Unser Thema in Worten: eigene Titel plus die realen Suchbegriffe, über die wir gefunden werden."""
+    from .discovery import tokens as split
+    vocab = {}
+    for video in session.scalars(select(Video).where(Video.active.is_(True))):
+        vocab[video.id] = set(split(video.title))
+    for row in session.scalars(select(DiscoverySignal).where(DiscoverySignal.kind == "own_search_term")):
+        vocab.setdefault(row.video_id, set()).update(split(row.detail))
+    return vocab
+
+
+def candidate_matches(session, vocab):
+    """Fremde Videos aus den Suchproben, die thematisch mehrfach zu einem unserer Videos passen."""
+    from .discovery import tokens as split, BRAND
+    matches = []
+    for item in session.scalars(select(DiscoveryItem)):
+        if not (item.via or {}).get("queries") or item.video_id in vocab:
+            continue
+        words = set(split(item.title))|{t for tag in (item.tags or []) for t in split(tag)}
+        best, shared = None, []
+        for video_id, own in vocab.items():
+            common = sorted((words & own)-BRAND)
+            if len(common) > len(shared):
+                best, shared = video_id, common
+        if best is not None and len(shared) >= MIN_SHARED_TOKENS:
+            matches.append((item, best, tuple(shared)))
+    return matches
+
+
+def collect_candidates(session, vocab, learned, store):
+    """Neue Flächen, mehrfach bestätigt: mindestens zwei gemeinsame Begriffe und zwei verschiedene Kanäle.
+
+    Die Reichweite ist öffentlich nachprüfbar (Views, Abonnenten); dass dieses Publikum uns erreicht, ist
+    ausdrücklich nicht gemessen. Genau deshalb der Abschlag in der Bewertung und der Proxy-Hinweis.
+    """
+    matches = candidate_matches(session, vocab)
+    channels = {row.channel_id: row for row in session.scalars(select(DiscoveryChannel))}
+    groups = defaultdict(set)
+    for item, video_id, shared in matches:
+        if item.channel_id:
+            groups[(video_id, shared)].add(item.channel_id)
+    seen_channels = set()
+    for item, video_id, shared in sorted(matches, key=lambda m: -(m[0].views or 0)):
+        members = sum(1 for other, other_video, other_shared in matches
+                      if other_video == video_id and other_shared == shared)
+        distinct = len(groups[(video_id, shared)])
+        if members < 2 or distinct < 2:
+            continue        # Ein einzelner Treffer ist Zufall, nicht ein Thema.
+        channel = channels.get(item.channel_id)
+        subscribers = channel.subscribers if channel else None
+        corroboration = (f"{members} Videos aus {distinct} verschiedenen Kanälen teilen die Begriffe "
+                         f"{', '.join(shared)} mit unserem Video.")
+        if (item.views or 0) >= MIN_CANDIDATE_VIEWS and not learned.get("candidate_video", {}).get("retired"):
+            store("candidate_video", item.video_id, video_id, item.title,
+                  f"https://www.youtube.com/watch?v={item.video_id}",
+                  {"public_views": item.views, "channel": item.channel_title, "subscribers": subscribers,
+                   "shared_tokens": list(shared), "members": members, "channels": distinct,
+                   "demand_source": "public_proxy_corroborated", "found_via": (item.via or {}).get("queries", [])[:3],
+                   "why": (f"Dieses Video hat {item.views} öffentlich gezählte Views und liegt thematisch neben uns: "
+                           f"{corroboration} Sein Publikum ist belegt vorhanden – es erreicht uns nur noch nicht."),
+                   "uncertainty": "mittel: Reichweite öffentlich belegt, eigener Zufluss noch nicht gemessen."},
+                  {"traffic_potential": score_candidate(shared, item.views, subscribers,
+                                                        learned.get("candidate_video", {}).get("weight", 1.0)),
+                   "expected_weekly_views": None, "public_views": item.views,
+                   "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
+                  {"actionable": True, "rules": NO_SPAM, "manual": True,
+                   "how": ("Das Video ansehen und einen inhaltlichen Kommentar hinterlassen, der ohne Link Wert hat. "
+                           "Keine Eigenwerbung, kein Link, keine Wiederholung.")})
+        if (channel is not None and (subscribers or 0) >= MIN_CANDIDATE_SUBSCRIBERS
+                and channel.channel_id not in seen_channels
+                and not learned.get("candidate_channel", {}).get("retired")):
+            seen_channels.add(channel.channel_id)
+            store("candidate_channel", channel.channel_id, video_id, channel.title,
+                  f"https://www.youtube.com/channel/{channel.channel_id}",
+                  {"subscribers": subscribers, "video_count": channel.video_count, "shared_tokens": list(shared),
+                   "members": members, "channels": distinct, "demand_source": "public_proxy_corroborated",
+                   "why": (f"„{channel.title}“ hat {subscribers} Abonnenten und veröffentlicht thematisch nahe Videos: "
+                           f"{corroboration} Dort ist ein Publikum, das zu unserem Video passt."),
+                   "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss noch nicht gemessen."},
+                  {"traffic_potential": score_candidate(shared, channel.views, subscribers,
+                                                        learned.get("candidate_channel", {}).get("weight", 1.0)),
+                   "expected_weekly_views": None, "subscribers": subscribers,
+                   "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
+                  {"actionable": True, "rules": NO_SPAM, "manual": True,
+                   "how": ("Beim Kanal echt teilnehmen: neueste thematisch passende Veröffentlichung ansehen und "
+                           "inhaltlich kommentieren; bei klarer Nähe eine sachliche Anfrage über die angegebene "
+                           "Kontaktmöglichkeit.")})
+
+
 def score_surface(fit, present_views, access_score, effort, weight):
     """Relative traffic potential for this channel (0–100) – not a probability.
 
@@ -194,7 +344,8 @@ def score_surface(fit, present_views, access_score, effort, weight):
     interesting surface without a traffic path cannot reach the top of the queue.
     """
     present = min(1.0, present_views/25.0)
-    raw = 100*(0.35*fit + 0.35*present + 0.20*access_score + 0.10*(1-effort))
+    # Multiplikativ: ohne gemessenes Publikum bleibt auch eine perfekt passende Fläche unten.
+    raw = 100*(0.35*fit + 0.25*access_score + 0.10*(1-effort))*(0.2+0.8*present)
     return round(max(0.0, min(100.0, raw*weight)), 1)
 
 
@@ -272,9 +423,7 @@ def collect(session, now=None, budget=None, http=None):
                    "expected_weekly_views": weekly, "components": {"fit": 1.0, "present_views": views,
                                                                    "access": 0.8, "effort": 0.3},
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit."},
-                  {"how": (f"Die Seite {host} verlinkt oder erwähnt uns bereits. Kontakt über das Impressum, ein "
-                           "Kontaktformular oder die dort genannte Adresse suchen und den konkreten Themenbezug nennen."),
-                   "rules": NO_SPAM, "manual": True}, status, checked)
+                  referrer_access(url, views), status, checked)
 
     # ---- Videos und Kanäle, die uns bereits empfehlen
     for video_id, details in suggested.items():
@@ -298,9 +447,9 @@ def collect(session, now=None, budget=None, http=None):
                        "expected_weekly_views": expected_weekly_views(views),
                        "components": {"fit": 0.9, "present_views": views, "access": 0.6, "effort": 0.4},
                        "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit."},
-                      {"how": ("Unter diesem Video als Kanal echt teilnehmen: das Video ansehen und einen inhaltlichen "
-                               "Kommentar schreiben, der ohne Link Wert hat. Kein Eigenwerbe-Link, keine Wiederholung."),
-                       "rules": NO_SPAM, "manual": True})
+                      measured_access(views, "Unter diesem Video als Kanal echt teilnehmen: das Video ansehen und "
+                                     "einen inhaltlichen Kommentar schreiben, der ohne Link Wert hat. Kein "
+                                     "Eigenwerbe-Link, keine Wiederholung."))
             if channel is not None and channel.subscribers:
                 kind_entry = learned.get("recommending_channel", {})
                 if kind_entry.get("retired"):
@@ -315,10 +464,9 @@ def collect(session, now=None, budget=None, http=None):
                        "expected_weekly_views": expected_weekly_views(views),
                        "components": {"fit": 0.85, "present_views": views, "access": 0.5, "effort": 0.5},
                        "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit."},
-                      {"how": ("Beim Kanal als Kanal sichtbar werden: neue Videos zeitnah ansehen und inhaltlich "
-                               "kommentieren; bei erkennbarer Nähe eine sachliche Kollaborationsanfrage über die "
-                               "im Kanal angegebene Kontaktmöglichkeit."),
-                       "rules": NO_SPAM, "manual": True})
+                      measured_access(views, "Beim Kanal als Kanal sichtbar werden: neue Videos zeitnah ansehen und "
+                                     "inhaltlich kommentieren; bei erkennbarer Nähe eine sachliche "
+                                     "Kollaborationsanfrage über die im Kanal angegebene Kontaktmöglichkeit."))
 
     # ---- reale Suchintentionen mit gemessenen Views
     for video_id, details in searched.items():
@@ -340,9 +488,12 @@ def collect(session, now=None, budget=None, http=None):
                    "expected_weekly_views": expected_weekly_views(views),
                    "components": {"fit": 0.95, "present_views": views, "access": 0.9, "effort": 0.2},
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit."},
-                  {"how": (f"Den Wortlaut „{detail}“ in die ersten zwei Beschreibungszeilen und in einen Kapitelnamen "
-                           "aufnehmen, ohne Clickbait und ohne Titel/Thumbnail anzufassen."),
-                   "rules": NO_SPAM, "manual": True})
+                  measured_access(views, f"Den Wortlaut „{detail}“ in die ersten zwei Beschreibungszeilen und in einen "
+                                 "Kapitelnamen aufnehmen, ohne Clickbait und ohne Titel/Thumbnail anzufassen."))
+    # Neue Flächen aus den Suchproben: Publikum, das uns noch nicht erreicht.
+    if budget:
+        budget.check()
+    collect_candidates(session, own_vocabulary(session), learned, store)
     session.commit()
     if owned_http is not None:
         owned_http.close()
@@ -390,6 +541,18 @@ def steps_for(kind, surface, video_title):
                 "Einen inhaltlichen Kommentar schreiben, der auch ohne Link Wert hat (konkreter Bezug, keine Werbung).",
                 "Keinen Eigenwerbe-Link setzen und nicht mehrfach kommentieren.",
                 NO_SPAM]
+    if kind == "candidate_video":
+        return [f"Das Video ansehen: {surface.url} ({(surface.evidence or {}).get('public_views')} öffentliche Views)",
+                "Einen inhaltlichen Kommentar schreiben, der auch ohne Link Wert hat – konkreter Bezug zum Video, "
+                "keine Eigenwerbung, kein Link.",
+                "Datum notieren. Nicht mehrfach kommentieren und nichts am eigenen Video ändern.",
+                NO_SPAM]
+    if kind == "candidate_channel":
+        return [f"Kanal öffnen: {surface.url} ({(surface.evidence or {}).get('subscribers')} Abonnenten)",
+                "Die neueste thematisch passende Veröffentlichung ansehen und inhaltlich kommentieren.",
+                "Bei klarer Nähe eine sachliche Anfrage über die im Kanal angegebene Kontaktmöglichkeit – ohne "
+                "Vorlagentext und ohne Gegenleistung.",
+                NO_SPAM]
     if kind == "recommending_channel":
         return [f"Kanal öffnen: {surface.url} und das neueste thematisch passende Video ansehen.",
                 "Dort einen inhaltlichen Kommentar als Kanal hinterlassen; bei klarer Nähe eine sachliche "
@@ -412,6 +575,11 @@ def mechanism(kind, surface):
                                    "YouTube verstärkt die Nachbarschaft, wenn Zuschauer beide Videos sehen."),
             "recommending_channel": ("Der Kanal teilt unsere Audience. Echte Teilnahme macht uns bei dessen Zuschauern "
                                      "sichtbar und erhöht die Chance, häufiger neben seinen Videos empfohlen zu werden."),
+            "candidate_video": ("Unter diesem Video ist ein Publikum versammelt, das thematisch zu uns passt und uns "
+                                "noch nicht kennt. Ein inhaltlich sichtbarer Kommentar führt einen Teil dieser Zuschauer "
+                                "auf unseren Kanal; solche Klicks erscheinen in den Analytics als YT_OTHER_PAGE."),
+            "candidate_channel": ("Der Kanal veröffentlicht laufend für genau diese Zielgruppe. Echte Teilnahme macht uns "
+                                  "bei seinen Zuschauern sichtbar und kann zu Erwähnungen oder Empfehlungen führen."),
             "own_search_intent": ("Für diesen Wortlaut sucht die Zielgruppe nachweislich und findet uns schon jetzt "
                                   "gelegentlich. Wenn Beschreibung und Kapitel den Wortlaut enthalten, passt das Video "
                                   "besser zur Suchanfrage und wird für sie häufiger ausgeliefert.")}[kind]
@@ -432,6 +600,8 @@ def propose(session, now=None, budget=None):
     for surface in surfaces:
         if budget:
             budget.check()
+        if not (surface.access or {}).get("actionable", True):
+            continue        # Beleg ja, Aufgabe nein: siehe access.why_not
         spec = SURFACE_KINDS[surface.kind]
         other, reason = blocking(session, surface.video_id, surface.lever_class, surface.traffic_source, spec["metric"])
         if other is not None:

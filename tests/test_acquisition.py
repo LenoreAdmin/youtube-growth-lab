@@ -300,3 +300,101 @@ def test_a_second_pass_never_overwrites_an_open_proposal(session):
     session.expire_all()
     rows = list(session.scalars(select(GrowthAction).where(GrowthAction.version == aq.VERSION)))
     assert len(rows) == 1 and (rows[0].id, rows[0].surface_key, rows[0].action) == before
+
+
+# ---------------------------------------------------------------------------- Lehren aus dem ersten Produktionslauf
+def test_a_sharing_platform_is_evidence_but_never_an_outreach_target(session):
+    """whatsapp.com kann man nicht kontaktieren – der erste Produktionslauf hätte das vorgeschlagen."""
+    signal(session, "a", "own_external", "whatsapp.com", 30)
+    aq.collect(session, NOW, http=FakeHttp())
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "own_external_referrer"))
+    assert surface is not None, "als Beleg bleibt die Fläche sichtbar"
+    assert surface.access["actionable"] is False
+    assert "Teilen-Plattform" in surface.access["why_not"] and "privat weitergeben" in surface.access["why_not"]
+    assert aq.propose(session, NOW)["proposed"] == 0
+    assert session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION)) is None
+
+
+def test_a_surface_with_one_view_in_ninety_days_is_not_a_task(session):
+    signal(session, "a", "own_external", "kleinblog.example", 1)
+    signal(session, "b", "own_search_term", "shine on acoustic", 2)
+    aq.collect(session, NOW, http=FakeHttp())
+    for surface in session.scalars(select(TrafficSurface)):
+        assert surface.access["actionable"] is False
+        assert f"Ab {aq.MIN_ACTIONABLE_VIEWS} Views" in surface.access["why_not"]
+        assert surface.scores["traffic_potential"] < 25, "kein belastbarer Pfad, also nicht oben in der Queue"
+    assert aq.propose(session, NOW)["proposed"] == 0
+    # Mit echtem Publikum wird daraus eine Aufgabe.
+    signal(session, "a", "own_external", "musikblog.example", 30)
+    aq.collect(session, NOW, http=FakeHttp())
+    strong = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "https://musikblog.example"))
+    assert strong.access["actionable"] is True and strong.scores["traffic_potential"] > 40
+    assert aq.propose(session, NOW)["proposed"] == 1
+
+
+def test_an_impressions_experiment_does_not_block_external_outreach(session):
+    """Der Produktionsfall: #8 misst impressions_7d. Externe Links erzeugen Views, aber keine Impressions."""
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence", target_metric="impressions_7d",
+                             window_days=14, evaluate_after=TODAY+timedelta(days=16), status="running",
+                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
+                             traffic_source="END_SCREEN", payload={}))
+    session.commit()
+    allowed, reason = aq.blocking(session, "a", "external_outreach", "EXT_URL", "external_views_7d")
+    assert allowed is None, "externe Ansprache ist von einer Impressions-Messung trennbar"
+    blocked, reason = aq.blocking(session, "a", "community_participation", "RELATED_VIDEO", "suggested_views_7d")
+    assert blocked is not None and "impressions_7d" in reason
+    signal(session, "a", "own_external", "musikblog.example", 30)
+    aq.collect(session, NOW, http=FakeHttp())
+    assert aq.propose(session, NOW)["proposed"] == 1
+    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
+    assert row.traffic_source == "EXT_URL" and row.video_id == "a"
+
+
+def candidate(session, video_id, channel_id, title, views, subscribers=5000, channel_title="Rail Sounds"):
+    session.add(DiscoveryItem(video_id=video_id, channel_id=channel_id, title=title, channel_title=channel_title,
+                              views=views, tags=[], via={"queries": ["train journey"]}, first_seen_day=TODAY,
+                              last_seen_day=TODAY, seen_count=1))
+    if not session.get(DiscoveryChannel, channel_id):
+        session.add(DiscoveryChannel(channel_id=channel_id, title=channel_title, subscribers=subscribers,
+                                     video_count=50, views=views*10, first_seen_day=TODAY, last_seen_day=TODAY))
+
+
+def test_new_surfaces_need_corroboration_across_channels(session):
+    session.get(Video, "a").title = "Sealand Trainstories night train"
+    candidate(session, "CAND0000001", "UC1", "Night train journey ambient", 50000, channel_title="Rail One")
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    assert not list(session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_video"))), \
+        "ein einzelner Treffer ist Zufall, kein Thema"
+    candidate(session, "CAND0000002", "UC2", "Night train journey through europe", 90000, channel_title="Rail Two")
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    rows = {r.key: r for r in session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_video"))}
+    assert set(rows) == {"CAND0000001", "CAND0000002"}
+    surface = rows["CAND0000002"]
+    assert surface.video_id == "a" and surface.traffic_source == "YT_OTHER_PAGE"
+    assert surface.evidence["channels"] == 2 and surface.evidence["members"] == 2
+    assert surface.evidence["demand_source"] == "public_proxy_corroborated"
+    assert "90000 öffentlich gezählte Views" in surface.evidence["why"]
+    assert "noch nicht" in surface.evidence["why"] and "mittel" in surface.evidence["uncertainty"]
+    assert surface.scores["expected_weekly_views"] is None, "kein gemessener eigener Traffic, also keine Prognose"
+    channels = {r.key for r in session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_channel"))}
+    assert channels == {"UC1", "UC2"}
+
+
+def test_a_new_surface_ranks_below_a_proven_one_and_offers_participation(session):
+    session.get(Video, "a").title = "Sealand Trainstories night train"
+    candidate(session, "CAND0000001", "UC1", "Night train journey ambient", 500000, channel_title="Rail One")
+    candidate(session, "CAND0000002", "UC2", "Night train journey europe", 400000, channel_title="Rail Two")
+    signal(session, "a", "own_external", "musikblog.example", 40)
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    proven = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "own_external_referrer"))
+    best_candidate = max(session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_video")),
+                         key=lambda s: s.scores["traffic_potential"])
+    assert proven.scores["traffic_potential"] > best_candidate.scores["traffic_potential"], \
+        "gemessener eigener Traffic schlaegt oeffentlich belegte Reichweite"
+    steps = aq.steps_for("candidate_video", best_candidate, "Trainstories")
+    assert any("ansehen" in s for s in steps) and any("kein Link" in s for s in steps)
+    assert "YT_OTHER_PAGE" in aq.mechanism("candidate_video", best_candidate)
