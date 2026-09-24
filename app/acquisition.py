@@ -434,6 +434,11 @@ def collect(session, now=None, budget=None, http=None):
 
     # Nach Tag sortiert, damit der Cache den juengsten Pruefstand einer Flaeche traegt.
     known = {(r.kind, r.key): r for r in session.scalars(select(TrafficSurface).order_by(TrafficSurface.day))}
+    # Der heutige Stand wird komplett neu erhoben: eine Flaeche, die die Regeln nicht mehr besteht, soll
+    # verschwinden und nicht als Altbestand einen Vorschlag am Leben halten.
+    for stale in list(session.scalars(select(TrafficSurface).where(TrafficSurface.day == today))):
+        session.delete(stale)
+    session.flush()
 
     # ---- externe Seiten, die bereits Zuschauer schicken
     for video_id, details in external.items():
@@ -634,14 +639,16 @@ def propose(session, now=None, budget=None):
     now = now or utcnow()
     today = pacific_day(now)
     latest = session.scalar(select(func.max(TrafficSurface.day)))
-    if latest is None:
-        return {"proposed": 0, "blocked": [], "day": None}
     titles = {v.id: v.title for v in session.scalars(select(Video))}
     surfaces = sorted((s for s in session.scalars(select(TrafficSurface).where(TrafficSurface.day == latest))
                        if s.video_id in titles),
-                      key=lambda s: -(s.scores or {}).get("traffic_potential", 0))
+                      key=lambda s: -(s.scores or {}).get("traffic_potential", 0)) if latest else []
     current = {(s.kind, s.key): s for s in surfaces}
+    # Zuerst zurueckziehen, dann neu vorschlagen - auch wenn heute gar keine Flaeche uebrig bleibt.
     dropped = retire_weak_proposals(session, current, now)
+    if not surfaces:
+        session.commit()
+        return {"proposed": 0, "blocked": [], "dropped": dropped, "day": str(latest) if latest else None}
     proposed, blocked, per_video = 0, [], defaultdict(int)
     for surface in surfaces:
         if budget:

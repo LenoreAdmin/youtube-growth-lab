@@ -482,3 +482,23 @@ def test_a_surface_without_a_traffic_path_is_not_blamed_on_a_running_experiment(
     assert view["blocked"] == [], "eine Fläche mit einem View ist kein Konflikt, sondern fehlende Evidenz"
     surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "recommending_video"))
     assert surface.access["actionable"] is False
+
+
+def test_todays_surfaces_are_rebuilt_so_a_retired_one_disappears(session):
+    session.get(Video, "a").title = "Sealand night train ambient"
+    candidate(session, "CAND0000003", "UC3", "Night train ambient journey", 60000, channel_title="Rail One")
+    candidate(session, "CAND0000004", "UC4", "Ambient night train ride", 70000, channel_title="Rail Two")
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    assert aq.propose(session, NOW)["proposed"] == 1
+    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
+    # Die Kandidaten verschwinden aus der Datenlage (z. B. weil die Regeln verschaerft wurden).
+    for item in list(session.scalars(select(DiscoveryItem))):
+        session.delete(item)
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    assert not list(session.scalars(select(TrafficSurface))), "der heutige Stand wird neu erhoben"
+    aq.propose(session, NOW)
+    session.expire_all()
+    assert session.get(GrowthAction, row.id).status == "superseded"
+    assert aq.overview(session, NOW)["traffic_queue"] == []
