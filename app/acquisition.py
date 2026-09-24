@@ -237,7 +237,8 @@ def collect(session, now=None, budget=None, http=None):
         written += 1
         per_kind[kind] += 1
 
-    known = {(r.kind, r.key): r for r in session.scalars(select(TrafficSurface))}
+    # Nach Tag sortiert, damit der Cache den juengsten Pruefstand einer Flaeche traegt.
+    known = {(r.kind, r.key): r for r in session.scalars(select(TrafficSurface).order_by(TrafficSurface.day))}
 
     # ---- externe Seiten, die bereits Zuschauer schicken
     for video_id, details in external.items():
@@ -438,10 +439,12 @@ def propose(session, now=None, budget=None):
                             "kind": surface.kind, "traffic_source": surface.traffic_source, "reason": reason,
                             "blocked_by": other.id, "until": str(other.evaluate_after)})
             continue
-        existing = session.scalar(select(GrowthAction).where(
+        # Genau eine offene Acquisition-Maßnahme je Video: sonst wuerde ein zweiter Lauf den
+        # bestehenden Vorschlag ueberschreiben, auf den im Dashboard vielleicht schon ein Button zeigt.
+        open_row = session.scalar(select(GrowthAction).where(
             GrowthAction.version == VERSION, GrowthAction.video_id == surface.video_id,
-            GrowthAction.surface_key == surface.key, GrowthAction.status.in_(["proposed", "running"])))
-        if existing is not None or per_video[surface.video_id] >= 1:
+            GrowthAction.status.in_(["proposed", "running"])))
+        if open_row is not None or per_video[surface.video_id] >= 1:
             continue
         payload = action_payload(surface, titles[surface.video_id], spec)
         row = session.scalar(select(GrowthAction).where(GrowthAction.version == VERSION,

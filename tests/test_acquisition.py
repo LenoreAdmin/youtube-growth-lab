@@ -287,3 +287,16 @@ def test_production_shape_trainstories_gets_a_separable_traffic_action(monkeypat
     assert entry["primary_metric"].startswith("zusätzliche qualifizierte Views")
     assert view["scoreboard"]["proposed"] == 1
     assert any(b["blocked_by"] for b in view["blocked"]) is False or view["blocked"] == []
+
+
+def test_a_second_pass_never_overwrites_an_open_proposal(session):
+    signal(session, "a", "own_external", "musikblog.example", 14)
+    signal(session, "a", "own_search_term", "train journey music", 33)
+    aq.collect(session, NOW, http=FakeHttp())
+    assert aq.propose(session, NOW)["proposed"] == 1
+    first = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
+    before = (first.id, first.surface_key, first.action)
+    assert aq.propose(session, NOW)["proposed"] == 0, "der offene Vorschlag bleibt stehen"
+    session.expire_all()
+    rows = list(session.scalars(select(GrowthAction).where(GrowthAction.version == aq.VERSION)))
+    assert len(rows) == 1 and (rows[0].id, rows[0].surface_key, rows[0].action) == before
