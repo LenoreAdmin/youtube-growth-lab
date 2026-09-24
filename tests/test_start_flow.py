@@ -115,7 +115,7 @@ def test_start_failures_are_reported_and_never_silent(monkeypatch, session, clie
     assert again.status_code == 200 and again.json()["status"] == ge.RUNNING, "idempotent, kein Fehler"
     second = proposal(session, action="probe_missing_evidence", created_day=TODAY+timedelta(days=1))
     clash = client.post(f"/api/growth/actions/{second.id}/start", headers=HEADERS)
-    assert clash.status_code == 409 and "läuft bereits ein Experiment" in clash.json()["detail"]
+    assert clash.status_code == 409 and "Nicht trennbar" in clash.json()["detail"]
 
 
 def test_the_browser_start_flow_shows_success_and_failure_in_the_card():

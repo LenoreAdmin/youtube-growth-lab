@@ -149,7 +149,7 @@ def test_protect_supersedes_pending_test_and_plan_prefers_winner(monkeypatch, se
     wire(monkeypatch, session)
     seed_history(session, "a", days=400)
     seed_history(session, "b", days=400, base=200, seed=3)
-    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=2), version="t", state="needs_packaging_test", action="test_title",
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=2), version=ge.VERSION, state="needs_packaging_test", action="test_title",
         target_metric="views_7d", window_days=14, evaluate_after=TODAY+timedelta(days=15), status="proposed", payload={"reason": "old"}))
     session.commit()
     histories = {h.video.id: h for h in history.load(session)}
@@ -177,7 +177,7 @@ def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, s
     h = next(x for x in history.load(session) if x.video.id == "a")
     created = TODAY-timedelta(days=20)
     def action(video_id, act="test_title", target="views_7d"):
-        row = GrowthAction(video_id=video_id, created_day=created, version="t", state="needs_packaging_test", action=act, target_metric=target,
+        row = GrowthAction(video_id=video_id, created_day=created, version=ge.VERSION, state="needs_packaging_test", action=act, target_metric=target,
                            window_days=7, evaluate_after=created+timedelta(days=7+LAG), status="running", started_day=created,
                            started_at=NOW-timedelta(days=9), payload={})
         session.add(row)
@@ -221,7 +221,7 @@ def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, s
     session.expire_all()
     assert session.get(GrowthAction, row.id).outcome == "inconclusive"
     # Windows not yet observed stay pending; protect counts holding momentum as positive.
-    fresh = GrowthAction(video_id="a", created_day=TODAY-timedelta(days=2), version="t", state="protect_momentum", action="protect_no_change",
+    fresh = GrowthAction(video_id="a", created_day=TODAY-timedelta(days=2), version=ge.VERSION, state="protect_momentum", action="protect_no_change",
                          target_metric="views_7d", window_days=7, evaluate_after=TODAY+timedelta(days=8), status="running",
                          started_day=TODAY-timedelta(days=2), started_at=NOW, payload={})
     session.add(fresh)

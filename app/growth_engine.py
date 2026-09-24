@@ -453,7 +453,8 @@ def state_of(f, regime, base, rev):
 def track_record(session):
     """Observed outcomes per action type and per evidence level; descriptive, not a causal effect estimate."""
     record, by_level = {}, {}
-    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == "evaluated")):
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == "evaluated",
+                                                          GrowthAction.version == VERSION)):
         entry = record.setdefault(row.action, {"positive": 0, "negative": 0, "neutral": 0, "inconclusive": 0, "n": 0})
         entry[row.outcome] = entry.get(row.outcome, 0)+1
         entry["n"] += 1
@@ -531,10 +532,12 @@ def start_action(session, action_id, now=None):
         return row      # Idempotent: ein zweiter Klick startet nichts neu.
     if row.status != PROPOSED:
         raise ValueError(f"Nur ein offener Vorschlag kann gestartet werden; diese Maßnahme ist {row.status}.")
-    other = session.scalar(select(GrowthAction).where(GrowthAction.video_id == row.video_id, GrowthAction.status == RUNNING))
+    from .acquisition import blocking
+    other, reason = blocking(session, row.video_id, row.lever_class or "internal_link", row.traffic_source,
+                             row.target_metric, exclude_id=row.id)
     if other is not None:
-        raise ValueError(f"Für dieses Video läuft bereits ein Experiment (#{other.id}, Auswertung {other.evaluate_after}). "
-                         "Zwei gleichzeitige Änderungen wären nicht auseinanderzuhalten.")
+        # Gesperrt wird nur, was sich nicht sauber von einem laufenden Experiment trennen laesst.
+        raise ValueError(f"Nicht trennbar von einer laufenden Maßnahme: {reason}")
     hist = next((h for h in load_histories(session) if h.video.id == row.video_id), None)
     features_now = features_at(hist, today) if hist is not None else None
     row.status, row.started_at, row.started_day = RUNNING, now, today
@@ -549,7 +552,8 @@ def start_action(session, action_id, now=None):
 def recent_results(session, limit=6):
     """Finished experiments with their observed outcome – the visible end of the learning loop."""
     out = []
-    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == EVALUATED)
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == EVALUATED,
+                                                          GrowthAction.version == VERSION)
                                .order_by(GrowthAction.evaluated_at.desc()).limit(limit)):
         detail = ((row.evaluation or {}).get("detail") or {}) if isinstance((row.evaluation or {}).get("detail"), dict) else {}
         audience = (row.payload or {}).get("audience") or {}
@@ -882,7 +886,8 @@ def evaluate_actions(session, now, by_id, base):
     today = pacific_day(now)
     known_end = today-timedelta(days=lag_days())
     evaluated = 0
-    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == RUNNING)):
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == RUNNING,
+                                                          GrowthAction.version == VERSION)):
         # Ein nie gestarteter Vorschlag wird nie als Erfolg oder Misserfolg gewertet.
         start = row.started_day or row.created_day
         after_end = start+timedelta(days=row.window_days)
@@ -1058,9 +1063,11 @@ def run(session, now, contexts, base, budget=None):
         candidates = source_candidates(contexts, video.id)
         channel = {"delivery_leader": delivery_leader(contexts, video.id), "playlists": playlists,
                    "source_candidates": candidates, "source": unique_source(candidates)}
-        running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING)
+        running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING,
+                                                            GrowthAction.version == VERSION)
                                  .order_by(GrowthAction.started_day.desc()))
-        proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == PROPOSED)
+        proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == PROPOSED,
+                                                             GrowthAction.version == VERSION)
                                   .order_by(GrowthAction.created_day.desc()))
         if running is not None:
             action, notes = running.action, [f"Bestätigt gestartet am {running.started_day}; läuft bis zur Auswertung am "
@@ -1082,14 +1089,15 @@ def run(session, now, contexts, base, budget=None):
                 # Je Video und Tag existiert genau eine Zeile. Aendert sich die Entscheidung innerhalb des Tages,
                 # wird sie aktualisiert statt verworfen - sonst zeigte die Queue auf eine bereits ersetzte Maßnahme.
                 proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
-                                                                     GrowthAction.created_day == today))
+                                                                     GrowthAction.created_day == today,
+                                                                     GrowthAction.version == VERSION))
                 if proposed is not None and proposed.status in (PROPOSED, SUPERSEDED):
                     proposed.status, proposed.state, proposed.action = PROPOSED, state, action
                     proposed.outcome, proposed.evaluation, proposed.evaluated_at = None, None, None
                     proposed.version, proposed.created_at = VERSION, now
                 elif proposed is None:
                     proposed = GrowthAction(video_id=video.id, created_day=today, created_at=now, version=VERSION,
-                                            state=state, action=action, status=PROPOSED)
+                                            state=state, action=action, status=PROPOSED, lever_class="internal_link")
                     session.add(proposed)
             if proposed is not None and proposed.status == PROPOSED:
                 # Ein offener Vorschlag traegt immer den aktuellen Stand: sonst zeigte die Queue neue Schritte,
@@ -1324,7 +1332,8 @@ def reconcile_plan(session, plan, titles):
     if not plan:
         return plan
     plan = deepcopy(plan)
-    rows = list(session.scalars(select(GrowthAction).where(GrowthAction.status.in_([PROPOSED, RUNNING]))))
+    rows = list(session.scalars(select(GrowthAction).where(GrowthAction.status.in_([PROPOSED, RUNNING]),
+                                                           GrowthAction.version == VERSION)))
     by_id = {r.id: r for r in rows}
     open_by_video = {}
     for row in rows:

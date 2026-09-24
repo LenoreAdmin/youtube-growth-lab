@@ -81,7 +81,8 @@ def test_cron_jobs_endpoint_is_separate_authenticated_and_idempotent(client, ses
     assert refresh.call_count == 0
     headers = {"Authorization": "Bearer "+"c"*40}
     body = client.get("/api/cron/jobs", headers=headers).json()
-    assert body == {"status": "ok", "learning": "ok", "discovery": "ok", "issues": []}
+    assert {k: body[k] for k in ("status", "learning", "discovery", "issues")} == {"status": "ok", "learning": "ok", "discovery": "ok", "issues": []}
+    assert "acquisition" in body, "Acquisition laeuft im selben Jobs-Slot"
     assert refresh.call_count == 1 and run.call_count == 1
     # Gleiche Stunde: Lease verhindert Doppelarbeit.
     assert client.get("/api/cron/jobs", headers=headers).json()["status"] == "already_completed"

@@ -363,7 +363,7 @@ class GrowthAction(Base):
     human confirms the execution, which freezes the baseline and starts the measurement window.
     """
     __tablename__ = "growth_actions"
-    __table_args__ = (UniqueConstraint("video_id", "created_day"),)
+    __table_args__ = (UniqueConstraint("video_id", "created_day", "version"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
     created_day: Mapped[date] = mapped_column(Date)
@@ -375,6 +375,11 @@ class GrowthAction(Base):
     window_days: Mapped[int] = mapped_column(Integer)
     evaluate_after: Mapped[date] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(32), default="proposed")
+    # Which lever and which traffic source this action touches: two experiments on one video are only
+    # allowed when their effects stay separable. Empty for legacy rows (treated as internal_link).
+    lever_class: Mapped[str | None] = mapped_column(String(32))
+    traffic_source: Mapped[str | None] = mapped_column(String(32))
+    surface_key: Mapped[str | None] = mapped_column(String(300))
     # Confirmed execution by the channel owner; without it the row stays a proposal.
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_day: Mapped[date | None] = mapped_column(Date)
@@ -425,6 +430,32 @@ class ChannelPlaylist(Base):
     first_seen_day: Mapped[date] = mapped_column(Date)
     last_seen_day: Mapped[date] = mapped_column(Date, index=True)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrafficSurface(Base):
+    """A concrete, verifiable place where an audience for one of our videos already exists.
+
+    Never a bare keyword: every row names a source that can be checked – an external page that already
+    sent viewers, a channel or video that already recommends us, or a search term our own analytics
+    reported. Scores are relative traffic potential for this channel, never probabilities.
+    """
+    __tablename__ = "traffic_surfaces"
+    __table_args__ = (UniqueConstraint("day", "kind", "key"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    key: Mapped[str] = mapped_column(String(300))
+    video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id", ondelete="SET NULL"), index=True)
+    title: Mapped[str] = mapped_column(String(300))
+    url: Mapped[str | None] = mapped_column(String(500))
+    traffic_source: Mapped[str] = mapped_column(String(32))
+    lever_class: Mapped[str] = mapped_column(String(32))
+    evidence: Mapped[dict] = mapped_column(JSON)
+    scores: Mapped[dict] = mapped_column(JSON)
+    access: Mapped[dict] = mapped_column(JSON)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="open")
 
 
 class DiscoveryQuery(Base):

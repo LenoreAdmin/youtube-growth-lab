@@ -64,7 +64,7 @@ def test_a_running_experiment_blocks_a_second_one_for_the_same_video(monkeypatch
         ge.start_action(session, second.id, NOW)
         raise AssertionError("ein zweites Experiment am selben Video muss abgelehnt werden")
     except ValueError as exc:
-        assert "läuft bereits ein Experiment" in str(exc) and str(first.id) in str(exc)
+        assert "Nicht trennbar" in str(exc) and str(first.id) in str(exc)
     assert session.get(GrowthAction, second.id).status == ge.PROPOSED
     # Und der Plan bietet fuer dieses Video keine neue Aufgabe an, sondern zeigt das laufende Experiment.
     rows = [queue_row("a", "Trainstories", "needs_distribution", "distribute_playlist_context", 70, priority=1,
@@ -148,7 +148,7 @@ def test_start_endpoint_needs_a_token_and_refuses_unknown_or_started_actions(mon
         assert body["started_day"] == str(history.pacific_day(utcnow())) and "nichts auf YouTube geändert" in body["note"]
         second = action_row(session, "a", action="probe_missing_evidence", created_day=TODAY)
         clash = client.post(f"/api/growth/actions/{second.id}/start", headers=headers)
-        assert clash.status_code == 409 and "läuft bereits" in clash.json()["detail"]
+        assert clash.status_code == 409 and "Nicht trennbar" in clash.json()["detail"]
     finally:
         main.app.dependency_overrides.clear()
 

@@ -18,6 +18,7 @@ from . import backfill as backfill_module
 from . import learning as learning_module
 from . import growth_engine as growth_module
 from . import discovery as discovery_module
+from . import acquisition as acquisition_module
 from . import monitor as monitor_module
 
 app = FastAPI(title="YouTube Growth Lab", version="0.1.0")
@@ -109,6 +110,15 @@ def cron_jobs():
             result["discovery"] = "deferred"
         except Exception as exc:
             result["issues"].append(f"discovery: {type(exc).__name__}")
+        try:
+            with Session() as session:
+                acquired = acquisition_module.run(session, utcnow(), budget)
+            result["acquisition"] = {k: acquired.get(k) for k in ("surfaces", "proposed", "evaluated")}
+            result["issues"].extend(acquired.get("issues") or [])
+        except SyncBudgetExceeded:
+            result["acquisition"] = "deferred"
+        except Exception as exc:
+            result["issues"].append(f"acquisition: {type(exc).__name__}")
     finally:
         release(Session, owner, bucket, "youtube-jobs")
     if result["issues"]:
@@ -187,6 +197,11 @@ def start_growth_action(action_id: int, s=Depends(db)):
                              "note": "Messfenster gestartet. Das System hat nichts auf YouTube geändert."})
 
 
+@app.get("/api/acquisition", dependencies=[Depends(authenticate)])
+def acquisition_overview(s=Depends(db)):
+    return jsonable_encoder(acquisition_module.overview(s))
+
+
 @app.get("/api/discovery", dependencies=[Depends(authenticate)])
 def discovery_overview(s=Depends(db)):
     return jsonable_encoder(discovery_module.overview(s))
@@ -235,6 +250,7 @@ def dashboard(s=Depends(db)):
             "learning_v4": jsonable_encoder(learning_module.overview(s)),
             "growth_v5": jsonable_encoder(growth_module.overview(s)),
             "discovery_v6": jsonable_encoder(discovery_module.overview(s)),
+            "acquisition": jsonable_encoder(acquisition_module.overview(s)),
             "learning": {"evaluated_forecasts": len(evaluated),
                          "mae": sum(r.absolute_error for r in evaluated)/len(evaluated) if evaluated else None},
             "availability": {"returning_viewers": "Nicht Ã¼ber die verwendeten APIs verfÃ¼gbar",
