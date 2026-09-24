@@ -540,3 +540,41 @@ def test_verified_adjacency_with_public_reach_is_actionable_with_an_honest_cavea
     weak = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "recommending_video",
                                                       TrafficSurface.day == ge.pacific_day(later)))
     assert weak.access["actionable"] is False
+
+
+def test_an_open_proposal_is_updated_or_replaced_by_a_better_surface(session):
+    signal(session, "a", "own_external", "musikblog.example", 10)
+    aq.collect(session, NOW, http=FakeHttp())
+    assert aq.propose(session, NOW)["proposed"] == 1
+    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
+    assert "10 Views" in row.payload["why"]
+    # Dieselbe Quelle liefert am naechsten Tag mehr: der Text muss das tragen.
+    session.query(DiscoverySignal).delete()
+    signal(session, "a", "own_external", "musikblog.example", 60)
+    later = NOW+timedelta(days=1)
+    aq.collect(session, later, http=FakeHttp())
+    aq.propose(session, later)
+    session.expire_all()
+    updated = session.get(GrowthAction, row.id)
+    assert updated.status == "proposed" and "60 Views" in updated.payload["why"], "Text folgt der Messung"
+    # Eine klar bessere Flaeche ersetzt den Vorschlag – die alte faellt zurueck, die neue ist stark.
+    session.query(DiscoverySignal).delete()
+    signal(session, "a", "own_external", "musikblog.example", 8)
+    session.add(DiscoveryItem(video_id="NB123456789", channel_id="UCM", title="Night train ambient",
+                              channel_title="Rail Nights", views=900000, tags=[],
+                              via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY, last_seen_day=TODAY,
+                              seen_count=1))
+    session.add(DiscoveryChannel(channel_id="UCM", title="Rail Nights", subscribers=400000, video_count=200,
+                                 views=90000000, first_seen_day=TODAY, last_seen_day=TODAY))
+    signal(session, "a", "own_suggested_source", "NB123456789", 3)
+    session.commit()
+    even_later = NOW+timedelta(days=2)
+    aq.collect(session, even_later, http=FakeHttp())
+    result = aq.propose(session, even_later)
+    session.expire_all()
+    assert session.get(GrowthAction, row.id).status == "superseded"
+    assert "Bessere Fläche gefunden" in session.get(GrowthAction, row.id).evaluation["reason"]
+    assert result["proposed"] == 1
+    fresh = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION,
+                                                     GrowthAction.status == "proposed"))
+    assert fresh.id != row.id and fresh.payload["surface_title"] in ("Rail Nights", "Night train ambient")

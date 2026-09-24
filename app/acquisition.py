@@ -668,8 +668,8 @@ def propose(session, now=None, budget=None):
                        if s.video_id in titles),
                       key=lambda s: -(s.scores or {}).get("traffic_potential", 0)) if latest else []
     current = {(s.kind, s.key): s for s in surfaces}
-    # Zuerst zurueckziehen, dann neu vorschlagen - auch wenn heute gar keine Flaeche uebrig bleibt.
-    dropped = retire_weak_proposals(session, current, now)
+    # Zuerst pruefen, dann neu vorschlagen - auch wenn heute gar keine Flaeche uebrig bleibt.
+    dropped = review_open_proposals(session, current, titles, now)
     if not surfaces:
         session.commit()
         return {"proposed": 0, "blocked": [], "dropped": dropped, "day": str(latest) if latest else None}
@@ -715,13 +715,27 @@ def propose(session, now=None, budget=None):
     return {"proposed": proposed, "blocked": blocked, "dropped": dropped, "day": str(latest)}
 
 
-def retire_weak_proposals(session, current, now):
-    """Ein Vorschlag, dessen Fläche keinen belastbaren Traffic-Pfad mehr hat, wird zurückgezogen.
+UPGRADE_MARGIN = 10.0        # Erst ein klar besseres Potenzial ersetzt einen offenen Vorschlag.
 
-    Ohne das bliebe eine schwache Quelle für immer oben stehen und blockierte den Platz für eine
-    bessere. Bestätigt laufende Maßnahmen bleiben unangetastet – sie werden gemessen, nicht verworfen.
+
+def review_open_proposals(session, current, titles, now):
+    """Offene Vorschläge gegen die heutige Datenlage prüfen: zurückziehen, aktualisieren oder ersetzen.
+
+    Ohne das bliebe eine schwache Quelle für immer stehen und blockierte den Platz für eine bessere – und
+    ein Vorschlag könnte im Dashboard einen Text tragen, der nicht mehr zur gemessenen Lage passt.
+    Bestätigt laufende Maßnahmen bleiben unangetastet: sie werden gemessen, nicht verworfen.
     """
     dropped = []
+    best_per_video = {}
+    for surface in current.values():
+        if not (surface.access or {}).get("actionable", True):
+            continue
+        spec = SURFACE_KINDS[surface.kind]
+        if blocking(session, surface.video_id, surface.lever_class, surface.traffic_source, spec["metric"])[0]:
+            continue
+        best = best_per_video.get(surface.video_id)
+        if best is None or (surface.scores or {}).get("traffic_potential", 0) > (best.scores or {}).get("traffic_potential", 0):
+            best_per_video[surface.video_id] = surface
     for row in session.scalars(select(GrowthAction).where(GrowthAction.version == VERSION,
                                                           GrowthAction.status == "proposed")):
         kind = (row.payload or {}).get("surface_kind")
@@ -731,11 +745,25 @@ def retire_weak_proposals(session, current, now):
             reason = "Die Fläche taucht in den heutigen Daten nicht mehr auf."
         elif not (surface.access or {}).get("actionable", True):
             reason = (surface.access or {}).get("why_not") or "Kein belastbarer Traffic-Pfad mehr."
+        better = best_per_video.get(row.video_id)
+        if reason is None and better is not None and better.key != row.surface_key:
+            gain = (better.scores or {}).get("traffic_potential", 0)-(surface.scores or {}).get("traffic_potential", 0)
+            if gain >= UPGRADE_MARGIN:
+                reason = (f"Bessere Fläche gefunden: „{better.title}“ (Potenzial "
+                          f"{(better.scores or {}).get('traffic_potential')} statt "
+                          f"{(surface.scores or {}).get('traffic_potential')}).")
         if reason:
             row.status, row.outcome, row.evaluated_at = "superseded", "inconclusive", now
             row.evaluation = {"reason": reason, "superseded_on": str(pacific_day(now)),
                               "note": "Vorschlag, nie ausgeführt – kein Ergebnis, nur zurückgezogen."}
             dropped.append({"action_id": row.id, "surface": (row.payload or {}).get("surface_title"), "reason": reason})
+        elif surface is not None:
+            # Derselbe Ort, aber die Lage ist neu bewertet: Text, Zielmetrik und Baseline nachziehen.
+            spec = SURFACE_KINDS[surface.kind]
+            row.payload = action_payload(surface, titles.get(row.video_id, row.video_id), spec)
+            row.baseline = row.payload["baseline"]
+            row.target_metric, row.window_days = spec["metric"], WINDOW_DAYS
+            row.traffic_source, row.lever_class = surface.traffic_source, surface.lever_class
     return dropped
 
 
