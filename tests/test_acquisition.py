@@ -442,3 +442,43 @@ def test_the_theme_vocabulary_comes_from_the_neighbourhood_not_only_the_own_titl
     aq.collect(session, NOW, http=FakeHttp())
     found = {r.key for r in session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_video"))}
     assert found == {"CAND0000001", "CAND0000002"}
+
+
+def test_format_words_are_not_a_shared_theme(session):
+    """Der zweite Produktionslauf schlug ein BLACKPINK-Teaser als Fläche für unser Teaser-Video vor."""
+    session.get(Video, "a").title = "11AM Album - Teaser"
+    candidate(session, "CAND0000001", "UC1", "LISA - FIRST SINGLE ALBUM LALISA VISUAL TEASER #3", 900000,
+              channel_title="BLACKPINK")
+    candidate(session, "CAND0000002", "UC2", "Skrillex -- Recess Album Teaser Video", 500000, channel_title="Skrillex")
+    session.commit()
+    assert {"album", "teaser"} <= aq.generic_tokens(session), "Formatwoerter werden erkannt"
+    aq.collect(session, NOW, http=FakeHttp())
+    assert not list(session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_video"))), \
+        "gemeinsame Formatwoerter sind kein Thema"
+    assert aq.propose(session, NOW)["proposed"] == 0
+    # Echte Themenbegriffe bleiben wirksam.
+    session.get(Video, "a").title = "Sealand night train ambient"
+    candidate(session, "CAND0000003", "UC3", "Night train ambient journey", 60000, channel_title="Rail One")
+    candidate(session, "CAND0000004", "UC4", "Ambient night train ride", 70000, channel_title="Rail Two")
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    found = {r.key for r in session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_video"))}
+    assert found == {"CAND0000003", "CAND0000004"}
+
+
+def test_a_surface_without_a_traffic_path_is_not_blamed_on_a_running_experiment(session):
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence", target_metric="impressions_7d",
+                             window_days=14, evaluate_after=TODAY+timedelta(days=16), status="running",
+                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
+                             traffic_source="END_SCREEN", payload={}))
+    signal(session, "a", "own_suggested_source", "EXTVIDEO123", 1)
+    session.add(DiscoveryItem(video_id="EXTVIDEO123", channel_id="UCX", title="Irgendein Video", channel_title="X",
+                              views=100, tags=[], via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY,
+                              last_seen_day=TODAY, seen_count=1))
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    view = aq.overview(session, NOW)
+    assert view["blocked"] == [], "eine Fläche mit einem View ist kein Konflikt, sondern fehlende Evidenz"
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "recommending_video"))
+    assert surface.access["actionable"] is False

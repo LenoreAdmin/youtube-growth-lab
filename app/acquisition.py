@@ -36,6 +36,13 @@ MIN_ACTIONABLE_VIEWS = 5     # Vorgeschlagen wird erst, wenn dort in 90 Tagen wi
 MIN_CANDIDATE_VIEWS = 2000   # Öffentliche Reichweite, ab der ein fremdes Video als Fläche zählt.
 MIN_CANDIDATE_SUBSCRIBERS = 500
 MIN_SHARED_TOKENS = 2        # Ein gemeinsames Wort ist keine Themengleichheit (siehe V6).
+# Formatwörter beschreiben die Verpackung, nicht das Thema: „Album Teaser“ passt auf jedes Album-Teaser
+# der Welt. Der erste Lauf hat darüber ein BLACKPINK-Video als Fläche für unser Teaser-Video vorgeschlagen.
+FORMAT_WORDS = {"album", "teaser", "single", "trailer", "visual", "preview", "snippet", "clip", "extended",
+                "instrumental", "karaoke", "cover", "medley", "bonus", "deluxe", "release", "promo", "playlist",
+                "compilation", "collection", "megamix", "session", "sessions", "acoustic", "unplugged"}
+GENERIC_SHARE = 0.05         # Ein Begriff in mehr als 5 % aller fremden Titel ist ein Formatwort, kein Thema.
+GENERIC_MIN_CORPUS = 50
 MAX_VERIFY_PER_RUN = 8       # Bounded HTTP-Prüfung je Lauf; der Rest folgt am nächsten Tag.
 VERIFY_TTL_DAYS = 7
 QUEUE_LIMIT = 3
@@ -278,9 +285,25 @@ def own_vocabulary(session):
     return {video_id: set(list(words)[:MAX_VOCAB_TOKENS*2]) for video_id, words in vocab.items()}
 
 
-def candidate_matches(session, vocab):
+def generic_tokens(session):
+    """Begriffe, die in vielen fremden Titeln stehen, taugen nicht als Themenbeleg – datengetrieben ermittelt."""
+    from .discovery import tokens as split
+    counts, total = defaultdict(int), 0
+    for item in session.scalars(select(DiscoveryItem)):
+        total += 1
+        for token in set(split(item.title)):
+            counts[token] += 1
+    if total < GENERIC_MIN_CORPUS:
+        return set(FORMAT_WORDS)
+    frequent = {token for token, count in counts.items() if count/total > GENERIC_SHARE}
+    return frequent | FORMAT_WORDS
+
+
+def candidate_matches(session, vocab, generic=None):
     """Fremde Videos aus den Suchproben, die thematisch mehrfach zu einem unserer Videos passen."""
     from .discovery import tokens as split, BRAND
+    generic = generic if generic is not None else generic_tokens(session)
+    ignore = BRAND | generic
     matches = []
     for item in session.scalars(select(DiscoveryItem)):
         if not (item.via or {}).get("queries") or item.video_id in vocab:
@@ -288,7 +311,7 @@ def candidate_matches(session, vocab):
         words = set(split(item.title))|{t for tag in (item.tags or []) for t in split(tag)}
         best, shared = None, []
         for video_id, own in vocab.items():
-            common = sorted((words & own)-BRAND)
+            common = sorted((words & own)-ignore)
             if len(common) > len(shared):
                 best, shared = video_id, common
         if best is not None and len(shared) >= MIN_SHARED_TOKENS:
@@ -302,7 +325,8 @@ def collect_candidates(session, vocab, learned, store):
     Die Reichweite ist öffentlich nachprüfbar (Views, Abonnenten); dass dieses Publikum uns erreicht, ist
     ausdrücklich nicht gemessen. Genau deshalb der Abschlag in der Bewertung und der Proxy-Hinweis.
     """
-    matches = candidate_matches(session, vocab)
+    generic = generic_tokens(session)
+    matches = candidate_matches(session, vocab, generic)
     channels = {row.channel_id: row for row in session.scalars(select(DiscoveryChannel))}
     seen_channels = set()
     for item, video_id, shared in sorted(matches, key=lambda m: -(m[0].views or 0)):
@@ -325,6 +349,7 @@ def collect_candidates(session, vocab, learned, store):
                   {"public_views": item.views, "channel": item.channel_title, "subscribers": subscribers,
                    "shared_tokens": list(shared), "members": members, "channels": distinct,
                    "demand_source": "public_proxy_corroborated", "found_via": (item.via or {}).get("queries", [])[:3],
+                   "generic_words_ignored": sorted(generic & set(shared)) or None,
                    "why": (f"Dieses Video hat {item.views} öffentlich gezählte Views und liegt thematisch neben uns: "
                            f"{corroboration} Sein Publikum ist belegt vorhanden – es erreicht uns nur noch nicht."),
                    "uncertainty": "mittel: Reichweite öffentlich belegt, eigener Zufluss noch nicht gemessen."},
@@ -841,6 +866,8 @@ def overview(session, now=None):
         entry["rank"] = rank
     blocked = []
     for surface in sorted(surfaces, key=lambda s: -(s.scores or {}).get("traffic_potential", 0)):
+        if not (surface.access or {}).get("actionable", True):
+            continue        # Kein Traffic-Pfad: das ist kein Konflikt, sondern fehlende Evidenz.
         spec = SURFACE_KINDS[surface.kind]
         other, reason = blocking(session, surface.video_id, surface.lever_class, surface.traffic_source, spec["metric"])
         if other is not None:
