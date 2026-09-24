@@ -502,3 +502,41 @@ def test_todays_surfaces_are_rebuilt_so_a_retired_one_disappears(session):
     session.expire_all()
     assert session.get(GrowthAction, row.id).status == "superseded"
     assert aq.overview(session, NOW)["traffic_queue"] == []
+
+
+def test_verified_adjacency_with_public_reach_is_actionable_with_an_honest_caveat(session):
+    """Ein Kanal, neben dem YouTube uns ausliefert, ist eine echte Fläche – auch bei nur einem View."""
+    session.add(DiscoveryItem(video_id="NB123456789", channel_id="UCM", title="Anii cei mai dragi din viata mea",
+                              channel_title="Mihai Ciobanu (Oficial)", views=180000, tags=[],
+                              via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY, last_seen_day=TODAY,
+                              seen_count=1))
+    session.add(DiscoveryChannel(channel_id="UCM", title="Mihai Ciobanu (Oficial)", subscribers=95000,
+                                 video_count=300, views=50000000, first_seen_day=TODAY, last_seen_day=TODAY))
+    signal(session, "b", "own_suggested_source", "NB123456789", 1)
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    rows = {r.kind: r for r in session.scalars(select(TrafficSurface))}
+    channel = rows["recommending_channel"]
+    assert channel.access["actionable"] is True and channel.access["evidence_grade"] == "adjacency_plus_public_reach"
+    assert "1 View in 90 Tagen" in channel.access["caveat"] and "95000 Abonnenten" in channel.access["caveat"]
+    assert channel.scores["traffic_potential"] > 20, "belegte Nachbarschaft plus Reichweite zaehlt mehr als ein View"
+    assert channel.scores["subscribers"] == 95000
+    video = rows["recommending_video"]
+    assert video.access["actionable"] is True and "180000 öffentliche Views" in video.access["caveat"]
+    result = aq.propose(session, NOW)
+    assert result["proposed"] == 1
+    entry = aq.overview(session, NOW)["traffic_queue"][0]
+    assert entry["video_id"] == "b" and entry["traffic_source"] == "RELATED_VIDEO"
+    assert entry["steps"] and entry["mechanism"] and entry["primary_metric"].startswith("zusätzliche qualifizierte")
+    # Ohne oeffentliche Reichweite bleibt ein einzelner View eine blosse Beobachtung.
+    session.query(DiscoveryChannel).delete()
+    session.query(DiscoveryItem).delete()
+    session.add(DiscoveryItem(video_id="NB123456789", channel_id="UCM", title="Kleines Video", channel_title="X",
+                              views=0, tags=[], via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY,
+                              last_seen_day=TODAY, seen_count=1))
+    session.commit()
+    later = NOW+timedelta(days=1)
+    aq.collect(session, later, http=FakeHttp())
+    weak = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "recommending_video",
+                                                      TrafficSurface.day == ge.pacific_day(later)))
+    assert weak.access["actionable"] is False

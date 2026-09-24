@@ -119,6 +119,21 @@ def as_url(detail):
     return parsed.geturl()
 
 
+def adjacency_access(views, public_reach, minimum, how, what):
+    """Nachbarschaft ist belegt (YouTube hat uns dort ausgeliefert), das Publikum öffentlich nachprüfbar.
+
+    Gemessener Zufluss von einem View ist schwach – aber die Fläche selbst ist echt und ihre Größe bekannt.
+    Deshalb handelbar, mit ausdrücklich hoher Unsicherheit statt einer Scheingenauigkeit.
+    """
+    if public_reach is None or public_reach < minimum:
+        # Ohne nennenswertes eigenes Publikum der Fläche bleibt ein einzelner View eine Beobachtung.
+        return measured_access(views, how)
+    return {"actionable": True, "rules": NO_SPAM, "manual": True, "how": how,
+            "evidence_grade": "adjacency_plus_public_reach",
+            "caveat": (f"Bisher kam von dort {views} View in 90 Tagen – die Nachbarschaft ist belegt, der Zufluss "
+                       f"aber winzig. {what} Erwartung entsprechend klein halten und am Ergebnis messen.")}
+
+
 def measured_access(views, how):
     """Gemessene Flächen brauchen einen belastbaren Traffic-Pfad, sonst bleiben sie Beleg statt Aufgabe."""
     if views < MIN_ACTIONABLE_VIEWS:
@@ -492,13 +507,18 @@ def collect(session, now=None, budget=None, http=None):
                        "neighbour_views": item.views if item else None,
                        "why": (f"YouTube hat unser Video {views} mal neben „{item.title if item else detail}“ "
                                "ausgeliefert und Zuschauer haben geklickt – dieses Publikum erreicht uns schon.")},
-                      {"traffic_potential": score_surface(0.9, views, 0.6, 0.4, entry.get("weight", 1.0)),
+                      {"traffic_potential": max(score_surface(0.9, views, 0.6, 0.4, entry.get("weight", 1.0)),
+                                                score_candidate(["nachbarschaft", "belegt"], item.views if item else 0,
+                                                                None, entry.get("weight", 1.0))),
                        "expected_weekly_views": expected_weekly_views(views),
+                       "public_views": item.views if item else None,
                        "components": {"fit": 0.9, "present_views": views, "access": 0.6, "effort": 0.4},
                        "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit."},
-                      measured_access(views, "Unter diesem Video als Kanal echt teilnehmen: das Video ansehen und "
-                                     "einen inhaltlichen Kommentar schreiben, der ohne Link Wert hat. Kein "
-                                     "Eigenwerbe-Link, keine Wiederholung."))
+                      adjacency_access(views, item.views if item else None, MIN_CANDIDATE_VIEWS,
+                                       "Unter diesem Video als Kanal echt teilnehmen: das Video ansehen und einen "
+                                       "inhaltlichen Kommentar schreiben, der ohne Link Wert hat. Kein "
+                                       "Eigenwerbe-Link, keine Wiederholung.",
+                                       f"Das Nachbarvideo selbst hat {item.views if item else '?'} öffentliche Views."))
             if channel is not None and channel.subscribers:
                 kind_entry = learned.get("recommending_channel", {})
                 if kind_entry.get("retired"):
@@ -509,13 +529,17 @@ def collect(session, now=None, budget=None, http=None):
                        "video_count": channel.video_count, "demand_source": "own_analytics",
                        "why": (f"Über Videos von „{channel.title}“ ({channel.subscribers} Abonnenten) kamen real "
                                f"{views} Views auf unser Video – die Audience dieses Kanals überschneidet sich mit unserer.")},
-                      {"traffic_potential": score_surface(0.85, views, 0.5, 0.5, kind_entry.get("weight", 1.0)),
-                       "expected_weekly_views": expected_weekly_views(views),
+                      {"traffic_potential": max(score_surface(0.85, views, 0.5, 0.5, kind_entry.get("weight", 1.0)),
+                                                score_candidate(["nachbarschaft", "belegt"], channel.views,
+                                                                channel.subscribers, kind_entry.get("weight", 1.0))),
+                       "expected_weekly_views": expected_weekly_views(views), "subscribers": channel.subscribers,
                        "components": {"fit": 0.85, "present_views": views, "access": 0.5, "effort": 0.5},
                        "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit."},
-                      measured_access(views, "Beim Kanal als Kanal sichtbar werden: neue Videos zeitnah ansehen und "
-                                     "inhaltlich kommentieren; bei erkennbarer Nähe eine sachliche "
-                                     "Kollaborationsanfrage über die im Kanal angegebene Kontaktmöglichkeit."))
+                      adjacency_access(views, channel.subscribers, MIN_CANDIDATE_SUBSCRIBERS,
+                                       "Beim Kanal als Kanal sichtbar werden: neue Videos zeitnah ansehen und "
+                                       "inhaltlich kommentieren; bei erkennbarer Nähe eine sachliche "
+                                       "Kollaborationsanfrage über die im Kanal angegebene Kontaktmöglichkeit.",
+                                       f"Der Kanal hat {channel.subscribers} Abonnenten."))
 
     # ---- reale Suchintentionen mit gemessenen Views
     for video_id, details in searched.items():
