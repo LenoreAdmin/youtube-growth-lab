@@ -596,6 +596,8 @@ def propose(session, now=None, budget=None):
     surfaces = sorted((s for s in session.scalars(select(TrafficSurface).where(TrafficSurface.day == latest))
                        if s.video_id in titles),
                       key=lambda s: -(s.scores or {}).get("traffic_potential", 0))
+    current = {(s.kind, s.key): s for s in surfaces}
+    dropped = retire_weak_proposals(session, current, now)
     proposed, blocked, per_video = 0, [], defaultdict(int)
     for surface in surfaces:
         if budget:
@@ -635,7 +637,31 @@ def propose(session, now=None, budget=None):
         per_video[surface.video_id] += 1
         proposed += 1
     session.commit()
-    return {"proposed": proposed, "blocked": blocked, "day": str(latest)}
+    return {"proposed": proposed, "blocked": blocked, "dropped": dropped, "day": str(latest)}
+
+
+def retire_weak_proposals(session, current, now):
+    """Ein Vorschlag, dessen Fläche keinen belastbaren Traffic-Pfad mehr hat, wird zurückgezogen.
+
+    Ohne das bliebe eine schwache Quelle für immer oben stehen und blockierte den Platz für eine
+    bessere. Bestätigt laufende Maßnahmen bleiben unangetastet – sie werden gemessen, nicht verworfen.
+    """
+    dropped = []
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.version == VERSION,
+                                                          GrowthAction.status == "proposed")):
+        kind = (row.payload or {}).get("surface_kind")
+        surface = current.get((kind, row.surface_key))
+        reason = None
+        if surface is None:
+            reason = "Die Fläche taucht in den heutigen Daten nicht mehr auf."
+        elif not (surface.access or {}).get("actionable", True):
+            reason = (surface.access or {}).get("why_not") or "Kein belastbarer Traffic-Pfad mehr."
+        if reason:
+            row.status, row.outcome, row.evaluated_at = "superseded", "inconclusive", now
+            row.evaluation = {"reason": reason, "superseded_on": str(pacific_day(now)),
+                              "note": "Vorschlag, nie ausgeführt – kein Ergebnis, nur zurückgezogen."}
+            dropped.append({"action_id": row.id, "surface": (row.payload or {}).get("surface_title"), "reason": reason})
+    return dropped
 
 
 def action_payload(surface, video_title, spec):

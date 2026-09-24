@@ -398,3 +398,25 @@ def test_a_new_surface_ranks_below_a_proven_one_and_offers_participation(session
     steps = aq.steps_for("candidate_video", best_candidate, "Trainstories")
     assert any("ansehen" in s for s in steps) and any("kein Link" in s for s in steps)
     assert "YT_OTHER_PAGE" in aq.mechanism("candidate_video", best_candidate)
+
+
+def test_a_proposal_is_withdrawn_when_its_surface_stops_carrying_traffic(session):
+    signal(session, "a", "own_external", "musikblog.example", 30)
+    aq.collect(session, NOW, http=FakeHttp())
+    assert aq.propose(session, NOW)["proposed"] == 1
+    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
+    # Am naechsten Tag liefert die Quelle nur noch Rauschen.
+    for surface in session.scalars(select(TrafficSurface)):
+        session.delete(surface)
+    session.query(DiscoverySignal).delete()
+    signal(session, "a", "own_external", "musikblog.example", 1)
+    later = NOW+timedelta(days=1)
+    aq.collect(session, later, http=FakeHttp())
+    result = aq.propose(session, later)
+    session.expire_all()
+    withdrawn = session.get(GrowthAction, row.id)
+    assert withdrawn.status == "superseded" and withdrawn.outcome == "inconclusive"
+    assert f"Ab {aq.MIN_ACTIONABLE_VIEWS} Views" in withdrawn.evaluation["reason"]
+    assert "nie ausgeführt" in withdrawn.evaluation["note"]
+    assert [d["action_id"] for d in result["dropped"]] == [row.id]
+    assert aq.overview(session, later)["traffic_queue"] == []
