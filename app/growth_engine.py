@@ -6,10 +6,11 @@ actions follow V4 regimes and video-balanced channel baselines. Every action is 
 recommendation with success and stop criteria and is later scored against observed
 analytics. Confidence inherits the V4 caps: with few videos it never exceeds "low".
 """
-from datetime import timedelta
+from datetime import date, timedelta
 from math import tanh
 from sqlalchemy import select
-from .models import (GrowthAssessment, GrowthScore, GrowthAction, GrowthPlan, AnalyticsForecast, Decision, Video, utcnow)
+from .models import (GrowthAssessment, GrowthScore, GrowthAction, GrowthPlan, AnalyticsForecast, ChannelPlaylist,
+                     Decision, DiscoveryRun, Video, utcnow)
 from .backfill import upsert
 from .history import pacific_day, lag_days, features_at, paid_profile, PAID_WINDOW_DAYS
 from .metrics import aware
@@ -25,7 +26,11 @@ PAID_LABELS = {"organic": "Aktuell organisch", "organic_with_paid_history": "Akt
 ACTIONS = ["protect_no_change", "test_title", "test_thumbnail", "test_title_thumbnail", "investigate_retention",
            "improve_discovery", "cross_promote", "create_followup_content", "observe",
            "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video",
-           "distribute_playlist_context", "probe_missing_evidence"]
+           "distribute_playlist_context", "probe_missing_evidence",
+           # Nach dem Feasibility-Check: jede dieser Aktionen setzt genau eine Ressource voraus, deren Existenz belegt ist.
+           "link_from_own_video", "place_in_existing_playlist", "create_playlist_context"]
+PLAYLIST_STALE_DAYS = 3   # Aelteres Inventar gilt als unbekannt – "unbekannt" ist nicht "keine vorhanden".
+SOURCE_LEAD_FACTOR = 2.0  # Nur ein deutlich bestausgeliefertes Video wird ohne Rueckfrage benannt.
 EXTERNAL_MIN_SCORE = 60  # Relative external score needed before an external opportunity may drive the action.
 EXTERNAL_STATES = ("observe", "needs_discovery", "needs_distribution", "needs_packaging_test", "scale_opportunity", "revival_candidate")
 ABS_CTR_OK = 0.04         # Without a usable channel median, 4 % click-through is not a packaging problem.
@@ -45,16 +50,21 @@ OBJECTIVES = {"protect_no_change": "Discovery", "test_title": "Viewer", "test_th
               "investigate_retention": "Watchtime", "improve_discovery": "Discovery", "cross_promote": "Discovery",
               "create_followup_content": "Subscriber", "observe": "Watchtime", "target_search_opportunity": "Viewer",
               "target_suggested_cluster": "Discovery", "packaging_for_audience": "Viewer", "revive_existing_video": "Viewer",
-              "distribute_playlist_context": "Discovery", "probe_missing_evidence": "Discovery"}
+              "distribute_playlist_context": "Discovery", "probe_missing_evidence": "Discovery",
+              "link_from_own_video": "Discovery", "place_in_existing_playlist": "Discovery",
+              "create_playlist_context": "Discovery"}
 WINDOWS = {"protect_no_change": 7, "test_title": 14, "test_thumbnail": 14, "test_title_thumbnail": 14, "investigate_retention": 14,
            "improve_discovery": 14, "cross_promote": 14, "create_followup_content": 30, "observe": 7,
            "target_search_opportunity": 28, "target_suggested_cluster": 28, "packaging_for_audience": 14, "revive_existing_video": 28,
-           "distribute_playlist_context": 14, "probe_missing_evidence": 14}
+           "distribute_playlist_context": 14, "probe_missing_evidence": 14,
+           "link_from_own_video": 14, "place_in_existing_playlist": 14, "create_playlist_context": 28}
 TARGETS = {"protect_no_change": "views_7d", "test_title": "views_7d", "test_thumbnail": "ctr_or_views", "test_title_thumbnail": "ctr_or_views",
            "investigate_retention": "watch_minutes_7d", "improve_discovery": "discovery_views_7d", "cross_promote": "views_7d",
            "create_followup_content": "subscribers_7d", "observe": "views_7d", "target_search_opportunity": "discovery_views_7d",
            "target_suggested_cluster": "discovery_views_7d", "packaging_for_audience": "ctr_or_views", "revive_existing_video": "views_7d",
-           "distribute_playlist_context": "discovery_views_7d", "probe_missing_evidence": "impressions_7d"}
+           "distribute_playlist_context": "discovery_views_7d", "probe_missing_evidence": "impressions_7d",
+           "link_from_own_video": "discovery_views_7d", "place_in_existing_playlist": "discovery_views_7d",
+           "create_playlist_context": "discovery_views_7d"}
 DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags", "Sichtbarkeit", "Endscreens des Videos"],
                  "test_title": ["Thumbnail", "Beschreibung", "Kapitel"], "test_thumbnail": ["Titel", "Beschreibung", "Kapitel"],
                  "test_title_thumbnail": ["Beschreibung", "Videoinhalt", "Sichtbarkeit"],
@@ -65,7 +75,12 @@ DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags"
                  "revive_existing_video": ["Videoinhalt", "Sichtbarkeit"],
                  # Distribution-Experimente fassen das Paket ausdrücklich nicht an: sonst misst man zwei Dinge gleichzeitig.
                  "distribute_playlist_context": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit"],
-                 "probe_missing_evidence": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit"]}
+                 "probe_missing_evidence": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit"],
+                 "link_from_own_video": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit",
+                                         "Titel/Thumbnail des Quellvideos"],
+                 "place_in_existing_playlist": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit",
+                                                "Name der Playlist"],
+                 "create_playlist_context": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit"]}
 MIN_TRACK_RECORD = 3
 # Genau ein veraenderlicher Hebel je Experiment. Wer Beschreibung, Playlist und Endscreen gleichzeitig
 # anfasst, kann das Ergebnis keiner Ursache zuordnen; alles Weitere wird ein eigenes Experiment.
@@ -80,13 +95,22 @@ LEVERS = {"protect_no_change": "keiner – bewusst keine Änderung", "observe": 
           "packaging_for_audience": "genau eine Packaging-Dimension",
           "revive_existing_video": "interne Verlinkung und Playlist-Platzierung",
           "distribute_playlist_context": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video",
-          "probe_missing_evidence": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video"}
+          "probe_missing_evidence": "interne Verlinkung aus einer belegten eigenen Ressource → dieses Video",
+          "link_from_own_video": "Endscreen/Infokarte aus einem benannten eigenen Video → dieses Video",
+          "place_in_existing_playlist": "Platzierung in einer benannten, real existierenden Playlist",
+          "create_playlist_context": "neue thematische Playlist anlegen und dieses Video aufnehmen"}
 # Was bewusst NICHT mitgeändert wird, sondern ein eigenes Experiment bleibt.
 DEFERRED_LEVERS = {"distribute_playlist_context": ["Beschreibungstext auf ein belegtes Thema ausrichten",
                                                   "Titel oder Thumbnail testen"],
                    "probe_missing_evidence": ["Beschreibungstext auf ein belegtes Thema ausrichten",
                                               "Titel oder Thumbnail testen"],
                    "improve_discovery": ["Beschreibungstext auf ein belegtes Thema ausrichten"],
+                   "link_from_own_video": ["Playlist anlegen oder bestücken", "Beschreibungstext ausrichten",
+                                           "Titel oder Thumbnail testen"],
+                   "place_in_existing_playlist": ["Endscreen-Verlinkung", "Beschreibungstext ausrichten",
+                                                  "Titel oder Thumbnail testen"],
+                   "create_playlist_context": ["Endscreen-Verlinkung", "Beschreibungstext ausrichten",
+                                               "Titel oder Thumbnail testen"],
                    "target_search_opportunity": ["Playlist-Platzierung", "Titel"],
                    "target_suggested_cluster": ["Titel", "Thumbnail"]}
 MIN_MEASURABLE_VIEWS_7D = 3        # Darunter kann ein Effekt nicht von Rauschen getrennt werden.
@@ -445,7 +469,7 @@ def track_record(session):
     return record
 
 
-def distribution_action(f, base, external):
+def distribution_action(f, base, external, channel=None):
     """Almost no delivery: run a low-risk distribution experiment, or fetch the evidence that is missing.
 
     Never a packaging test here – with a working click-through rate the package is not the bottleneck,
@@ -461,15 +485,22 @@ def distribution_action(f, base, external):
         # Wortgleichheit ist keine Themengleichheit: die Chance bleibt sichtbar, gibt aber keinen Text vor.
         rejected = [f"Externe Chance „{external.get('key')}“ bleibt Hypothese und lenkt keinen Wortlaut: "
                     f"{external.get('context_reason') or 'thematische Relevanz nicht ausreichend belegt'}"]
+    lever, lever_note = feasible_lever(channel)
+    if lever is None:
+        return "observe", [head]+rejected+[lever_note,
+                "Sobald der nächste Discovery-Lauf das Playlist-Inventar geprüft hat, entsteht hier ein ausführbares Experiment."]
     if route:
-        return "distribute_playlist_context", [head]+rejected+[f"Belegte eigene Route: {route['label']} "
+        return lever, [head]+rejected+[f"Belegte eigene Route: {route['label']} "
                 f"({route['share']*100:.0f} % von {route['views_7d']} Views der letzten bekannten Woche) – dort ansetzen, "
-                "ohne Titel oder Thumbnail anzufassen."]
+                "ohne Titel oder Thumbnail anzufassen.", lever_note]
     missing = [m["what"] for m in ((external or {}).get("missing_evidence") or [])][:3]
-    return "probe_missing_evidence", [head]+rejected+["Keine belastbare Hypothese: "
-            + ("Es fehlt " + "; ".join(missing)+"." if missing else
-               f"Der eigene Quellenmix der letzten Woche hat weniger als {MIN_ROUTE_VIEWS} Views und nennt keine Route."),
-            "Risikoarmes Experiment beschafft genau diese Evidenz, ohne das Paket zu verändern."]
+    hypothesis = ["Keine belastbare Hypothese: "
+                  + ("Es fehlt " + "; ".join(missing)+"." if missing else
+                     f"Der eigene Quellenmix der letzten Woche hat weniger als {MIN_ROUTE_VIEWS} Views und nennt keine Route."),
+                  "Risikoarmes Experiment beschafft genau diese Evidenz, ohne das Paket zu verändern.", lever_note]
+    # Ohne belegte Ressource gibt es nichts zu verlinken: dann ist das Anlegen der Ressource das Experiment.
+    action = "probe_missing_evidence" if lever != "create_playlist_context" else lever
+    return action, [head]+rejected+hypothesis
 
 
 def baseline_snapshot(f):
@@ -530,7 +561,7 @@ def recent_results(session, limit=6):
     return out
 
 
-def choose_action(state, f, rev, base, experiments, record, external=None):
+def choose_action(state, f, rev, base, experiments, record, external=None, channel=None):
     """Exactly one prioritised action. Winners are protected first; running experiments are measured, not stacked.
     An external opportunity (V6) may steer the action only for organic, non-protected states."""
     running = [e for e in experiments if e.get("status") == "registered"]
@@ -549,7 +580,7 @@ def choose_action(state, f, rev, base, experiments, record, external=None):
         notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Evidenz: "
                  f"{external.get('evidence_level')}) lenkt die Aktion."]
     elif state == "needs_distribution":
-        action, notes = distribution_action(f, base, external)
+        action, notes = distribution_action(f, base, external, channel)
     elif state == "scale_opportunity":
         action = "cross_promote"
     elif state == "needs_retention_analysis":
@@ -575,11 +606,90 @@ def choose_action(state, f, rev, base, experiments, record, external=None):
         action, notes = "observe", ["Keine organische Entscheidung möglich (aktuell Werbung oder zu wenig Daten)."]
     else:
         action = "observe"
+    # Ressourcencheck vor allem anderen: eine Aktion, deren Voraussetzung nicht belegt ist, wird ersetzt.
+    if action in RESOURCE_ACTIONS and not requirement(action, channel)["verified"]:
+        lever, lever_note = feasible_lever(channel)
+        if lever is None:
+            action, notes = "observe", notes+[f"Nicht ausführbar: {lever_note}"]
+        else:
+            notes = notes+[f"Ressourcencheck: {LEVERS.get(action)} ist nicht belegt – stattdessen {LEVERS.get(lever)}. {lever_note}"]
+            action = lever
     entry = record.get(action, {})
     if entry.get("net_negative") and action != "protect_no_change":
         notes.append(f"Beobachtete Bilanz für {action}: {entry['negative']} negativ / {entry['positive']} positiv – herabgestuft auf Beobachten (kein Kausalnachweis).")
         action = "observe"
     return action, notes
+
+
+RESOURCE_ACTIONS = ("link_from_own_video", "probe_missing_evidence", "improve_discovery", "cross_promote",
+                    "revive_existing_video", "place_in_existing_playlist", "create_playlist_context")
+
+
+def requirement(action, channel):
+    """The one resource this action presupposes – and the evidence that it exists."""
+    channel = channel or {}
+    if action in ("place_in_existing_playlist",):
+        items = (channel.get("playlists") or {}).get("items") or []
+        return {"kind": "playlist", "verified": bool(items),
+                "named": [p["title"] for p in items[:3]], "evidence": (channel.get("playlists") or {}).get("note")}
+    if action == "create_playlist_context":
+        return {"kind": "none", "verified": True,
+                "evidence": (channel.get("playlists") or {}).get("note"),
+                "named": [], "note": "Legt die Ressource selbst an, setzt also keine voraus."}
+    if action in RESOURCE_ACTIONS:
+        chosen, candidates = channel.get("source"), channel.get("source_candidates") or []
+        return {"kind": "source_video", "verified": bool(chosen or candidates),
+                "named": [chosen["title"]] if chosen else [c["title"] for c in candidates],
+                "evidence": chosen["evidence"] if chosen else "; ".join(c["evidence"] for c in candidates) or None}
+    return {"kind": "none", "verified": True, "named": [], "evidence": None}
+
+
+def choices_for(action, channel):
+    """Real candidates to pick from when the system cannot determine the resource reliably."""
+    channel = channel or {}
+    if action in RESOURCE_ACTIONS and action not in ("place_in_existing_playlist", "create_playlist_context"):
+        candidates = channel.get("source_candidates") or []
+        if not channel.get("source") and len(candidates) > 1:
+            return {"what": "source_video", "required": True,
+                    "question": "Von welchem deiner Videos soll auf dieses Video verlinkt werden?",
+                    "options": candidates}
+    if action == "place_in_existing_playlist":
+        items = (channel.get("playlists") or {}).get("items") or []
+        if len(items) > 1:
+            return {"what": "playlist", "required": True, "question": "In welche deiner Playlists soll das Video?",
+                    "options": items}
+    return None
+
+
+def link_steps(title, channel, hold):
+    """Link from a named own video – or let a human pick from the real candidates instead of guessing."""
+    channel = channel or {}
+    chosen, candidates = channel.get("source"), channel.get("source_candidates") or []
+    if chosen:
+        first = (f"Im YouTube Studio bei „{chosen['title']}“ einen Endscreen-Eintrag oder eine Info-Karte auf „{title}“ setzen "
+                 f"(belegt ausgeliefert: {chosen['evidence']}).")
+    elif candidates:
+        options = "; ".join(f"„{c['title']}“ ({c['evidence']})" for c in candidates)
+        first = (f"Eines dieser real existierenden eigenen Videos auswählen und dort einen Endscreen-Eintrag oder eine "
+                 f"Info-Karte auf „{title}“ setzen: {options}. Das System wählt hier bewusst nicht für dich.")
+    else:
+        return None      # Ohne belegte Quelle gibt es keinen ausfuehrbaren Schritt - die Aktion wird gar nicht erst gewaehlt.
+    return [first,
+            f"Am Quellvideo sonst nichts ändern – Titel, Thumbnail und Beschreibung dort bleiben unverändert.",
+            f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert.",
+            hold]
+
+
+def playlist_steps(title, channel, hold, fit=""):
+    """Only ever names a playlist that the API inventory actually reported."""
+    items = ((channel or {}).get("playlists") or {}).get("items") or []
+    if not items:
+        return None      # Keine belegte Playlist: dann darf auch kein Schritt eine verlangen.
+    names = "; ".join(f"„{p['title']}“ ({p.get('item_count')} Videos)" for p in items[:3])
+    return [f"„{title}“ in eine dieser real existierenden Playlists aufnehmen{fit}: {names}. Position 1–3.",
+            "Playlist nicht umbenennen und keine neue anlegen – das wäre ein eigenes Experiment.",
+            f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert.",
+            hold]
 
 
 def experiment_steps(action, title, f, external, channel):
@@ -588,8 +698,6 @@ def experiment_steps(action, title, f, external, channel):
     Nothing here is performed by the system – YouTube stays read-only. Every step names a concrete
     object (playlist, end screen, description, the own video to link from) instead of a category.
     """
-    leader = (channel or {}).get("delivery_leader")
-    from_leader = (f"aus „{leader['title']}“" if leader else "aus deinem am besten ausgelieferten Video")
     route = known_route(f)
     # Ein fremdes Thema darf den Wortlaut nur vorgeben, wenn es belegt ist (context_usable);
     # sonst bleibt der Text neutral und die Chance ist nur eine zu pruefende Hypothese.
@@ -602,24 +710,20 @@ def experiment_steps(action, title, f, external, channel):
     # Eine belegte Audience hilft bei der Auswahl der bestehenden Playlist; geschrieben wird dadurch nichts.
     fit = f" (passend zu „{audience}“)" if audience else ""
     hold = "Während des Messfensters keine weitere Änderung an diesem Video – sonst misst du zwei Dinge gleichzeitig."
+    link = link_steps(title, channel, hold)      # None, wenn keine belegte Quelle existiert
     steps = {
-        # Ein Hebel: interne Platzierung dieses Videos in bereits vorhandenen eigenen Oberflächen.
-        # Titel, Thumbnail und Beschreibung dieses Videos bleiben ausdrücklich unangetastet.
-        "distribute_playlist_context": [
-            f"Bestehende, thematisch passende Sealand-Playlist{fit} wählen und „{title}“ dort aufnehmen (Position 1–3). "
-            "Keine neue Playlist anlegen, keine Playlist umbenennen."+surface,
-            f"Aus einem bestehenden, thematisch passenden eigenen Video ({leader['title'] if leader else 'dem am besten ausgelieferten'}) "
-            "per Endscreen oder Info-Karte auf dieses Video verlinken.",
+        # Ein Hebel, und nur belegte Ressourcen: was nicht nachweislich existiert, kommt in keinem Schritt vor.
+        "link_from_own_video": link,
+        "place_in_existing_playlist": playlist_steps(title, channel, hold, fit),
+        "create_playlist_context": [
+            f"Neue thematische Playlist anlegen (der Kanal hat laut Inventar keine) und „{title}“ als ersten Eintrag aufnehmen.",
+            "Playlist öffentlich schalten und einen sprechenden Namen wählen; sie ist ab jetzt die Oberfläche, "
+            "auf der weitere Videos eingeordnet werden können.",
             f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert.",
             hold],
-        "probe_missing_evidence": [
-            f"Bestehende, thematisch passende Sealand-Playlist wählen und „{title}“ dort aufnehmen (Position 1–3).",
-            f"Aus einem bestehenden eigenen Video ({leader['title'] if leader else 'dem am besten ausgelieferten'}) "
-            "per Endscreen oder Info-Karte auf dieses Video verlinken.",
-            f"An „{title}“ selbst nichts ändern: Titel, Thumbnail und Beschreibung bleiben unverändert.",
+        "probe_missing_evidence": (link+[
             "Nach dem Messfenster entscheidet die Messung: Bleiben die Impressions praktisch null, ist die Auslieferung der "
-            "Engpass und ein Packaging-Test wäre Verschwendung gewesen. Steigen sie, liegt eine belastbare Basis vor.",
-            hold],
+            "Engpass und ein Packaging-Test wäre Verschwendung gewesen. Steigen sie, liegt eine belastbare Basis vor."]) if link else None,
         "target_search_opportunity": [
             f"Nur den Wortlaut: Suchintention „{(external or {}).get('key')}“ in die ersten zwei Beschreibungszeilen und in die "
             "Kapitelnamen aufnehmen, ohne Clickbait.",
@@ -629,23 +733,13 @@ def experiment_steps(action, title, f, external, channel):
             f"Nur den Wortlaut: Themenkontext {topic} in Beschreibung und Playlist-Benennung spiegeln."+surface,
             "Titel, Thumbnail und Endscreens bleiben in diesem Fenster unverändert.",
             hold],
-        "improve_discovery": [
-            f"Interne Verlinkung: „{title}“ in eine bestehende passende Playlist aufnehmen und aus einem passenden eigenen "
-            "Video per Endscreen verlinken."+surface,
-            "Beschreibung, Titel und Thumbnail bleiben unverändert – Wortlaut ist ein eigenes Experiment.",
-            hold],
-        "cross_promote": [
-            f"Endscreen und Info-Karte {from_leader} auf „{title}“ verlinken.",
-            "Am beworbenen Video selbst nichts ändern.",
-            hold],
+        "improve_discovery": link,
+        "cross_promote": link,
         "packaging_for_audience": [
             f"Genau eine Dimension ändern (Thumbnail ODER Titel) und dabei die Sprache der Zielgruppe „{context}“ verwenden.",
             "Alte Fassung sichern, Zeitpunkt der Änderung notieren; Beschreibung und Playlist bleiben unverändert.",
             hold],
-        "revive_existing_video": [
-            f"„{title}“ in eine bestehende passende Playlist einsortieren und {from_leader} per Endscreen verlinken.",
-            "Titel, Thumbnail und Beschreibung bleiben in diesem Fenster unverändert.",
-            hold],
+        "revive_existing_video": link,
         "test_thumbnail": [f"Nur das Thumbnail von „{title}“ tauschen, alte Fassung sichern, Zeitpunkt notieren.", hold],
         "test_title": [f"Nur den Titel von „{title}“ ändern, alte Fassung sichern, Zeitpunkt notieren.", hold],
         "test_title_thumbnail": [f"Titel und Thumbnail von „{title}“ gemeinsam neu positionieren; beides dokumentieren.",
@@ -697,7 +791,13 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
         "distribute_playlist_context": "Kaum Auslieferung bei funktionierendem Paket: Verteilung über Playlist-Kontext und Endscreens erhöhen, "
                                        "ohne Titel oder Thumbnail zu verändern – sonst wird das Distributionsergebnis unlesbar.",
         "probe_missing_evidence": "Kaum Auslieferung und keine belastbare Hypothese: risikoarmes Distributionsexperiment, das genau die "
-                                  "fehlende Evidenz erzeugt (wird das Video überhaupt ausgeliefert, wenn ein Kontext existiert?).",
+                                  "fehlende Evidenz erzeugt (wird das Video überhaupt ausgeliefert, wenn eine Quelle darauf verweist?).",
+        "link_from_own_video": "Kaum Auslieferung bei funktionierendem Paket: Verteilung über eine belegte eigene Quelle erhöhen "
+                               "(Endscreen/Infokarte), ohne Titel, Thumbnail oder Beschreibung zu verändern.",
+        "place_in_existing_playlist": "Kaum Auslieferung bei funktionierendem Paket: dieses Video in eine real existierende eigene "
+                                      "Playlist einsortieren, ohne das Paket zu verändern.",
+        "create_playlist_context": "Es existiert keine Playlist und kein ausgeliefertes Quellvideo: die fehlende Oberfläche selbst "
+                                   "anzulegen ist das Experiment – als eigener Schritt, nicht als stille Voraussetzung.",
     }[action]
     window = WINDOWS[action]
     target = TARGETS[action]
@@ -728,6 +828,8 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
             "confidence": conf, "target_metric": target, "window_days": window, "success_criterion": success, "stop_criterion": stop,
             "steps": experiment_steps(action, title or "dieses Video", f, external, channel),
             "primary_lever": LEVERS.get(action), "deferred_levers": DEFERRED_LEVERS.get(action, []),
+            "requires": requirement(action, channel), "choices": choices_for(action, channel),
+            "needs_human_choice": bool(choices_for(action, channel)),
             "one_lever_note": "Genau ein veränderlicher Hebel. Weitere Änderungen wären eigene Experimente – "
                               "sonst ist das Ergebnis keiner Ursache zuzuordnen.",
             "missing_evidence": missing, "route": known_route(f),
@@ -832,6 +934,83 @@ def _outcome(row, before, after, base):
 
 
 # ----------------------------------------------------------------------------- orchestration
+# ----------------------------------------------------------------------------- Feasibility
+def playlist_inventory(session, today):
+    """What do we actually know about our own playlists? Unknown is not the same as none."""
+    rows = list(session.scalars(select(ChannelPlaylist)))
+    checked = None
+    for run in session.scalars(select(DiscoveryRun).order_by(DiscoveryRun.id.desc()).limit(10)):
+        day = (run.stats or {}).get("playlists_checked_day")
+        if day:
+            checked = day
+            break
+    fresh = False
+    if checked:
+        try:
+            fresh = (today-date.fromisoformat(str(checked))).days <= PLAYLIST_STALE_DAYS
+        except ValueError:
+            fresh = False
+    items = [{"id": r.id, "title": r.title, "item_count": r.item_count, "privacy": r.privacy,
+              "last_seen_day": str(r.last_seen_day)} for r in rows]
+    if items:
+        return {"state": "available", "items": items, "checked_day": checked,
+                "note": f"{len(items)} eigene Playlist(s) laut API-Inventar vom {checked}."}
+    if fresh:
+        return {"state": "none", "items": [], "checked_day": checked,
+                "note": f"Inventar vom {checked}: der Kanal hat keine Playlist. Eine bestehende Playlist kann "
+                        "deshalb nicht Voraussetzung eines Experiments sein."}
+    return {"state": "unknown", "items": [], "checked_day": checked,
+            "note": "Playlists wurden noch nicht abgefragt – Existenz unbekannt, also keine Voraussetzung."}
+
+
+def source_candidates(contexts, exclude_id, limit=3):
+    """Own videos that are actually delivered – only those can pass traffic on via end screen or card."""
+    out = []
+    for c in contexts:
+        video, f = c["history"].video, c.get("features") or {}
+        if video.id == exclude_id:
+            continue
+        impressions, views = f.get("impressions_7d") or 0, f.get("views_7d") or 0
+        if impressions <= 0 and views <= 0:
+            continue    # Ein Video ohne eigene Auslieferung kann keine weitergeben.
+        out.append({"video_id": video.id, "title": video.title, "impressions_7d": impressions, "views_7d": views,
+                    "evidence": f"{views} Views und {impressions} Impressions in der letzten bekannten Woche"})
+    return sorted(out, key=lambda x: (-x["impressions_7d"], -x["views_7d"]))[:limit]
+
+
+def unique_source(candidates):
+    """One clearly best delivered video, or None – then the choice belongs to a human, not to a guess."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    lead = max(candidates[0]["impressions_7d"], candidates[0]["views_7d"])
+    second = max(candidates[1]["impressions_7d"], candidates[1]["views_7d"])
+    return candidates[0] if lead >= SOURCE_LEAD_FACTOR*max(1, second) else None
+
+
+def feasible_lever(channel):
+    """Which distribution lever can actually be executed with resources whose existence is verified?"""
+    channel = channel or {}
+    candidates = channel.get("source_candidates") or []
+    playlists = channel.get("playlists") or {"state": "unknown", "items": []}
+    if candidates:
+        chosen = channel.get("source")
+        if chosen:
+            return "link_from_own_video", (f"Belegtes Quellvideo: „{chosen['title']}“ ({chosen['evidence']}).")
+        return "link_from_own_video", ("Mehrere real existierende Quellvideos kommen infrage – die Auswahl trifft ein "
+                                       "Mensch, das System rät nicht.")
+    if playlists.get("state") == "available":
+        return "place_in_existing_playlist", (f"Real existierende Playlist: „{playlists['items'][0]['title']}“.")
+    if playlists.get("state") == "none":
+        # Geprüft und nachweislich keine Playlist: das Anlegen ist dann selbst das Experiment.
+        return "create_playlist_context", ("Keine belegte Ressource vorhanden: weder ein ausgeliefertes eigenes Quellvideo "
+                                           f"noch eine Playlist. {playlists.get('note', '')}").strip()
+    # Ungeprüft ist nicht „nicht vorhanden“: dann wird nichts behauptet und nichts vorgeschlagen.
+    return None, ("Ressourcenlage ungeprüft: kein eigenes Video mit messbarer Auslieferung, und das Playlist-Inventar "
+                  "wurde noch nicht abgefragt.")
+
+
 def delivery_leader(contexts, exclude_id):
     """The own video that is actually delivered best – the only credible place to link a starved video from."""
     best = None
@@ -849,6 +1028,7 @@ def run(session, now, contexts, base, budget=None):
     """One growth pass: evaluate old actions, score, decide and write today's plan. Idempotent per day."""
     today = pacific_day(now)
     by_id = {c["history"].video.id: c["history"] for c in contexts}
+    playlists = playlist_inventory(session, today)
     evaluated = evaluate_actions(session, now, by_id, base)
     session.flush()
     record = track_record(session)
@@ -866,6 +1046,9 @@ def run(session, now, contexts, base, budget=None):
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})
         # Nur ein vom Menschen bestätigt gestartetes Experiment hält ein Video. Ein Vorschlag ist nur ein
         # Vorschlag: das System kann auf YouTube nichts ausführen, also läuft ohne Bestätigung auch nichts.
+        candidates = source_candidates(contexts, video.id)
+        channel = {"delivery_leader": delivery_leader(contexts, video.id), "playlists": playlists,
+                   "source_candidates": candidates, "source": unique_source(candidates)}
         running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING)
                                  .order_by(GrowthAction.started_day.desc()))
         proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == PROPOSED)
@@ -876,9 +1059,9 @@ def run(session, now, contexts, base, budget=None):
             details = {**running.payload, "notes": notes, "held_since": str(running.started_day)}
             current = running
         else:
-            action, notes = choose_action(state, f, rev, base, c.get("experiments", []), record, external)
+            action, notes = choose_action(state, f, rev, base, c.get("experiments", []), record, external, channel)
             details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, c.get("experiments", []), external,
-                                     channel={"delivery_leader": delivery_leader(contexts, video.id)}, title=video.title)
+                                     channel=channel, title=video.title)
             if proposed and proposed.action != action:
                 # Ein nicht gestarteter Vorschlag wird täglich neu entschieden, statt ein Video zu blockieren.
                 proposed.status, proposed.outcome = "superseded", "inconclusive"
@@ -926,6 +1109,8 @@ def run(session, now, contexts, base, budget=None):
             "stop_criterion": details["stop_criterion"], "steps": details.get("steps"), "baseline": details.get("baseline"),
             "missing_evidence": details.get("missing_evidence") or [], "route": details.get("route"),
             "primary_lever": details.get("primary_lever"), "deferred_levers": details.get("deferred_levers") or [],
+            "requires": details.get("requires"), "choices": details.get("choices"),
+            "needs_human_choice": bool(details.get("needs_human_choice")),
             "action_id": current.id if current else None, "action_status": current.status if current else PROPOSED,
             "started_day": str(current.started_day) if current and current.started_day else None,
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
@@ -984,6 +1169,8 @@ def queue_entry(row, rank, today):
                          "missing": row.get("missing_evidence") or []},
             "baseline": row.get("baseline"), "steps": row.get("steps") or [],
             "primary_lever": row.get("primary_lever"), "deferred_levers": row.get("deferred_levers") or [],
+            "requires": row.get("requires"), "choices": row.get("choices"),
+            "needs_human_choice": bool(row.get("needs_human_choice")),
             "one_lever_note": "Genau ein veränderlicher Hebel; alles Weitere ist ein eigenes Experiment.",
             "context_status": ("belegt" if (ext.get("context_usable") if ext else False) else
                                "Hypothese – gibt keinen Wortlaut vor" if ext else "kein externer Kontext"),

@@ -133,6 +133,20 @@ class YouTube:
             rows.extend(result.get("items", []))
         return rows
 
+    def own_playlists(self, max_pages=4):
+        """Die eigenen Playlists (read-only, 1 Einheit je Seite). Ohne diese Liste ist ihre Existenz unbekannt,
+        und ein Experiment darf keine Playlist voraussetzen, die es vielleicht gar nicht gibt."""
+        rows, token, pages = [], None, 0
+        while pages < max_pages:
+            result = self.execute(self.data.playlists().list(part="snippet,contentDetails,status", mine=True,
+                                                             maxResults=50, pageToken=token))
+            rows.extend(result.get("items", []))
+            token = result.get("nextPageToken")
+            pages += 1
+            if not token:
+                break
+        return rows
+
     def channels_by_id(self, ids):
         rows = []
         ids = list(dict.fromkeys(ids))

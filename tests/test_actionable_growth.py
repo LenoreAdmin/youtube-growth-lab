@@ -21,12 +21,18 @@ def starved(**changes):
                        "retention_avg": .55, "velocity_7d": 2.6, **changes})
 
 
-def details_for(action, f, notes, external=None, title="Trainstories"):
+SOURCE = {"video_id": "b", "title": "Shine On", "impressions_7d": 900, "views_7d": 120,
+          "evidence": "120 Views und 900 Impressions in der letzten bekannten Woche"}
+# Belegte Ressourcenlage: genau ein deutlich bestausgeliefertes eigenes Video, Inventar geprueft, keine Playlist.
+CHANNEL = {"delivery_leader": SOURCE, "source_candidates": [SOURCE], "source": SOURCE,
+           "playlists": {"state": "none", "items": [], "checked_day": str(TODAY),
+                         "note": "Inventar geprueft: der Kanal hat keine Playlist."}}
+
+
+def details_for(action, f, notes, external=None, title="Trainstories", channel=None):
     board = ge.scores(f, {"regime": "stable"}, BASE, [], None, None)
     return ge.action_details(action, "needs_distribution", f, {"regime": "stable"}, BASE, board, {"candidate": False, "signals": []},
-                            None, CONF, notes, [], external,
-                            channel={"delivery_leader": {"video_id": "b", "title": "Shine On", "impressions_7d": 900, "views_7d": 120}},
-                            title=title)
+                            None, CONF, notes, [], external, channel=channel or CHANNEL, title=title)
 
 
 # ---------------------------------------------------------------------------- Evidenzstufen
@@ -98,33 +104,25 @@ def test_distribution_comes_first_when_the_package_already_works():
     assert scarce is True and detail["impressions_7d"] == 40 and detail["threshold"] == ge.LOW_IMPRESSIONS_7D
     state = ge.state_of(f, {"regime": "stable"}, BASE, {"candidate": False})
     assert state == "needs_distribution" and state not in ge.INACTIVE_STATES
-    action, notes = ge.choose_action(state, f, {"signals": []}, BASE, [], {})
-    assert action == "distribute_playlist_context"
+    action, notes = ge.choose_action(state, f, {"signals": []}, BASE, [], {}, None, CHANNEL)
+    assert action == "link_from_own_video"
     assert action not in ("test_thumbnail", "test_title", "test_title_thumbnail"), "kein erzwungener Packaging-Test"
     assert action not in ge.PASSIVE_ACTIONS and any("Paket ist nicht der Engpass" in n for n in notes)
     d = details_for(action, f, notes)
     assert "Titel" in d["do_not_change"] and "Thumbnail" in d["do_not_change"]
     assert d["target_metric"] == "discovery_views_7d" and d["window_days"] == 14
-    assert any("Playlist" in s for s in d["steps"]) and any("Shine On" in s for s in d["steps"])
-    # Thema und Oberflaeche bleiben getrennt: die Traffic-Route ist kein Playlist-Thema.
-    # Bestehende eigene Playlist, kein erfundener fremder Kontext, plus die belegte eigene Route als Ansatzpunkt.
-    assert any("Bestehende, thematisch passende Sealand-Playlist" in s and "Ansatzpunkt laut eigenen Daten: Empfehlungen" in s
-               for s in d["steps"])
-    assert any("Keine neue Playlist anlegen" in s for s in d["steps"])
-    # Mit benannter Audience steht das Thema im Schritt, nicht die Route.
-    named = details_for("distribute_playlist_context", f, [], {"audience": "train journey music", "actionable": True,
-                                                              "evidence_level": "multi_signal_proxy", "score": 65,
-                                                              "context_usable": True})
-    # Die belegte Audience hilft nur bei der AUSWAHL der bestehenden Playlist; Text wird nicht geaendert.
-    assert any("passend zu „train journey music“" in s for s in named["steps"])
-    assert "Beschreibung" in named["do_not_change"]
+    # Nur die belegte Ressource: das konkret benannte Quellvideo, keine erfundene Playlist.
+    assert any("Shine On" in s and "Endscreen" in s for s in d["steps"])
+    assert all("Playlist" not in s for s in d["steps"]), "der Kanal hat keine Playlist"
+    assert d["requires"]["kind"] == "source_video" and d["requires"]["verified"] is True
+    assert d["requires"]["named"] == ["Shine On"] and d["needs_human_choice"] is False
     # Ohne belegtes Thema bleibt der Wortlaut neutral, obwohl eine Audience benannt waere.
-    unproven = details_for("distribute_playlist_context", f, [], {"audience": "Shine Jesus Shine", "actionable": True,
+    unproven = details_for("link_from_own_video", f, [], {"audience": "Shine Jesus Shine", "actionable": True,
                                                                  "evidence_level": "multi_signal_proxy", "score": 65,
                                                                  "context_usable": False})
     assert all("Shine Jesus Shine" not in s for s in unproven["steps"])
     # Ein Hebel: die Beschreibung wird in diesem Experiment nicht angefasst.
-    assert "Beschreibung" in d["do_not_change"] and "interne Verlinkung" in d["primary_lever"]
+    assert "Beschreibung" in d["do_not_change"] and d["primary_lever"].startswith("Endscreen/Infokarte")
     assert any("Beschreibungstext" in x for x in d["deferred_levers"])
     assert all("Beschreibung" not in s or "unverändert" in s for s in d["steps"])
     assert d["baseline"]["impressions_7d"] == 40 and d["baseline"]["ctr_7d"] == .08
@@ -156,18 +154,19 @@ def test_observe_is_never_the_end_state_when_delivery_is_practically_zero():
 def test_without_a_route_the_system_names_the_missing_evidence_and_probes_it():
     f = starved(traffic_total_7d=4)            # unter MIN_ROUTE_VIEWS: keine Route benennbar
     assert ge.known_route(f) is None
-    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {})
+    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, None, CHANNEL)
     assert action == "probe_missing_evidence" and action not in ge.PASSIVE_ACTIONS
     assert any("Keine belastbare Hypothese" in n for n in notes)
     d = details_for(action, f, notes)
     assert d["target_metric"] == "impressions_7d", "gemessen wird die Auslieferung selbst"
     assert any("Aggregationsschwelle" in m for m in d["missing_evidence"])
-    assert any("Playlist" in s for s in d["steps"]) and any("Endscreen" in s for s in d["steps"])
+    assert any("Endscreen" in s and "Shine On" in s for s in d["steps"])
+    assert all("Playlist" not in s for s in d["steps"])
     assert "Impressions" in d["success_criterion"] and "Titel" in d["do_not_change"]
     # Fehlende Evidenz aus V6 wird woertlich uebernommen, wenn vorhanden.
     external = {"missing_evidence": [{"family": "own_term_demand", "what": "Eigene Suchbegriff-Details"}], "actionable": False,
                 "evidence_level": "weak_proxy", "score": 40}
-    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, external)[0] == "probe_missing_evidence"
+    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, external, CHANNEL)[0] == "probe_missing_evidence"
     assert details_for("probe_missing_evidence", f, [], external)["missing_evidence"] == ["Eigene Suchbegriff-Details"]
 
 
@@ -177,17 +176,17 @@ def test_multi_signal_proxy_may_steer_the_action_but_a_single_proxy_may_not():
               "evidence_level": "multi_signal_proxy", "actionable": True, "demand_source": "own_traffic_plus_public_proxy",
               "audience": "train journey music", "families": ["own_traffic_mix", "search_probe"], "uncertainty": "mittel"}
     strong["context_usable"] = True
-    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, strong)
+    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, strong, CHANNEL)
     assert action == "target_search_opportunity" and "multi_signal_proxy" in notes[0]
     # Dieselbe Chance ohne belegtes Thema: kein Wortlaut-Experiment, sondern der interne Verteilungstest.
     hypothesis = {**strong, "context_usable": False, "context_reason": "Nur 1 gemeinsames Stichwort", "key": "shine"}
-    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, hypothesis)
-    assert action == "distribute_playlist_context"
+    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, hypothesis, CHANNEL)
+    assert action == "link_from_own_video"
     assert any("bleibt Hypothese und lenkt keinen Wortlaut" in n for n in notes)
     weak = {**strong, "score": discovery.PROXY_SCORE_CAP, "evidence_level": "weak_proxy", "actionable": False,
-            "families": ["search_probe"]}
+            "families": ["search_probe"], "context_usable": False}
     # Der einzelne Proxy lenkt nichts – die Verteilung bleibt trotzdem das Thema, nicht Beobachten.
-    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, weak)[0] == "distribute_playlist_context"
+    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, weak, CHANNEL)[0] == "link_from_own_video"
 
 
 # ---------------------------------------------------------------------------- Queue
@@ -323,7 +322,7 @@ def test_a_starved_video_produces_an_executable_experiment_in_the_plan(monkeypat
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
     entry = next((q for q in plan["queue"] if q["video_id"] == "a"), None)
     assert entry is not None, f"kein ausführbares Experiment: {[ (r['video_id'], r['state'], r['action']) for r in plan['ranking'] ]}"
-    assert entry["action"] in ("distribute_playlist_context", "probe_missing_evidence")
+    assert entry["action"] in ("link_from_own_video", "probe_missing_evidence")
     assert entry["steps"] and entry["executed_automatically"] is False
     assert entry["baseline"]["impressions_7d"] == 42 and entry["window_days"] == 14
     assert "Titel" in entry["do_not_change"] and "Thumbnail" in entry["do_not_change"]

@@ -17,8 +17,8 @@ import isodate
 from sqlalchemy import select, func
 from googleapiclient.errors import HttpError
 from .db import Session
-from .models import (Video, TrafficDaily, DiscoveryRun, DiscoveryQuota, DiscoveryQuery, DiscoveryItem, DiscoveryChannel,
-                     DiscoverySignal, DiscoveryOpportunity, LearningDataset, utcnow)
+from .models import (Video, TrafficDaily, ChannelPlaylist, DiscoveryRun, DiscoveryQuota, DiscoveryQuery, DiscoveryItem,
+                     DiscoveryChannel, DiscoverySignal, DiscoveryOpportunity, LearningDataset, utcnow)
 from .backfill import upsert, classify as classify_error
 from .budget import Budget, SyncBudgetExceeded
 from .jobs import acquire, release
@@ -316,6 +316,31 @@ def probe_queries(session, client, quota, videos, now, budget, stats):
             stats["failures"] += 1
 
 
+def collect_playlists(session, client, quota, now, budget, stats):
+    """Inventory of our own playlists (1 unit). Only what is listed here may be used as an existing resource."""
+    if budget:
+        budget.check()
+    if not hasattr(client, "own_playlists"):
+        return None
+    today = pacific_day(now)
+    quota.spend(LIST_COST)
+    seen = []
+    for item in client.own_playlists():
+        snippet, details = item.get("snippet", {}), item.get("contentDetails", {})
+        statement = upsert(session, ChannelPlaylist).values(id=item["id"], title=(snippet.get("title") or "")[:256],
+            item_count=details.get("itemCount"), privacy=(item.get("status", {}) or {}).get("privacyStatus"),
+            first_seen_day=today, last_seen_day=today, checked_at=utcnow())
+        session.execute(statement.on_conflict_do_update(index_elements=["id"], set_={
+            "title": statement.excluded.title, "item_count": statement.excluded.item_count,
+            "privacy": statement.excluded.privacy, "last_seen_day": statement.excluded.last_seen_day,
+            "checked_at": statement.excluded.checked_at}))
+        seen.append(item["id"])
+    stats["playlists"] = len(seen)
+    stats["playlists_checked_day"] = str(today)
+    session.commit()
+    return seen
+
+
 def collect_channels(session, client, quota, now, budget, stats):
     today = pacific_day(now)
     ids = set(x for x in session.scalars(select(DiscoveryItem.channel_id)) if x)
@@ -362,7 +387,8 @@ def run(client, now=None, budget=None, force=False):
 
 def _run(client, now, budget, force):
     today = pacific_day(now)
-    issues, stats = [], {"signals": 0, "neighbors": 0, "searches": 0, "channels": 0, "failures": 0, "opportunities": 0, "evaluated": 0}
+    issues, stats = [], {"signals": 0, "neighbors": 0, "searches": 0, "channels": 0, "failures": 0, "opportunities": 0,
+                         "evaluated": 0, "playlists": None}
     with Session() as s:
         done_today = s.scalar(select(DiscoveryRun).where(DiscoveryRun.day == today, DiscoveryRun.status.in_(["ok", "throttled", "quota_exhausted"])))
         if done_today and not force:
@@ -378,6 +404,14 @@ def _run(client, now, budget, force):
             videos = list(s.scalars(select(Video).where(Video.active.is_(True))))
             collect_signals(s, client, videos, now, budget, stats)
             tags = own_tags(s, client, quota, videos, budget)
+            try:
+                collect_playlists(s, client, quota, now, budget, stats)
+            except (SyncBudgetExceeded, QuotaExhausted, Throttled):
+                raise
+            except Exception as exc:
+                # Ohne Inventar bleibt die Playlist-Existenz unbekannt; der Rest des Laufs ist davon unberührt.
+                s.rollback()
+                issues.append(f"playlists: {type(exc).__name__}")
             collect_neighbors(s, client, quota, now, budget, stats)
             seed_queries(s, videos, tags, today)
             probe_queries(s, client, quota, videos, now, budget, stats)

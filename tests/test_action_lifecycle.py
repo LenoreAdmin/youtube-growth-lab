@@ -157,14 +157,15 @@ def test_a_changed_decision_on_the_same_day_keeps_one_startable_proposal(monkeyp
     """Sonst zeigte die Queue auf eine bereits ersetzte Zeile und der Start-Klick lief ins Leere."""
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=3, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)      # belegtes Quellvideo fuer die interne Verlinkung
     stale = action_row(session, "a", action="improve_discovery", created_day=TODAY)
     histories = {h.video.id: h for h in history.load(session)}
     rows, _ = history.build(history.load(session), 168, LAG)
     base = regimes.baselines(rows)
-    contexts = [{"video": session.get(Video, "a"), "history": histories["a"],
-                 "features": history.features_at(histories["a"], TODAY),
-                 "regime": regimes.classify(history.features_at(histories["a"], TODAY), base), "forecasts": [],
-                 "experiments": [], "recommendation": {"confidence": CONF}}]
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": history.features_at(histories[v], TODAY),
+                 "regime": regimes.classify(history.features_at(histories[v], TODAY), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}} for v in ("a", "b")]
     ge.run(session, NOW, contexts, base)
     session.expire_all()
     open_rows = list(session.scalars(select(GrowthAction).where(GrowthAction.video_id == "a", GrowthAction.status == ge.PROPOSED)))
@@ -181,14 +182,15 @@ def test_an_open_proposal_always_carries_the_current_steps(monkeypatch, session)
     """Sonst zeigte die Queue neue Schritte, waehrend der Start die alten einfriert."""
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=3, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)      # belegtes Quellvideo fuer die interne Verlinkung
     stale = action_row(session, "a", created_day=TODAY, payload={"steps": ["Alter Schritt"], "baseline": {}})
     rows, _ = history.build(history.load(session), 168, LAG)
     base = regimes.baselines(rows)
     histories = {h.video.id: h for h in history.load(session)}
-    contexts = [{"video": session.get(Video, "a"), "history": histories["a"],
-                 "features": history.features_at(histories["a"], TODAY),
-                 "regime": regimes.classify(history.features_at(histories["a"], TODAY), base), "forecasts": [],
-                 "experiments": [], "recommendation": {"confidence": CONF}}]
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": history.features_at(histories[v], TODAY),
+                 "regime": regimes.classify(history.features_at(histories[v], TODAY), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}} for v in ("a", "b")]
     ge.run(session, NOW, contexts, base)
     session.expire_all()
     row = session.get(GrowthAction, stale.id)

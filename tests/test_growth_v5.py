@@ -74,12 +74,15 @@ def test_action_engine_protects_winners_and_never_stacks_experiments():
     assert ge.choose_action("needs_packaging_test", features(ctr_7d=.02), {"signals": []}, BASE, [], {})[0] == "test_thumbnail"
     assert ge.choose_action("needs_packaging_test", features(ctr_7d=None), {"signals": []}, BASE, [], {})[0] == "test_title"
     assert ge.choose_action("needs_retention_analysis", f, {"signals": []}, BASE, [], {})[0] == "investigate_retention"
-    assert ge.choose_action("needs_discovery", f, {"signals": []}, BASE, [], {})[0] == "improve_discovery"
-    assert ge.choose_action("scale_opportunity", f, {"signals": []}, BASE, [], {})[0] == "cross_promote"
+    from test_actionable_growth import CHANNEL
+    # Interne Verlinkung setzt ein belegtes Quellvideo voraus; ohne Ressourcenlage wird nichts behauptet.
+    assert ge.choose_action("needs_discovery", f, {"signals": []}, BASE, [], {}, None, CHANNEL)[0] == "improve_discovery"
+    assert ge.choose_action("needs_discovery", f, {"signals": []}, BASE, [], {})[0] == "observe"
+    assert ge.choose_action("scale_opportunity", f, {"signals": []}, BASE, [], {}, None, CHANNEL)[0] == "cross_promote"
     assert ge.choose_action("revival_candidate", f, {"signals": ["erneute Beschleunigung über Kanal-q75", "Search-Anteil über Kanalmedian"]}, BASE, [], {})[0] == "protect_no_change"
     assert ge.choose_action("revival_candidate", features(ctr_7d=.02, age_days=800), {"signals": ["Packaging-/CTR-Schwäche bei guten Qualitätswerten", "x"]}, BASE, [], {})[0] == "test_title_thumbnail"
     assert ge.choose_action("revival_candidate", features(ctr_7d=.02, age_days=200), {"signals": ["Packaging-/CTR-Schwäche bei guten Qualitätswerten", "x"]}, BASE, [], {})[0] == "test_thumbnail"
-    assert ge.choose_action("revival_candidate", f, {"signals": ["Search-Anteil über Kanalmedian", "y"]}, BASE, [], {})[0] == "improve_discovery"
+    assert ge.choose_action("revival_candidate", f, {"signals": ["Search-Anteil über Kanalmedian", "y"]}, BASE, [], {}, None, CHANNEL)[0] == "improve_discovery"
     assert ge.choose_action("paid_excluded", f, {"signals": []}, BASE, [], {})[0] == "observe"
     # A net-negative observed track record demotes an action to observe; protection is never demoted.
     record = {"test_thumbnail": {"positive": 0, "negative": 3, "n": 3, "net_negative": True}, "protect_no_change": {"positive": 0, "negative": 3, "n": 3, "net_negative": True}}

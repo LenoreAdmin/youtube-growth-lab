@@ -203,7 +203,8 @@ def test_external_opportunity_steers_v5_action_but_never_overrides_protection():
     assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "actionable": False, "evidence_level": "weak_proxy"})[0] == "observe"
     assert ge.choose_action("needs_discovery", f, {"signals": []}, base, [], {}, {**strong, "gap": "suggested_opportunity", "kind": "suggested"})[0] == "target_suggested_cluster"
     assert ge.choose_action("needs_packaging_test", f, {"signals": []}, base, [], {}, {**strong, "gap": "packaging_opportunity"})[0] == "packaging_for_audience"
-    assert ge.choose_action("revival_candidate", f, {"signals": ["x", "y"]}, base, [], {}, strong)[0] == "revive_existing_video"
+    from test_actionable_growth import CHANNEL
+    assert ge.choose_action("revival_candidate", f, {"signals": ["x", "y"]}, base, [], {}, strong, CHANNEL)[0] == "revive_existing_video"
     assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "gap": "followup_content_opportunity"})[0] == "create_followup_content"
     assert ge.choose_action("protect_momentum", f, {"signals": []}, base, [], {}, strong)[0] == "protect_no_change"
     assert ge.choose_action("paid_cooldown", {**f, "paid": {"days_until_clean": 5}}, {"signals": []}, base, [], {}, strong)[0] == "observe"

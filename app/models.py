@@ -415,6 +415,18 @@ class DiscoveryQuota(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ChannelPlaylist(Base):
+    """Own playlists as reported by the API. Absence of rows means unknown, never "none exist"."""
+    __tablename__ = "channel_playlists"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256))
+    item_count: Mapped[int | None] = mapped_column(Integer)
+    privacy: Mapped[str | None] = mapped_column(String(32))
+    first_seen_day: Mapped[date] = mapped_column(Date)
+    last_seen_day: Mapped[date] = mapped_column(Date, index=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class DiscoveryQuery(Base):
     """Search probe cache: each normalised query is probed at most once per REPROBE_DAYS."""
     __tablename__ = "discovery_queries"

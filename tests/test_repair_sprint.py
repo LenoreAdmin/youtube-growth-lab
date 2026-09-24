@@ -183,9 +183,12 @@ def test_activity_floor_prevents_protect_momentum_on_a_dead_video(monkeypatch, s
     for noisy in ("Tempo 7d vs 28d (Kanalquantile)", "Wochenbeschleunigung", "Regime V4",
                   "Live-Momentum (Snapshots, V2)", "V4-Prognose 7d vs Baseline"):
         assert comps[noisy]["available"] is False, noisy
-    action, notes = ge.choose_action(state, f, {"signals": []}, base, [], {})
-    # Kein Packaging-Test und kein Beobachten: ein Distributions- oder Evidenzexperiment.
-    assert action in ("distribute_playlist_context", "probe_missing_evidence") and action not in ge.PASSIVE_ACTIONS
+    from test_actionable_growth import CHANNEL
+    action, notes = ge.choose_action(state, f, {"signals": []}, base, [], {}, None, CHANNEL)
+    # Kein Packaging-Test und kein Beobachten: ein Distributions- oder Evidenzexperiment mit belegter Ressource.
+    assert action in ("link_from_own_video", "probe_missing_evidence") and action not in ge.PASSIVE_ACTIONS
+    # Ohne geprueftes Inventar und ohne belegtes Quellvideo wird nichts behauptet.
+    assert ge.choose_action(state, f, {"signals": []}, base, [], {}, None, None)[0] == "observe"
     assert any("Auslieferung zu gering" in n for n in notes)
     # Und im Plan: niemals geschützt, sondern aktiv handelbar.
     row = {"video_id": "a", "title": "A", "state": state, "regime": regime["regime"], "breakout": False, "action": action,
