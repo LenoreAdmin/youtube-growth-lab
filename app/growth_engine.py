@@ -454,6 +454,7 @@ def distribution_action(f, base, external):
     ok, why = packaging_ok(f, base)
     route = known_route(f)
     _, detail = distribution_scarce(f, base)
+    why = why.rstrip(".")
     head = f"Auslieferung zu gering ({detail.get('basis')}): "+(f"Paket ist nicht der Engpass – {why}." if ok else why+".")
     rejected = []
     if external and external.get("actionable") and not external.get("context_usable"):
