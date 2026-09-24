@@ -420,3 +420,25 @@ def test_a_proposal_is_withdrawn_when_its_surface_stops_carrying_traffic(session
     assert "nie ausgeführt" in withdrawn.evaluation["note"]
     assert [d["action_id"] for d in result["dropped"]] == [row.id]
     assert aq.overview(session, later)["traffic_queue"] == []
+
+
+def test_the_theme_vocabulary_comes_from_the_neighbourhood_not_only_the_own_title(session):
+    """„Sealand Trainstories“ ergibt ein einziges Wort – die Nachbarvideos beschreiben das Thema belegt."""
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.add(DiscoveryItem(video_id="NEIGHBOUR01", channel_id="UCN", title="Night train ambient journey",
+                              channel_title="Rail Nights", views=120000, tags=[],
+                              via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY, last_seen_day=TODAY,
+                              seen_count=1))
+    session.commit()
+    thin = aq.own_vocabulary(session)
+    assert thin["a"] == {"trainstories"}, "aus dem Titel allein wird nichts"
+    signal(session, "a", "own_suggested_source", "NEIGHBOUR01", 3)
+    rich = aq.own_vocabulary(session)
+    assert {"night", "train", "ambient", "journey"} <= rich["a"], "die belegte Nachbarschaft liefert das Thema"
+    # Damit findet die Kandidatensuche ueberhaupt etwas.
+    candidate(session, "CAND0000001", "UC1", "Night train journey relaxing", 60000, channel_title="Rail One")
+    candidate(session, "CAND0000002", "UC2", "Ambient night train ride", 80000, channel_title="Rail Two")
+    session.commit()
+    aq.collect(session, NOW, http=FakeHttp())
+    found = {r.key for r in session.scalars(select(TrafficSurface).where(TrafficSurface.kind == "candidate_video"))}
+    assert found == {"CAND0000001", "CAND0000002"}

@@ -248,15 +248,34 @@ def score_candidate(shared_tokens, item_views, subscribers, weight=1.0):
     return round(max(0.0, min(100.0, raw*weight)), 1)
 
 
+MAX_VOCAB_TOKENS = 30
+
+
 def own_vocabulary(session):
-    """Unser Thema in Worten: eigene Titel plus die realen Suchbegriffe, über die wir gefunden werden."""
+    """Unser Thema in Worten – und zwar nicht nur aus dem eigenen Titel.
+
+    Ein Titel wie „Sealand Trainstories“ ergibt nach Stoppwörtern ein einziges Wort; damit ist keine
+    Themenähnlichkeit prüfbar. Die tragfähigere Quelle sind die Videos, neben die YouTube uns tatsächlich
+    stellt und aus denen messbar Zuschauer kamen: deren Titel beschreiben unsere Nachbarschaft belegt.
+    """
     from .discovery import tokens as split
     vocab = {}
     for video in session.scalars(select(Video).where(Video.active.is_(True))):
         vocab[video.id] = set(split(video.title))
     for row in session.scalars(select(DiscoverySignal).where(DiscoverySignal.kind == "own_search_term")):
         vocab.setdefault(row.video_id, set()).update(split(row.detail))
-    return vocab
+    titles = {row.video_id: row.title for row in session.scalars(select(DiscoveryItem))}
+    counts = defaultdict(lambda: defaultdict(int))
+    for row in session.scalars(select(DiscoverySignal).where(DiscoverySignal.kind == "own_suggested_source")):
+        title = titles.get(row.detail)
+        if not title or row.views < 1:
+            continue
+        for token in split(title):
+            counts[row.video_id][token] += row.views
+    for video_id, weighted in counts.items():
+        top = sorted(weighted.items(), key=lambda kv: -kv[1])[:MAX_VOCAB_TOKENS]
+        vocab.setdefault(video_id, set()).update(token for token, _ in top)
+    return {video_id: set(list(words)[:MAX_VOCAB_TOKENS*2]) for video_id, words in vocab.items()}
 
 
 def candidate_matches(session, vocab):
@@ -285,15 +304,15 @@ def collect_candidates(session, vocab, learned, store):
     """
     matches = candidate_matches(session, vocab)
     channels = {row.channel_id: row for row in session.scalars(select(DiscoveryChannel))}
-    groups = defaultdict(set)
-    for item, video_id, shared in matches:
-        if item.channel_id:
-            groups[(video_id, shared)].add(item.channel_id)
     seen_channels = set()
     for item, video_id, shared in sorted(matches, key=lambda m: -(m[0].views or 0)):
-        members = sum(1 for other, other_video, other_shared in matches
-                      if other_video == video_id and other_shared == shared)
-        distinct = len(groups[(video_id, shared)])
+        # Korroboration auf Themenebene: andere Treffer desselben Videos, die mindestens zwei Begriffe
+        # mit diesem teilen. Identische Wortmengen zu verlangen waere zu streng – Titel sind verschieden.
+        related = [(other, other_channel) for other, other_video, other_shared in matches
+                   for other_channel in [other.channel_id]
+                   if other_video == video_id and len(set(other_shared) & set(shared)) >= MIN_SHARED_TOKENS]
+        members = len(related)
+        distinct = len({channel for _, channel in related if channel})
         if members < 2 or distinct < 2:
             continue        # Ein einzelner Treffer ist Zufall, nicht ein Thema.
         channel = channels.get(item.channel_id)
