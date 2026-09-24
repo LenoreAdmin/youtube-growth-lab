@@ -121,7 +121,8 @@ def test_run_writes_scores_actions_plan_and_holds_actions_until_evaluated(monkey
     assert session.scalar(select(func.count()).select_from(GrowthAction)) == 2
     assert session.scalar(select(func.count()).select_from(GrowthScore)) == 2
     first = {r.video_id: r for r in session.scalars(select(GrowthAction))}
-    assert all(r.status == "pending" and r.action in ge.ACTIONS and r.state in ge.STATES for r in first.values())
+    # Neu erzeugte Maßnahmen sind Vorschlaege, keine laufenden Experimente.
+    assert all(r.status == "proposed" and r.action in ge.ACTIONS and r.state in ge.STATES for r in first.values())
     # Second run the same day and the next day: idempotent, the pending action is held.
     learning.refresh(session, NOW+timedelta(hours=1))
     monkeypatch.setattr(learning, "REBUILD_HOURS", 10**6)
@@ -138,7 +139,7 @@ def test_run_writes_scores_actions_plan_and_holds_actions_until_evaluated(monkey
         assert held["action"] == first["a"].action and held["held_since"] == str(TODAY)
     view = ge.overview(session)
     assert view["plan"]["priority_video_id"] and view["scores"]["a"]["opportunity"]["components"] and view["read_only"] is True
-    assert view["actions"]["a"][0]["status"] == "pending"
+    assert view["actions"]["a"][0]["status"] == "proposed"
 
 
 def test_protect_supersedes_pending_test_and_plan_prefers_winner(monkeypatch, session):
@@ -146,7 +147,7 @@ def test_protect_supersedes_pending_test_and_plan_prefers_winner(monkeypatch, se
     seed_history(session, "a", days=400)
     seed_history(session, "b", days=400, base=200, seed=3)
     session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=2), version="t", state="needs_packaging_test", action="test_title",
-        target_metric="views_7d", window_days=14, evaluate_after=TODAY+timedelta(days=15), status="pending", payload={"reason": "old"}))
+        target_metric="views_7d", window_days=14, evaluate_after=TODAY+timedelta(days=15), status="proposed", payload={"reason": "old"}))
     session.commit()
     histories = {h.video.id: h for h in history.load(session)}
     f = history.features_at(histories["a"], TODAY)
@@ -157,7 +158,7 @@ def test_protect_supersedes_pending_test_and_plan_prefers_winner(monkeypatch, se
     session.expire_all()
     rows = {(r.video_id, r.status): r for r in session.scalars(select(GrowthAction))}
     assert rows[("a", "superseded")].action == "test_title" and rows[("a", "superseded")].outcome == "inconclusive"
-    assert rows[("a", "pending")].action == "protect_no_change" and rows[("a", "pending")].state == "protect_momentum"
+    assert rows[("a", "proposed")].action == "protect_no_change" and rows[("a", "proposed")].state == "protect_momentum"
     plan = session.scalar(select(GrowthPlan)).plan
     # The winner keeps its protection and leads the momentum ranking, but never becomes the active priority.
     assert plan["ranking"][0]["video_id"] == "a" and plan["ranking"][0]["breakout"] is True and plan["ranking"][0]["active_rank"] is None
@@ -174,7 +175,8 @@ def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, s
     created = TODAY-timedelta(days=20)
     def action(video_id, act="test_title", target="views_7d"):
         row = GrowthAction(video_id=video_id, created_day=created, version="t", state="needs_packaging_test", action=act, target_metric=target,
-                           window_days=7, evaluate_after=created+timedelta(days=7+LAG), status="pending", payload={})
+                           window_days=7, evaluate_after=created+timedelta(days=7+LAG), status="running", started_day=created,
+                           started_at=NOW-timedelta(days=9), payload={})
         session.add(row)
         session.flush()
         return row
@@ -191,7 +193,7 @@ def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, s
     for i in range(1, 8):
         session.get(Daily, ("a", created+timedelta(days=i))).views = 1
     session.commit()
-    row.status = "pending"
+    row.status = "running"
     session.commit()
     ge.evaluate_actions(session, NOW, {"a": next(x for x in history.load(session) if x.video.id == "a")}, BASE)
     session.commit()
@@ -201,7 +203,7 @@ def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, s
     for i in range(1, 8):
         session.get(Daily, ("a", created+timedelta(days=i))).views = before_views[i-1]
     row = session.get(GrowthAction, row.id)
-    row.status = "pending"
+    row.status = "running"
     session.commit()
     ge.evaluate_actions(session, NOW, {"a": next(x for x in history.load(session) if x.video.id == "a")}, BASE)
     session.commit()
@@ -209,7 +211,7 @@ def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, s
     assert session.get(GrowthAction, row.id).outcome == "neutral"
     session.add(TrafficDaily(video_id="a", day=created+timedelta(days=2), source="ADVERTISING", views=5, watch_minutes=0, paid=True, fetched_at=NOW))
     row = session.get(GrowthAction, row.id)
-    row.status = "pending"
+    row.status = "running"
     session.commit()
     ge.evaluate_actions(session, NOW, {"a": next(x for x in history.load(session) if x.video.id == "a")}, BASE)
     session.commit()
@@ -217,11 +219,12 @@ def test_feedback_outcomes_positive_negative_neutral_inconclusive(monkeypatch, s
     assert session.get(GrowthAction, row.id).outcome == "inconclusive"
     # Windows not yet observed stay pending; protect counts holding momentum as positive.
     fresh = GrowthAction(video_id="a", created_day=TODAY-timedelta(days=2), version="t", state="protect_momentum", action="protect_no_change",
-                         target_metric="views_7d", window_days=7, evaluate_after=TODAY+timedelta(days=8), status="pending", payload={})
+                         target_metric="views_7d", window_days=7, evaluate_after=TODAY+timedelta(days=8), status="running",
+                         started_day=TODAY-timedelta(days=2), started_at=NOW, payload={})
     session.add(fresh)
     session.commit()
     assert ge.evaluate_actions(session, NOW, {"a": h}, BASE) == 0
-    assert session.get(GrowthAction, fresh.id).status == "pending"
+    assert session.get(GrowthAction, fresh.id).status == "running"
     record = ge.track_record(session)
     assert record["test_title"]["n"] == 1 and record["test_title"]["net_negative"] is False
 
@@ -252,7 +255,7 @@ def test_upserts_compile_for_postgresql():
     from app.backfill import upsert
     fake = SimpleNamespace(bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
     stmt = upsert(fake, GrowthAction).values(video_id="a", created_day=date(2026, 1, 1), created_at=NOW, version="v", state="observe", action="observe",
-        target_metric="views_7d", window_days=7, evaluate_after=date(2026, 1, 11), status="pending", payload={}).on_conflict_do_nothing(index_elements=["video_id", "created_day"])
+        target_metric="views_7d", window_days=7, evaluate_after=date(2026, 1, 11), status="proposed", payload={}).on_conflict_do_nothing(index_elements=["video_id", "created_day"])
     assert "ON CONFLICT (video_id, created_day) DO NOTHING" in str(stmt.compile(dialect=postgresql.dialect()))
     plan = upsert(fake, GrowthPlan).values(day=date(2026, 1, 1), version="v", created_at=NOW, plan={})
     assert "DO UPDATE SET plan = excluded.plan" in str(plan.on_conflict_do_update(index_elements=["day", "version"], set_={"plan": plan.excluded.plan}).compile(dialect=postgresql.dialect()))

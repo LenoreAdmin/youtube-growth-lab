@@ -68,8 +68,10 @@ function renderQueue(p){
   <p><strong>Erfolg:</strong> ${esc(e.success_criterion||"")}</p>
   <p><strong>Abbruch:</strong> ${esc(e.stop_criterion||"")}</p>
   <p><strong>Nicht verändern:</strong> ${(e.do_not_change||[]).map(esc).join(", ")}</p>
-  <p class="notice">${esc(e.note||"")}</p></article>`}).join("")||"<p class='muted'>Kein Vorschlag: geschützte oder laufende Videos, oder die Evidenz reicht nicht für ein konkretes Experiment.</p>";
- $("queueRunning").innerHTML=running.length?`<h3>Läuft gerade (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
+  <p class="notice">${esc(e.note||"")}</p>
+  ${e.action_id?`<button class="secondary start-experiment" data-action-id="${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren – Experiment starten")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>`:""}
+  </article>`}).join("")||"<p class='muted'>Kein Vorschlag: geschützte oder laufende Videos, oder die Evidenz reicht nicht für ein konkretes Experiment.</p>";
+ $("queueRunning").innerHTML=running.length?`<h3>Läuft – von dir als durchgeführt bestätigt (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
  $("queueResults").innerHTML=results.length?`<h3>Ergebnisse abgeschlossener Experimente</h3><ul>${results.map(r=>`<li>${esc(r.created_day)} ${esc(ACTION_LABELS[r.action]||r.action)} (${esc(r.video_id)}): <strong>${esc(OUTCOME_LABELS[r.outcome]||r.outcome||"offen")}</strong>${r.metric?` · ${esc(r.metric)} ${num(r.before)} → ${num(r.after)}${r.relative_change==null?"":" ("+(r.relative_change>=0?"+":"")+num(r.relative_change*100,0)+" %)"}`:""}${r.reason?" · "+esc(r.reason):""}<small>${esc(r.note||"")}</small></li>`).join("")}</ul>`:"";
 }
 function renderGrowth(g){
@@ -221,6 +223,15 @@ $("refresh").onclick=()=>guarded(manualSync);
 $("backfillRun").onclick=()=>guarded(backfill);
 $("learningRun").onclick=()=>guarded(learningRun);
 $("discoveryRun").onclick=()=>guarded(discoveryRun);
+async function startExperiment(button){
+ // Bestaetigung der Durchfuehrung durch den Menschen - das System aendert nichts auf YouTube.
+ if(button.disabled)return;
+ const label=button.textContent;
+ button.disabled=true;button.textContent="Wird gestartet…";
+ try{await api(`/api/growth/actions/${button.dataset.actionId}/start`,{});await load()}
+ finally{button.disabled=false;button.textContent=label}
+}
+$("queueList").addEventListener("click",e=>{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))});
 async function load(){
  state=await api("/api/dashboard");$("login").hidden=true;$("workspace").hidden=false;$("token").value="";
  $("connection").textContent=state.channels.map(c=>c.title).join(" · ")||"Wartet auf erste Synchronisierung";

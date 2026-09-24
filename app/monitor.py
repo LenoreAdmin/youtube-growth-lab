@@ -33,7 +33,8 @@ def health(session, now=None):
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.day.desc(), GrowthPlan.id.desc()))
     discovery = session.scalar(select(DiscoveryRun).order_by(DiscoveryRun.id.desc()))
     dataset = session.scalar(select(LearningDataset).order_by(LearningDataset.built_at.desc()))
-    overdue = [r for r in session.scalars(select(GrowthAction).where(GrowthAction.status == "pending"))
+    # Nur ein bestaetigt gestartetes Experiment kann ueberfaellig sein; ein Vorschlag laeuft nicht.
+    overdue = [r for r in session.scalars(select(GrowthAction).where(GrowthAction.status == "running"))
                if r.evaluate_after < today]
     checks = {
         "last_sync_status": runs[0].status if runs else None,

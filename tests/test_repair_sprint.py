@@ -128,9 +128,14 @@ def test_monitor_flags_stale_jobs_overdue_actions_and_deferred_streaks(session):
     stale = monitor.health(session, NOW+timedelta(hours=49))
     assert stale["level"] == "critical" and len(stale["warnings"]) >= 3
     assert stale["checks"]["plan_age_hours"] >= 48 and stale["checks"]["thresholds"]["stale_critical_hours"] == 48
-    # Überfällige pending Action.
+    # Überfällig ist nur ein bestaetigt gestartetes Experiment; ein Vorschlag laeuft nicht und kann nicht ueberfaellig sein.
+    session.add(GrowthAction(video_id="b", created_day=TODAY-timedelta(days=20), version="v", state="observe", action="test_title",
+                             target_metric="views_7d", window_days=7, evaluate_after=TODAY-timedelta(days=2), status="proposed", payload={}))
+    session.commit()
+    assert monitor.health(session, NOW)["checks"]["overdue_actions"] == []
     session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=20), version="v", state="observe", action="test_title",
-                             target_metric="views_7d", window_days=7, evaluate_after=TODAY-timedelta(days=2), status="pending", payload={}))
+                             target_metric="views_7d", window_days=7, evaluate_after=TODAY-timedelta(days=2), status="running",
+                             started_day=TODAY-timedelta(days=20), started_at=NOW-timedelta(days=20), payload={}))
     session.commit()
     overdue = monitor.health(session, NOW)
     assert overdue["level"] == "critical" and overdue["checks"]["overdue_actions"][0]["days_overdue"] == 2
@@ -227,7 +232,7 @@ def test_observe_does_not_block_a_later_actionable_opportunity(monkeypatch, sess
     ge.run(session, NOW, ctx(TODAY), base)
     session.expire_all()
     first = session.scalar(select(GrowthAction).order_by(GrowthAction.id.desc()))
-    assert first.action == "observe" and first.status == "pending"
+    assert first.action == "observe" and first.status == "proposed"
     session.add(DiscoveryOpportunity(day=TODAY+timedelta(days=1), kind="suggested", key="ext_neighbour", video_id="a",
         gap="suggested_opportunity", scores={"external_audience_score": 82.0, "suggested_opportunity_score": 82.0},
         components={"components": []}, evidence={"demand_source": "own_analytics", "evidence_level": "own_analytics",

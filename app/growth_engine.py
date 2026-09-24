@@ -67,6 +67,10 @@ DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags"
                  "distribute_playlist_context": ["Titel", "Thumbnail", "Videoinhalt", "Sichtbarkeit"],
                  "probe_missing_evidence": ["Titel", "Thumbnail", "Videoinhalt", "Sichtbarkeit"]}
 MIN_TRACK_RECORD = 3
+# Lebenszyklus einer Maßnahme. Ohne Bestätigung durch den Menschen bleibt sie ein Vorschlag:
+# das System hat keine Schreibrechte auf YouTube und darf deshalb nichts als "läuft" ausgeben.
+PROPOSED, RUNNING, EVALUATED, SUPERSEDED = "proposed", "running", "evaluated", "superseded"
+ACTION_STATUSES = (PROPOSED, RUNNING, EVALUATED, SUPERSEDED)
 
 
 # ----------------------------------------------------------------------------- components
@@ -427,10 +431,51 @@ def distribution_action(f, base, external):
             "Risikoarmes Experiment beschafft genau diese Evidenz, ohne das Paket zu verändern."]
 
 
+def baseline_snapshot(f):
+    """The comparison window as it stands right now – stored unchanged when an experiment starts."""
+    return {"known_end": (f or {}).get("known_end"), "views_7d": (f or {}).get("views_7d"),
+            "impressions_7d": (f or {}).get("impressions_7d"), "ctr_7d": (f or {}).get("ctr_7d"),
+            "retention_avg": (f or {}).get("retention_avg"), "traffic_total_7d": (f or {}).get("traffic_total_7d"),
+            "discovery_share": discovery_share(f) if f else None,
+            "note": "Vorher-Fenster sind die letzten 7 bekannten Analytics-Tage; Werbetage machen die Auswertung ungültig."}
+
+
+def start_action(session, action_id, now=None):
+    """The channel owner confirms they executed the proposal: freeze the baseline, start the window.
+
+    This is the only transition into `running`. The system never performs it on its own – it has no
+    write access to YouTube – and a second experiment on the same video is refused until this one is
+    evaluated, so two changes can never be measured as one.
+    """
+    from .history import load as load_histories
+    now = now or utcnow()
+    today = pacific_day(now)
+    row = session.get(GrowthAction, action_id)
+    if row is None:
+        raise LookupError("Maßnahme nicht gefunden.")
+    if row.status == RUNNING:
+        return row      # Idempotent: ein zweiter Klick startet nichts neu.
+    if row.status != PROPOSED:
+        raise ValueError(f"Nur ein offener Vorschlag kann gestartet werden; diese Maßnahme ist {row.status}.")
+    other = session.scalar(select(GrowthAction).where(GrowthAction.video_id == row.video_id, GrowthAction.status == RUNNING))
+    if other is not None:
+        raise ValueError(f"Für dieses Video läuft bereits ein Experiment (#{other.id}, Auswertung {other.evaluate_after}). "
+                         "Zwei gleichzeitige Änderungen wären nicht auseinanderzuhalten.")
+    hist = next((h for h in load_histories(session) if h.video.id == row.video_id), None)
+    features_now = features_at(hist, today) if hist is not None else None
+    row.status, row.started_at, row.started_day = RUNNING, now, today
+    row.evaluate_after = today+timedelta(days=row.window_days+lag_days())
+    row.baseline = {**baseline_snapshot(features_now), "frozen_day": str(today), "frozen_at": aware(now).isoformat(),
+                    "confirmed_by": "channel_owner",
+                    "note": "Vom Kanalinhaber als durchgeführt bestätigt; das System hat nichts auf YouTube geändert."}
+    session.commit()
+    return row
+
+
 def recent_results(session, limit=6):
     """Finished experiments with their observed outcome – the visible end of the learning loop."""
     out = []
-    for row in session.scalars(select(GrowthAction).where(GrowthAction.status.in_(["evaluated", "superseded"]))
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == EVALUATED)
                                .order_by(GrowthAction.evaluated_at.desc()).limit(limit)):
         detail = ((row.evaluation or {}).get("detail") or {}) if isinstance((row.evaluation or {}).get("detail"), dict) else {}
         audience = (row.payload or {}).get("audience") or {}
@@ -633,11 +678,7 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
             "confidence": conf, "target_metric": target, "window_days": window, "success_criterion": success, "stop_criterion": stop,
             "steps": experiment_steps(action, title or "dieses Video", f, external, channel),
             "missing_evidence": missing, "route": known_route(f),
-            "baseline": {"known_end": (f or {}).get("known_end"), "views_7d": (f or {}).get("views_7d"),
-                         "impressions_7d": (f or {}).get("impressions_7d"), "ctr_7d": (f or {}).get("ctr_7d"),
-                         "retention_avg": (f or {}).get("retention_avg"), "traffic_total_7d": (f or {}).get("traffic_total_7d"),
-                         "discovery_share": discovery_share(f) if f else None,
-                         "note": "Vorher-Fenster sind die letzten 7 bekannten Analytics-Tage; Werbetage machen die Auswertung ungültig."},
+            "baseline": baseline_snapshot(f),
             "executed_automatically": False,
             "do_not_change": DO_NOT_CHANGE[action]+[NO_MANIPULATION], "objective": OBJECTIVES[action],
             "experiment_template": template, "linked_decision_ids": [e["decision_id"] for e in experiments],
@@ -677,15 +718,17 @@ def evaluate_actions(session, now, by_id, base):
     today = pacific_day(now)
     known_end = today-timedelta(days=lag_days())
     evaluated = 0
-    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == "pending")):
-        after_end = row.created_day+timedelta(days=row.window_days)
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == RUNNING)):
+        # Ein nie gestarteter Vorschlag wird nie als Erfolg oder Misserfolg gewertet.
+        start = row.started_day or row.created_day
+        after_end = start+timedelta(days=row.window_days)
         if after_end > known_end:
             continue
         history = by_id.get(row.video_id)
         if history is None:
             continue
-        before = _window_metrics(history, row.created_day-timedelta(days=row.window_days), row.created_day-timedelta(days=1))
-        after = _window_metrics(history, row.created_day+timedelta(days=1), after_end)
+        before = _window_metrics(history, start-timedelta(days=row.window_days), start-timedelta(days=1))
+        after = _window_metrics(history, start+timedelta(days=1), after_end)
         regime_after = None
         f_after = features_at(history, after_end+timedelta(days=lag_days()))
         if f_after is not None:
@@ -694,8 +737,9 @@ def evaluate_actions(session, now, by_id, base):
         outcome, detail = _outcome(row, before, after, base)
         linked = list(session.scalars(select(Decision.id).where(Decision.video_id == row.video_id, Decision.status.in_(["registered", "evaluated"]),
             Decision.created_at >= aware(row.created_at)-timedelta(days=1))))
-        row.status, row.outcome, row.evaluated_at = "evaluated", outcome, now
+        row.status, row.outcome, row.evaluated_at = EVALUATED, outcome, now
         row.evaluation = {"before": before, "after": after, "regime_after": regime_after, "detail": detail,
+                          "started_day": str(start), "frozen_baseline": row.baseline or {},
                           "decision_ids": linked, "note": "Beobachtete Veränderung, keine Kausalwirkung; Saison, Distribution und Algorithmus sind nicht kontrolliert."}
         evaluated += 1
     return evaluated
@@ -767,27 +811,47 @@ def run(session, now, contexts, base, budget=None):
         board = scores(f, regime, base, c.get("forecasts", []), momentum, peak, external)
         state = state_of(f, regime, base, rev)
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})
-        pending = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == "pending")
-                                 .order_by(GrowthAction.created_day.desc()))
-        # Only a real change-action is held until its evaluation; passive states are re-decided daily,
-        # otherwise a pending "observe" would block every later opportunity for 7+lag days.
-        if pending and pending.action not in PASSIVE_ACTIONS and state not in ("protect_momentum", "paid_excluded", "paid_cooldown"):
-            action, notes = pending.action, [f"Aktion vom {pending.created_day} läuft noch bis zur Auswertung; keine tägliche Kurskorrektur."]
-            details = {**pending.payload, "notes": notes, "held_since": str(pending.created_day)}
+        # Nur ein vom Menschen bestätigt gestartetes Experiment hält ein Video. Ein Vorschlag ist nur ein
+        # Vorschlag: das System kann auf YouTube nichts ausführen, also läuft ohne Bestätigung auch nichts.
+        running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING)
+                                 .order_by(GrowthAction.started_day.desc()))
+        proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == PROPOSED)
+                                  .order_by(GrowthAction.created_day.desc()))
+        if running is not None:
+            action, notes = running.action, [f"Bestätigt gestartet am {running.started_day}; läuft bis zur Auswertung am "
+                                             f"{running.evaluate_after}. Bis dahin nichts weiter an diesem Video ändern."]
+            details = {**running.payload, "notes": notes, "held_since": str(running.started_day)}
+            current = running
         else:
             action, notes = choose_action(state, f, rev, base, c.get("experiments", []), record, external)
             details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, c.get("experiments", []), external,
                                      channel={"delivery_leader": delivery_leader(contexts, video.id)}, title=video.title)
-            if pending and (pending.action != action):
-                pending.status, pending.outcome = "superseded", "inconclusive"
-                pending.evaluation = {"reason": f"Ersetzt durch {action} wegen Zustand {state}.", "superseded_on": str(today)}
-                pending.evaluated_at = now
-                pending = None
-            if pending is None:
-                statement = upsert(session, GrowthAction).values(video_id=video.id, created_day=today, created_at=now, version=VERSION,
-                    state=state, action=action, target_metric=details["target_metric"], window_days=details["window_days"],
-                    evaluate_after=today+timedelta(days=details["window_days"]+lag_days()), status="pending", payload=details)
-                session.execute(statement.on_conflict_do_nothing(index_elements=["video_id", "created_day"]))
+            if proposed and proposed.action != action:
+                # Ein nicht gestarteter Vorschlag wird täglich neu entschieden, statt ein Video zu blockieren.
+                proposed.status, proposed.outcome = "superseded", "inconclusive"
+                proposed.evaluation = {"reason": f"Nicht gestartet; ersetzt durch {action} wegen Zustand {state}.",
+                                       "superseded_on": str(today), "note": "Vorschlag, nie ausgeführt – kein Ergebnis."}
+                proposed.evaluated_at = now
+                proposed = None
+            if proposed is None:
+                # Je Video und Tag existiert genau eine Zeile. Aendert sich die Entscheidung innerhalb des Tages,
+                # wird sie aktualisiert statt verworfen - sonst zeigte die Queue auf eine bereits ersetzte Maßnahme.
+                proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
+                                                                     GrowthAction.created_day == today))
+                if proposed is not None and proposed.status in (PROPOSED, SUPERSEDED):
+                    proposed.status, proposed.state, proposed.action = PROPOSED, state, action
+                    proposed.outcome, proposed.evaluation, proposed.evaluated_at = None, None, None
+                    proposed.version, proposed.created_at = VERSION, now
+                elif proposed is None:
+                    proposed = GrowthAction(video_id=video.id, created_day=today, created_at=now, version=VERSION,
+                                            state=state, action=action, status=PROPOSED)
+                    session.add(proposed)
+                if proposed.status == PROPOSED:
+                    proposed.target_metric, proposed.window_days = details["target_metric"], details["window_days"]
+                    proposed.evaluate_after = today+timedelta(days=details["window_days"]+lag_days())
+                    proposed.payload, proposed.baseline = details, details.get("baseline") or {}
+                    session.flush()
+            current = proposed
         paid, profile = paid_state(f)
         if f is None:
             profile = paid_profile(history, today)
@@ -805,6 +869,8 @@ def run(session, now, contexts, base, budget=None):
             "target_metric": details["target_metric"], "success_criterion": details["success_criterion"], "objective": details["objective"],
             "stop_criterion": details["stop_criterion"], "steps": details.get("steps"), "baseline": details.get("baseline"),
             "missing_evidence": details.get("missing_evidence") or [], "route": details.get("route"),
+            "action_id": current.id if current else None, "action_status": current.status if current else PROPOSED,
+            "started_day": str(current.started_day) if current and current.started_day else None,
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": details.get("held_since"), "momentum": momentum,
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
@@ -849,7 +915,8 @@ def active_eligible(row):
 def queue_entry(row, rank, today):
     """One executable experiment, complete enough to act on without opening the code."""
     ext = row.get("external") or {}
-    return {"rank": rank, "video_id": row["video_id"], "title": row["title"], "state": row["state"], "action": row["action"],
+    return {"rank": rank, "action_id": row.get("action_id"), "status": row.get("action_status") or PROPOSED,
+            "video_id": row["video_id"], "title": row["title"], "state": row["state"], "action": row["action"],
             "objective": row["objective"], "audience": ext.get("audience") or (row.get("route") or {}).get("label"),
             "opportunity": {"kind": ext.get("kind"), "key": ext.get("key"), "gap": ext.get("gap"), "score": ext.get("score")} if ext else None,
             "why": row["reason"], "notes": row.get("notes") or [],
@@ -864,8 +931,12 @@ def queue_entry(row, rank, today):
             "measure_from": str(today), "evaluate_after": row["next_evaluation"],
             "success_criterion": row["success_criterion"], "stop_criterion": row.get("stop_criterion"),
             "do_not_change": row["do_not_change"], "executed_automatically": False,
-            "status": "offen – von dir auszuführen",
-            "note": "Empfehlung. Das System hat nichts auf YouTube geändert und kann es nicht (Read-only-Zugriff)."}
+            "confirm": {"required": True, "label": "Als durchgeführt markieren – Experiment starten",
+                        "endpoint": f"/api/growth/actions/{row.get('action_id')}/start" if row.get("action_id") else None,
+                        "effect": "Erst danach werden Baseline eingefroren, Startzeitpunkt gesetzt, das Messfenster gestartet "
+                                  "und weitere Experimente für dieses Video gesperrt."},
+            "note": "Vorschlag – noch nicht gestartet. Das System hat nichts auf YouTube geändert und kann es nicht "
+                    "(Read-only-Zugriff); es zählt erst als laufend, wenn du die Durchführung bestätigst."}
 
 
 def experiment_queue(ranking, today):
@@ -875,12 +946,13 @@ def experiment_queue(ranking, today):
     for row in sorted((r for r in ranking if r["active_eligible"]),
                       key=lambda r: (r["action"] == "probe_missing_evidence",
                                      -(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0))):
-        if row.get("held_since"):
-            # Läuft bereits und wird gemessen: sichtbar halten, aber nicht erneut anstoßen.
+        if row.get("action_status") == RUNNING:
+            # Vom Menschen bestätigt gestartet und in Messung: sichtbar halten, nicht erneut anstoßen.
             running.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
-                            "held_since": row["held_since"], "evaluate_after": row["next_evaluation"],
-                            "target_metric": row["target_metric"],
-                            "note": "Läuft – bis zur Auswertung nichts weiter an diesem Video ändern."})
+                            "action_id": row.get("action_id"), "started_day": row.get("started_day"),
+                            "held_since": row.get("started_day") or row.get("held_since"),
+                            "evaluate_after": row["next_evaluation"], "target_metric": row["target_metric"],
+                            "note": "Läuft seit deiner Bestätigung – bis zur Auswertung nichts weiter an diesem Video ändern."})
             continue
         if len(queue) >= QUEUE_LIMIT or any(q["video_id"] == row["video_id"] for q in queue):
             continue

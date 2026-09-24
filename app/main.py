@@ -172,6 +172,21 @@ def growth_overview(s=Depends(db)):
     return jsonable_encoder(growth_module.overview(s))
 
 
+@app.post("/api/growth/actions/{action_id}/start", dependencies=[Depends(authenticate)])
+def start_growth_action(action_id: int, s=Depends(db)):
+    """Der Kanalinhaber bestätigt, dass er die Maßnahme durchgeführt hat. Kein YouTube-Zugriff."""
+    try:
+        row = growth_module.start_action(s, action_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    return jsonable_encoder({"id": row.id, "video_id": row.video_id, "action": row.action, "status": row.status,
+                             "started_day": row.started_day, "evaluate_after": row.evaluate_after, "baseline": row.baseline,
+                             "executed_automatically": False,
+                             "note": "Messfenster gestartet. Das System hat nichts auf YouTube geändert."})
+
+
 @app.get("/api/discovery", dependencies=[Depends(authenticate)])
 def discovery_overview(s=Depends(db)):
     return jsonable_encoder(discovery_module.overview(s))

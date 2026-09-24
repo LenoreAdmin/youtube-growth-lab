@@ -356,7 +356,12 @@ class GrowthScore(Base):
 
 
 class GrowthAction(Base):
-    """One recommended action per video at a time; scored later against observed analytics."""
+    """One recommended action per video at a time; scored later against observed analytics.
+
+    Lifecycle: proposed -> running -> evaluated. A proposal is only a recommendation: the system
+    cannot execute anything on YouTube, so nothing is measured and nothing is blocked until a
+    human confirms the execution, which freezes the baseline and starts the measurement window.
+    """
     __tablename__ = "growth_actions"
     __table_args__ = (UniqueConstraint("video_id", "created_day"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -369,7 +374,11 @@ class GrowthAction(Base):
     target_metric: Mapped[str] = mapped_column(String(32))
     window_days: Mapped[int] = mapped_column(Integer)
     evaluate_after: Mapped[date] = mapped_column(Date)
-    status: Mapped[str] = mapped_column(String(32), default="pending")
+    status: Mapped[str] = mapped_column(String(32), default="proposed")
+    # Confirmed execution by the channel owner; without it the row stays a proposal.
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_day: Mapped[date | None] = mapped_column(Date)
+    baseline: Mapped[dict] = mapped_column(JSON, default=dict)
     outcome: Mapped[str | None] = mapped_column(String(32))
     payload: Mapped[dict] = mapped_column(JSON)
     evaluation: Mapped[dict | None] = mapped_column(JSON)

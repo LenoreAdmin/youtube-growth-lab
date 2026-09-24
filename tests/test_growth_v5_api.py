@@ -26,7 +26,7 @@ def test_growth_endpoint_requires_token_and_exposes_plan(client, session, monkey
     assert dashboard["growth_v5"]["plan"]["day"] == plan["day"]
     assert dashboard["growth_v5"]["scores"]["a"]["opportunity"]["components"]
     detail = client.get("/api/videos/a", headers=headers).json()
-    assert detail["growth"]["state"] in growth["states"] and detail["growth"]["actions"][0]["status"] == "pending"
+    assert detail["growth"]["state"] in growth["states"] and detail["growth"]["actions"][0]["status"] == "proposed"
     assert client.post("/api/growth", headers=headers).status_code == 405  # no write path exists
 
 

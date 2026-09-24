@@ -35,5 +35,5 @@ def test_v2_additive_upgrade_preserves_v1_snapshot(monkeypatch):
     command.upgrade(cfg,"head")
     with engine.connect() as c:
         assert c.scalar(text("SELECT views FROM snapshots WHERE video_id='v'")) == 20000
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0009"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0010"
     engine.dispose()

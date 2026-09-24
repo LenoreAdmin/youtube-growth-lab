@@ -177,6 +177,7 @@ def queue_row(video_id, title, state, action, score, **changes):
                "success_criterion": "+15 %", "stop_criterion": "zurücknehmen", "objective": "Discovery",
                "do_not_change": ["Titel", "Thumbnail"], "next_evaluation": str(TODAY+timedelta(days=17)), "held_since": None,
                "momentum": None, "paid_status": "organic", "paid": {}, "paid_note": "nie beworben", "priority": 1,
+               "action_id": 100+len(video_id), "action_status": "proposed", "started_day": None,
                "steps": ["Playlist setzen", "Endscreen verlinken"], "baseline": {"views_7d": 18, "impressions_7d": 40, "ctr_7d": .08},
                "missing_evidence": [], "route": {"key": "traffic_suggested", "label": "Empfehlungen", "share": .4, "views_7d": 18},
                "external": None}, **changes}
@@ -186,7 +187,8 @@ def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone
     rows = [queue_row("a", "Trainstories", "needs_distribution", "distribute_playlist_context", 70),
             queue_row("b", "Shine On", "needs_distribution", "probe_missing_evidence", 60),
             queue_row("c", "Dritter", "protect_momentum", "protect_no_change", 95),
-            queue_row("d", "Vierter", "needs_discovery", "improve_discovery", 55, held_since=str(TODAY-timedelta(days=3))),
+            queue_row("d", "Vierter", "needs_discovery", "improve_discovery", 55, action_status="running",
+                      started_day=str(TODAY-timedelta(days=3)), held_since=str(TODAY-timedelta(days=3))),
             queue_row("e", "Fuenfter", "needs_distribution", "distribute_playlist_context", 50),
             queue_row("f", "Sechster", "observe", "observe", 45)]
     for i, r in enumerate(rows):
@@ -209,6 +211,7 @@ def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone
     assert entry["executed_automatically"] is False and "Read-only" in entry["note"]
     assert entry["evidence"]["own_route"]["label"] == "Empfehlungen" and entry["evidence"]["confidence"] == "low"
     assert plan["running_experiments"] and plan["running_experiments"][0]["video_id"] == "d"
+    assert plan["running_experiments"][0]["started_day"] == str(TODAY-timedelta(days=3))
     assert "nichts weiter an diesem Video" in plan["running_experiments"][0]["note"]
     assert plan["results"][0]["outcome"] == "positive"
     assert "öchstens 3" in plan["queue_note"]
@@ -303,6 +306,6 @@ def test_a_starved_video_produces_an_executable_experiment_in_the_plan(monkeypat
     assert entry["steps"] and entry["executed_automatically"] is False
     assert entry["baseline"]["impressions_7d"] == 42 and entry["window_days"] == 14
     assert "Titel" in entry["do_not_change"] and "Thumbnail" in entry["do_not_change"]
-    stored = session.scalar(select(GrowthAction).where(GrowthAction.video_id == "a", GrowthAction.status == "pending"))
+    stored = session.scalar(select(GrowthAction).where(GrowthAction.video_id == "a", GrowthAction.status == "proposed"))
     assert stored.action == entry["action"] and stored.payload["steps"] == entry["steps"]
     assert stored.state == "needs_distribution"
