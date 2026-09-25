@@ -671,8 +671,11 @@ def requirement(action, channel):
                 "named": [], "note": "Legt die Ressource selbst an, setzt also keine voraus."}
     if action in RESOURCE_ACTIONS:
         chosen, candidates = channel.get("source"), channel.get("source_candidates") or []
+        # Die IDs gehoeren dazu: sonst laesst sich spaeter nicht feststellen, welche eigene Ressource dieses
+        # laufende Experiment veraendert – und sie waere fuer ein neues Experiment wieder freigegeben.
         return {"kind": "source_video", "verified": bool(chosen or candidates),
                 "named": [chosen["title"]] if chosen else [c["title"] for c in candidates],
+                "video_ids": [chosen["video_id"]] if chosen else [c["video_id"] for c in candidates],
                 "evidence": chosen["evidence"] if chosen else "; ".join(c["evidence"] for c in candidates) or None}
     return {"kind": "none", "verified": True, "named": [], "evidence": None}
 
@@ -1017,12 +1020,40 @@ def playlist_inventory(session, today):
             "note": "Playlists wurden noch nicht abgefragt – Existenz unbekannt, also keine Voraussetzung."}
 
 
-def source_candidates(contexts, exclude_id, limit=3):
+def locked_resources(session):
+    """Eigene Ressourcen, die ein bestaetigt laufendes Experiment gerade braucht – Ziel und Quelle.
+
+    Bei Maßnahme #8 wird Trainstories gemessen, veraendert wurde aber der Endscreen von Shine On. Beide
+    duerfen fuer ein neues Experiment nicht angefasst werden: am Zielvideo waere die Messung verfaelscht,
+    an der Quelle ebenso. Bisher schuetzte die Sperre nur das gemessene Video.
+    """
+    locked = {}
+    titles = {}
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.status == RUNNING)):
+        info = {"action_id": row.id, "video_id": row.video_id, "until": str(row.evaluate_after),
+                "role": "gemessenes Video"}
+        locked[row.video_id] = info
+        requires = ((row.payload or {}).get("requires") or {})
+        if requires.get("kind") != "source_video":
+            continue
+        ids = list(requires.get("video_ids") or [])
+        if not ids and requires.get("named"):
+            # Aeltere Maßnahmen haben nur den Titel festgehalten: dann ueber den Titel aufloesen.
+            if not titles:
+                titles = {v.title: v.id for v in session.scalars(select(Video))}
+            ids = [titles[name] for name in requires["named"] if name in titles]
+        for video_id in ids:
+            locked.setdefault(video_id, {**info, "video_id": video_id, "role": "veraenderte Quellressource"})
+    return locked
+
+
+def source_candidates(contexts, exclude_id, locked=None, limit=3):
     """Own videos that are actually delivered – only those can pass traffic on via end screen or card."""
+    locked = locked or {}
     out = []
     for c in contexts:
         video, f = c["history"].video, c.get("features") or {}
-        if video.id == exclude_id:
+        if video.id == exclude_id or video.id in locked:
             continue
         impressions, views = f.get("impressions_7d") or 0, f.get("views_7d") or 0
         if impressions <= 0 and views <= 0:
@@ -1060,17 +1091,26 @@ def feasible_lever(channel):
         # Geprüft und nachweislich keine Playlist: das Anlegen ist dann selbst das Experiment.
         return "create_playlist_context", ("Keine belegte Ressource vorhanden: weder ein ausgeliefertes eigenes Quellvideo "
                                            f"noch eine Playlist. {playlists.get('note', '')}").strip()
+    held = channel.get("locked_sources") or []
+    if held:
+        # Transparent blockieren statt eine geschuetzte Ressource anzufassen.
+        names = "; ".join(f"„{h['title']}“ ({h['role']} von Maßnahme #{h['action_id']}, bis {h['until']})"
+                          for h in held[:3])
+        return None, (f"Keine freie eigene Quellressource: {names}. Solange ein Experiment laeuft, wird daran "
+                      "nichts verändert – weder am gemessenen Video noch an der Quelle, sonst wäre die laufende "
+                      "Messung verfälscht.")
     # Ungeprüft ist nicht „nicht vorhanden“: dann wird nichts behauptet und nichts vorgeschlagen.
     return None, ("Ressourcenlage ungeprüft: kein eigenes Video mit messbarer Auslieferung, und das Playlist-Inventar "
                   "wurde noch nicht abgefragt.")
 
 
-def delivery_leader(contexts, exclude_id):
+def delivery_leader(contexts, exclude_id, locked=None):
     """The own video that is actually delivered best – the only credible place to link a starved video from."""
+    locked = locked or {}
     best = None
     for c in contexts:
         video, f = c["history"].video, c.get("features") or {}
-        if video.id == exclude_id:
+        if video.id == exclude_id or video.id in locked:
             continue
         key = ((f.get("impressions_7d") or 0), (f.get("views_7d") or 0))
         if key > (0, 0) and (best is None or key > best[0]):
@@ -1086,6 +1126,8 @@ def run(session, now, contexts, base, budget=None):
     evaluated = evaluate_actions(session, now, by_id, base)
     session.flush()
     record = track_record(session)
+    locked = locked_resources(session)
+    by_title = {c["history"].video.id: c["history"].video.title for c in contexts}
     ranking = []
     for c in contexts:
         if budget:
@@ -1109,9 +1151,11 @@ def run(session, now, contexts, base, budget=None):
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})
         # Nur ein vom Menschen bestätigt gestartetes Experiment hält ein Video. Ein Vorschlag ist nur ein
         # Vorschlag: das System kann auf YouTube nichts ausführen, also läuft ohne Bestätigung auch nichts.
-        candidates = source_candidates(contexts, video.id)
-        channel = {"delivery_leader": delivery_leader(contexts, video.id), "playlists": playlists,
-                   "source_candidates": candidates, "source": unique_source(candidates)}
+        candidates = source_candidates(contexts, video.id, locked)
+        held = [{"title": by_title.get(vid) or vid, **info} for vid, info in locked.items() if vid != video.id]
+        channel = {"delivery_leader": delivery_leader(contexts, video.id, locked), "playlists": playlists,
+                   "source_candidates": candidates, "source": unique_source(candidates),
+                   "locked_sources": held}
         running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING,
                                                             GrowthAction.version == VERSION)
                                  .order_by(GrowthAction.started_day.desc()))

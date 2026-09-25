@@ -4,6 +4,7 @@ Der Produktionsfehler: der Vorschlag verlangte „bestehende, thematisch passend
 obwohl der Kanal überhaupt keine Playlist hat. Das System hatte Playlists nie abgefragt.
 """
 from datetime import timedelta
+from types import SimpleNamespace
 from sqlalchemy import select
 from app import discovery, growth_engine as ge, history, regimes
 from app.models import ChannelPlaylist, DiscoveryRun, GrowthAction, GrowthPlan, Reach, Video
@@ -158,3 +159,41 @@ def test_a_weakly_delivered_source_is_flagged_before_the_work_starts():
     fine = ge.experiment_steps("link_from_own_video", "Trainstories", f, None,
                                {"playlists": NO_PLAYLISTS, "source_candidates": [strong], "source": strong})
     assert not any("Erwartungsmanagement" in s for s in fine)
+
+
+def test_a_resource_held_by_a_running_experiment_is_never_a_source(monkeypatch, session):
+    """Produktionskonflikt: beide neuen Maßnahmen wollten Trainstories als Quellvideo veraendern.
+
+    Bei Maßnahme #8 wird Trainstories gemessen und der Endscreen von Shine On veraendert. Beide Seiten
+    sind geschuetzt: am gemessenen Video und an der veraenderten Quelle darf nichts angefasst werden,
+    solange die Messung laeuft.
+    """
+    running = GrowthAction(video_id="a", created_day=TODAY-timedelta(days=2), created_at=NOW, version=ge.VERSION,
+                           state="needs_distribution", action="probe_missing_evidence",
+                           target_metric="impressions_7d", window_days=14,
+                           evaluate_after=TODAY+timedelta(days=16), status="running",
+                           started_day=TODAY-timedelta(days=2), started_at=NOW, lever_class="internal_link",
+                           traffic_source="END_SCREEN",
+                           payload={"requires": {"kind": "source_video", "named": ["Video b"],
+                                                 "video_ids": ["b"], "verified": True}})
+    session.add(running)
+    session.commit()
+    locked = ge.locked_resources(session)
+    assert set(locked) == {"a", "b"}, "gemessenes Video und veraenderte Quelle"
+    assert locked["a"]["role"] == "gemessenes Video" and locked["b"]["role"] == "veraenderte Quellressource"
+    contexts = [{"history": SimpleNamespace(video=session.get(Video, v)),
+                 "features": {"impressions_7d": 900, "views_7d": 40}} for v in ("a", "b")]
+    assert ge.source_candidates(contexts, "c", locked) == [], "keine geschuetzte Ressource als Quelle"
+    assert ge.delivery_leader(contexts, "c", locked) is None
+    # Und die Blockade wird benannt, statt stillschweigend nichts zu liefern.
+    channel = {"source_candidates": [], "playlists": {"state": "unknown", "items": []},
+               "locked_sources": [{"title": "Sealand Trainstories", "role": "gemessenes Video", "action_id": 8,
+                                   "until": "2026-10-11"}]}
+    lever, note = ge.feasible_lever(channel)
+    assert lever is None
+    assert "Keine freie eigene Quellressource" in note and "#8" in note and "2026-10-11" in note
+    # Ohne laufendes Experiment bleibt alles wie vorher.
+    running.status = "evaluated"
+    session.commit()
+    assert ge.locked_resources(session) == {}
+    assert [c["video_id"] for c in ge.source_candidates(contexts, "c", ge.locked_resources(session))] == ["a", "b"]
