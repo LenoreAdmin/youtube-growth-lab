@@ -1059,10 +1059,12 @@ def run(session, now, contexts, base, budget=None):
         peak = historical_peak(history, today)
         rev = revival(f, regime, base, peak)
         external = external_opportunity(session, video.id)
-        if external is None or not external.get("context_usable"):
+        if external is None or (not external.get("context_usable")
+                                and external.get("evidence_level") != "own_analytics"):
             from .audience import placement_opportunity
             attested = placement_opportunity(session, video.id)
-            # Der belegte Intent ersetzt die aeltere Route nur, wenn er mehr traegt als sie.
+            # Der belegte Intent ersetzt die aeltere Route nur, wenn er mehr traegt als sie – und niemals
+            # eine Chance aus eigenen Analytics: gemessene eigene Daten schlagen jeden Proxy.
             if attested is not None and (external is None
                                          or (attested.get("score") or 0) > (external.get("score") or 0)):
                 external = attested

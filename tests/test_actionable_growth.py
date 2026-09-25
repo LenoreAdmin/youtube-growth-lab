@@ -367,3 +367,31 @@ def test_an_attested_audience_intent_drives_an_own_asset_action(monkeypatch, ses
     # Die Wirkung wird auch nach Trafficquelle gemessen, sonst lernt das System nicht, welche Fläche waechst.
     metrics = ge._window_metrics(histories["a"], end-timedelta(days=6), end)
     assert "sources" in metrics and isinstance(metrics["sources"], dict)
+
+
+def test_a_proxy_intent_never_replaces_a_chance_from_our_own_analytics(session):
+    """Eigene gemessene Daten schlagen jeden Proxy – auch den neuen Intent-Weg."""
+    from app.models import VideoProfile, DiscoveryOpportunity
+    session.add(VideoProfile(video_id="a", description="Ambient zur Reise nach Mongolian.",
+                             tags=["trans mongolian", "ambient"],
+                             topics=["https://en.wikipedia.org/wiki/Ambient_music"], category_id="10",
+                             channel_title="Sealand", channel_description="Ambient und Reisemusik.",
+                             channel_keywords="ambient travel", channel_topics=[], fetched_day=TODAY))
+    session.add(DiscoveryOpportunity(day=TODAY, kind="suggested", key="nachbarschaft", video_id="a",
+                                     gap="suggested_opportunity",
+                                     scores={"external_audience_score": 55.0},
+                                     components={}, evidence={"evidence_level": "own_analytics",
+                                                              "actionable": True, "context_usable": False},
+                                     status="open"))
+    session.commit()
+    from app import discovery as dis
+    from app.audience import placement_opportunity
+    own = dis.best_for_video(session, "a")
+    assert own["evidence_level"] == "own_analytics" and (own["score"] or 0) == 55.0
+    proxy = placement_opportunity(session, "a")
+    assert proxy is None or proxy["score"] >= 55.0, "der Proxy waere hier sonst gar nicht im Konflikt"
+    # Der Engine darf trotzdem nicht ersetzen: die Bedingung schliesst own_analytics aus.
+    import inspect
+    from app import growth_engine as engine
+    source = inspect.getsource(engine.run)
+    assert 'evidence_level") != "own_analytics"' in source
