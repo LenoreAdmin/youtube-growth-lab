@@ -369,7 +369,14 @@ def own_vocabulary(session):
     for video_id, weighted in counts.items():
         top = sorted(weighted.items(), key=lambda kv: -kv[1])[:MAX_VOCAB_TOKENS]
         vocab.setdefault(video_id, set()).update(token for token, _ in top)
-    return {video_id: set(list(words)[:MAX_VOCAB_TOKENS*2]) for video_id, words in vocab.items()}
+    # Die eigenen Angaben zum Video gehoeren dazu – aber nur die Begriffe, die ein Thema tragen duerfen.
+    # Marken-, Release- und Formatwoerter bleiben draussen, sonst waere „album“ wieder ein Thema.
+    from . import audience
+    for video in session.scalars(select(Video).where(Video.active.is_(True))):
+        for row in audience.profile_terms(session, video):
+            if row["category"] in audience.TOPIC_CATEGORIES:
+                vocab.setdefault(video.id, set()).add(row["term"])
+    return {video_id: set(list(words)[:MAX_VOCAB_TOKENS*3]) for video_id, words in vocab.items()}
 
 
 def generic_tokens(session):
