@@ -1168,6 +1168,18 @@ def run(session, now, contexts, base, budget=None):
                  (entry.get("why") or "")[:200])
     log.info("growth plan day=%s queue=%s running=%s evaluated=%s note=%r", today, len(plan.get("queue") or []),
              len(plan.get("running_experiments") or []), evaluated, (plan.get("queue_note") or "")[:160])
+    # Je Video nachvollziehbar, warum daraus heute eine Maßnahme wird oder nicht. Eine leere Queue ohne
+    # diesen Grund ist von aussen nicht von einem Fehler zu unterscheiden.
+    for row in (plan.get("ranking") or [])[:6]:
+        chance = row.get("external") or {}
+        log.info("growth ranking video=%r state=%s action=%s metric=%s eligible=%s reason=%r "
+                 "chance=%s/%s score=%s level=%s usable=%s",
+                 row.get("title"), row.get("state"), row.get("action"), row.get("target_metric"),
+                 row.get("active_eligible"), (row.get("ineligible_reason") or "")[:120], chance.get("kind"),
+                 chance.get("gap"), chance.get("score"), chance.get("evidence_level"), chance.get("context_usable"))
+    for row in (plan.get("not_testable") or [])[:4]:
+        log.info("growth not_measurable video=%r action=%s reason=%r", row.get("title"), row.get("action"),
+                 (row.get("reason") or "")[:180])
     return {"evaluated_actions": evaluated, "ranked": len(ranking), "priority": plan.get("priority_video_id")}
 
 
