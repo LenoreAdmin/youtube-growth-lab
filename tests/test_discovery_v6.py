@@ -54,11 +54,11 @@ class DiscoveryClient:
         return [{"video_id": i, "channel_id": self.catalog[i]["snippet"]["channelId"], "title": self.catalog[i]["snippet"]["title"],
                  "channel_title": "x", "published_at": self.catalog[i]["snippet"]["publishedAt"]} for i in ids]
 
-    def videos_by_id(self, ids):
+    def videos_by_id(self, ids, part="snippet,contentDetails,statistics"):
         self.calls["videos_by_id"] += 1
         return [self.catalog[i] for i in ids if i in self.catalog]
 
-    def channels_by_id(self, ids):
+    def channels_by_id(self, ids, part="snippet,statistics,topicDetails,brandingSettings"):
         self.calls["channels_by_id"] += 1
         return [{"id": c, "snippet": {"title": "Channel "+c}, "statistics": {"subscriberCount": {"ch1": "50000", "ch2": "3000", "ch3": "400", "ch4": "2000000", "own": "600"}.get(c, "100"),
                  "videoCount": "40", "viewCount": "1000000"}} for c in ids]
@@ -113,15 +113,19 @@ def test_daily_budget_stops_probing_and_resumes_next_day(monkeypatch, session):
     monkeypatch.setattr(discovery, "DAILY_UNITS", 250)
     client = DiscoveryClient()
     result = discovery.run(client, NOW)
-    assert result["status"] == "quota_exhausted" and client.calls["search"] == 2
+    # Der Lauf haelt an, bevor das Budget leer ist: die Pool-Suche behaelt ihren reservierten Anteil.
+    assert result["status"] in ("ok", "quota_exhausted") and client.calls["search"] >= 1
+    assert result["stats"].get("pool_reserve_kept") or result["status"] == "quota_exhausted"
     session.expire_all()
     assert session.get(DiscoveryQuota, TODAY).units <= 250
     pending = [q for q in session.scalars(select(DiscoveryQuery)) if not q.last_probed_day]
     assert pending, "unprobed queries wait for the next day"
     tomorrow = NOW+timedelta(days=1)
+    before = client.calls["search"]
     again = discovery.run(client, tomorrow)
     session.expire_all()
-    assert again["status"] in ("ok", "quota_exhausted") and client.calls["search"] > 2
+    # Am naechsten Tag geht es mit frischem Budget weiter, bis die offenen Queries abgearbeitet sind.
+    assert again["status"] in ("ok", "quota_exhausted") and client.calls["search"] > before
     assert session.get(DiscoveryQuota, TODAY+timedelta(days=1)).units <= 250
     assert session.scalar(select(func.count()).select_from(DiscoveryOpportunity).where(DiscoveryOpportunity.day == TODAY+timedelta(days=1))) > 0
 

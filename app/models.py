@@ -562,3 +562,22 @@ class DiscoveryOpportunity(Base):
     outcome: Mapped[str | None] = mapped_column(String(32))
     evaluation: Mapped[dict | None] = mapped_column(JSON)
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VideoProfile(Base):
+    """Was der Kanal selbst über ein eigenes Video sagt: Beschreibung, Tags, YouTube-Themenkategorien.
+
+    Diese Angaben existieren längst öffentlich, standen bisher aber nur flüchtig im Discovery-Lauf zur
+    Verfügung. Ohne sie besteht unser Thema aus einem einzigen Titelwort, und jede Audience-Suche rät.
+    """
+    __tablename__ = "video_profiles"
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True)
+    description: Mapped[str | None] = mapped_column(String(5000))
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    topics: Mapped[list] = mapped_column(JSON, default=list)
+    category_id: Mapped[str | None] = mapped_column(String(16))
+    channel_title: Mapped[str | None] = mapped_column(String(256))
+    channel_description: Mapped[str | None] = mapped_column(String(2000))
+    channel_keywords: Mapped[str | None] = mapped_column(String(1000))
+    channel_topics: Mapped[list] = mapped_column(JSON, default=list)
+    fetched_day: Mapped[date] = mapped_column(Date)

@@ -57,8 +57,14 @@ function renderTraffic(a){
  const pools=a.pools||{};
  $("trafficGoal").textContent=a.goal||"";
  // Die Pool-Suche muss nachpruefbar sein: welcher Query, welche realen Treffer, welcher Filtergrund.
- const pq=(pools.queries||[]).map(x=>`<li><code>${esc(x.query)}</code> (${esc(x.kind)}, Quelle ${esc(x.source||"—")}): ${num(x.results)} Treffer, ${num(x.stored)} gespeichert${x.note?" – "+esc(x.note):""}${(x.titles||[]).length?`<br><small>${(x.titles||[]).map(esc).join(" · ")}</small>`:""}</li>`).join("");
- const pc=(pools.candidates||[]).map(c=>`<li>${c.kept?"✓":"✗"} <strong>${esc(c.title||"—")}</strong> <small>${esc(c.kind)} · ${esc(c.size||"")}${c.query?` · gefunden über „${esc(c.query)}“`:""}</small>${c.url?` <a href="${esc(c.url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""}<br><small>${esc(c.reason||"noch nicht geprüft")}</small></li>`).join("");
+ // Audience-Intents: woher jedes Thema kommt. Ohne sichtbare Evidenz ist eine Query nicht pruefbar.
+ const ints=a.audience_intents||[];
+ $("trafficIntents").innerHTML=ints.length?`<h3>Audience-Intents aus unseren eigenen Daten</h3><ul>${ints.map(i=>
+  `<li><strong>${esc(i.video)}</strong>: ${esc(i.label)} <small>${esc(i.strength)}, ${num(i.attestations)} unabhängige Quellen${i.history&&i.history.candidates?` · bisher ${num(i.history.candidates)} Kandidaten, ${num(i.history.kept)} aufgenommen`:""}</small><br>
+  <code>${esc(i.query)}</code><br><small>Belege: ${(i.evidence||[]).map(e=>esc(e.label)+" – „"+esc(e.detail)+"“").join(" · ")}</small></li>`).join("")}</ul>`
+  :`<p class="muted">Noch keine belegten Audience-Intents: aus Titel, Beschreibung, Tags, Themenkategorien, realen Suchbegriffen und belegter Nachbarschaft ergibt sich noch kein Thema mit Kontext.</p>`;
+ const pq=(pools.queries||[]).map(x=>`<li><code>${esc(x.query)}</code> (${esc(x.kind)}, Intent ${esc(x.intent||x.source||"—")}): ${num(x.results)} Treffer, ${num(x.stored)} gespeichert${x.note?" – "+esc(x.note):""}${(x.titles||[]).length?`<br><small>${(x.titles||[]).map(esc).join(" · ")}</small>`:""}</li>`).join("");
+ const pc=(pools.candidates||[]).map(c=>`<li>${c.kept?"✓":"✗"} <strong>${esc(c.title||"—")}</strong> <small>${esc(c.kind)} · ${esc(c.size||"")}${c.query?` · gefunden über „${esc(c.query)}“`:""}${c.intent?` · Intent: ${esc(c.intent)}`:""}${c.stale?" · aus einem früheren, inzwischen verworfenen Query":""}</small>${c.url?` <a href="${esc(c.url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""}<br><small>${esc(c.reason||"noch nicht geprüft")}</small></li>`).join("");
  $("trafficPools").innerHTML=`<h3>Suche nach fremden Playlists und Kanälen</h3>`
   +(pools.searched?`<ul>${pq}</ul>`:`<p class="muted">${esc(pools.note||"In diesem Lauf wurde keine Pool-Suche ausgeführt.")}</p>`)
   +(pc?`<p><strong>Kandidaten und Filtergründe</strong> (${num(pools.kept)} aufgenommen, ${num(pools.rejected)} verworfen)</p><ul>${pc}</ul>`:"");

@@ -36,6 +36,7 @@ MIN_ACTIONABLE_VIEWS = 5     # Vorgeschlagen wird erst, wenn dort in 90 Tagen wi
 MIN_CANDIDATE_VIEWS = 2000   # Öffentliche Reichweite, ab der ein fremdes Video als Fläche zählt.
 MIN_CANDIDATE_SUBSCRIBERS = 500
 MIN_SHARED_TOKENS = 2        # Ein gemeinsames Wort ist keine Themengleichheit (siehe V6).
+MIN_EXPECTED_WEEKLY_VIEWS = 0.35  # Darunter ist eine Quelle eine Beobachtung, keine Traffic-Aktion.
 MIN_PLAYLIST_ITEMS = 5       # Unter fuenf Titeln ist es kein gepflegter Ort, sondern ein Entwurf.
 # Formatwörter beschreiben die Verpackung, nicht das Thema: „Album Teaser“ passt auf jedes Album-Teaser
 # der Welt. Der erste Lauf hat darüber ein BLACKPINK-Video als Fläche für unser Teaser-Video vorgeschlagen.
@@ -139,18 +140,25 @@ def as_url(detail):
 
 
 def adjacency_access(views, public_reach, minimum, how, what):
-    """Nachbarschaft ist belegt (YouTube hat uns dort ausgeliefert), das Publikum öffentlich nachprüfbar.
+    """Belegte Nachbarschaft mit oeffentlich nachpruefbarem Publikum – aber kein Ersatz fuer Zufluss.
 
-    Gemessener Zufluss von einem View ist schwach – aber die Fläche selbst ist echt und ihre Größe bekannt.
-    Deshalb handelbar, mit ausdrücklich hoher Unsicherheit statt einer Scheingenauigkeit.
+    Frueher war ein einziger gemessener View hier handelbar, sobald die Flaeche gross war. Das ergab
+    Vorschlaege mit rund 0,1 erwarteten Views pro Woche als wichtigste Traffic-Aktion. Eine Flaeche,
+    von der praktisch nichts kommt, bleibt ein Beleg fuer Naehe – und eine Aufgabe wird daraus erst,
+    wenn der gemessene Zufluss eine Groessenordnung hat, die man auswerten kann.
     """
-    if public_reach is None or public_reach < minimum:
-        # Ohne nennenswertes eigenes Publikum der Fläche bleibt ein einzelner View eine Beobachtung.
-        return measured_access(views, how)
+    weekly = expected_weekly_views(views)
+    if views < MIN_ACTIONABLE_VIEWS or weekly < MIN_EXPECTED_WEEKLY_VIEWS:
+        reach = f" Die Fläche selbst ist groß ({public_reach} Publikum) und bleibt als Beleg für Nähe stehen." \
+            if public_reach and public_reach >= minimum else ""
+        return {"actionable": False, "rules": NO_SPAM, "manual": True, "evidence_grade": "adjacency_only",
+                "why_not": (f"Von dort kamen {views} Views in 90 Tagen, also rund {weekly} Views pro Woche. Unter "
+                            f"{MIN_EXPECTED_WEEKLY_VIEWS} Views pro Woche ist das keine Trafficquelle, sondern eine "
+                            f"Beobachtung: der Effekt einer Maßnahme wäre nicht messbar.{reach}")}
     return {"actionable": True, "rules": NO_SPAM, "manual": True, "how": how,
             "evidence_grade": "adjacency_plus_public_reach",
-            "caveat": (f"Bisher kam von dort {views} View in 90 Tagen – die Nachbarschaft ist belegt, der Zufluss "
-                       f"aber winzig. {what} Erwartung entsprechend klein halten und am Ergebnis messen.")}
+            "caveat": (f"Bisher kam von dort {views} Views in 90 Tagen – die Nachbarschaft ist belegt, der Zufluss "
+                       f"aber klein. {what} Erwartung entsprechend klein halten und am Ergebnis messen.")}
 
 
 def measured_access(views, how):
@@ -426,6 +434,7 @@ def collect_pools(session, vocab, learned, generic, store):
     Jede Entscheidung wird begruendet und am Kandidaten gespeichert. Ein leerer Trichter ohne Begruendung
     ist nicht auswertbar; mit Begruendung ist er die Arbeitsliste fuer die naechste Verbesserung.
     """
+    from . import audience
     from .discovery import tokens as split
     neighbour_titles = {row.title for row in session.scalars(select(DiscoveryItem)) if row.title}
     verdicts = []
@@ -440,9 +449,19 @@ def collect_pools(session, vocab, learned, generic, store):
             if len(common) > len(shared):
                 best, shared = video_id, common
         overlap = [title for title in (details.get("items") or []) if title in neighbour_titles]
+        # Die Query-Evidenz ist Teil des Relevanznachweises: wir haben nach einem belegten eigenen Thema
+        # gesucht. Trifft der Kandidat diesen Themenkopf, ist der Bezug belegt – auch wenn er mit unserem
+        # Videotitel kein Wort teilt („Mongolian Trains“ vs. „Sealand Trainstories“).
+        intent = details.get("intent") or {}
+        hit = audience.matches(intent, words) if intent.get("head") else None
+        if hit and intent.get("video_id") is None and best is None:
+            best = next(iter(vocab), None)
+        if hit and intent.get("video_id") in vocab:
+            best = intent["video_id"]
         verdict = {"kind": pool.kind, "title": pool.title, "url": pool.url, "query": pool.query,
                    "query_source": details.get("query_source"), "size": pool_size(pool),
-                   "shared_tokens": shared, "neighbourhood_overlap": overlap[:2], "kept": False, "reason": None}
+                   "shared_tokens": shared, "neighbourhood_overlap": overlap[:2], "kept": False, "reason": None,
+                   "intent": intent.get("label"), "intent_hit": (hit or {}).get("head")}
 
         def decide(reason, kept=False):
             verdict["reason"], verdict["kept"] = reason, kept
@@ -453,12 +472,19 @@ def collect_pools(session, vocab, learned, generic, store):
         if best is None:
             decide("Kein Bezug zu einem unserer Videos: keine gemeinsamen spezifischen Begriffe.")
             continue
-        if len(shared) < MIN_SHARED_TOKENS and not overlap:
+        if len(shared) < MIN_SHARED_TOKENS and not overlap and not hit:
+            detail = (f" Der Audience-Intent „{intent['label']}“ ist hier nicht getroffen: keines der Themenwörter "
+                      f"({', '.join(intent.get('head') or [])}) steht im Titel, in der Beschreibung oder im Inhalt."
+                      if intent.get("head") else "")
             decide(f"Themenbezug zu schwach: {len(shared)} spezifischer gemeinsamer Begriff"
                    + (f" ({', '.join(shared)})" if shared else "")
                    + f", mindestens {MIN_SHARED_TOKENS} noetig, und kein Video aus unserer belegten Nachbarschaft "
-                     "enthalten.")
+                     "enthalten."+detail)
             continue
+        if hit:
+            # Die getroffenen Intent-Begriffe sind selbst belegt und zaehlen damit als gemeinsame Begriffe.
+            shared = sorted(set(shared) | set(hit["head"]) | set(hit.get("context") or []))
+            verdict["shared_tokens"] = shared
         if pool.kind == "playlist":
             if (pool.item_count or 0) < MIN_PLAYLIST_ITEMS:
                 decide(f"Kein gepflegter Ort: {pool.item_count or 0} Titel, mindestens {MIN_PLAYLIST_ITEMS} noetig.")
@@ -468,7 +494,9 @@ def collect_pools(session, vocab, learned, generic, store):
                 decide("Hebel „Playlist-Platzierung“ ist nach erfolglosen Versuchen zurueckgestellt.")
                 continue
             reason = (f"Die Playlist „{pool.title}“ von „{pool.channel_title}“ enthält {pool.item_count} Titel"
-                      + (f" und teilt die Begriffe {', '.join(shared)} mit unserem Thema" if shared else "")
+                      + (f" und liegt auf unserem belegten Audience-Intent „{hit['label']}“ "
+                         f"(Treffer: {', '.join(hit['head']+ (hit.get('context') or []))})" if hit else "")
+                      + (f" und teilt die Begriffe {', '.join(shared)} mit unserem Thema" if shared and not hit else "")
                       + (f"; darin liegen Videos aus unserer belegten Nachbarschaft ({', '.join(overlap[:2])})"
                          if overlap else "")
                       + ". Wer sie pflegt, kuratiert für genau diese Zuschauer.")
@@ -476,7 +504,7 @@ def collect_pools(session, vocab, learned, generic, store):
             store("curated_playlist", pool.key, best, pool.title, pool.url,
                   {"item_count": pool.item_count, "owner": pool.channel_title, "owner_subscribers": pool.subscribers,
                    "shared_tokens": shared, "neighbourhood_overlap": overlap[:3], "query": pool.query,
-                   "sample_items": (details.get("items") or [])[:5],
+                   "sample_items": (details.get("items") or [])[:5], "intent": intent or None,
                    "demand_source": "public_youtube_search", "why": reason,
                    "uncertainty": ("mittel: Größe und Inhalt sind öffentlich belegt, ob der Kurator reagiert und ob "
                                    "daraus Views entstehen, ist offen.")},
@@ -492,7 +520,7 @@ def collect_pools(session, vocab, learned, generic, store):
                 decide(f"Zu kleine oder verborgene Reichweite: {pool.subscribers if pool.subscribers is not None else 'keine Angabe'}"
                        f" Abonnenten, mindestens {MIN_CANDIDATE_SUBSCRIBERS} noetig.")
                 continue
-            if len(shared) < MIN_SHARED_TOKENS:
+            if len(shared) < MIN_SHARED_TOKENS and not hit:
                 decide(f"Bei Kanaelen zaehlt nur echte Themengleichheit: {len(shared)} gemeinsamer Begriff, "
                        f"mindestens {MIN_SHARED_TOKENS} noetig.")
                 continue
@@ -505,8 +533,12 @@ def collect_pools(session, vocab, learned, generic, store):
                   {"subscribers": pool.subscribers, "video_count": pool.item_count, "views": pool.views,
                    "shared_tokens": shared, "topics": (details.get("topics") or [])[:4], "query": pool.query,
                    "country": details.get("country"), "demand_source": "public_youtube_search",
-                   "why": (f"„{pool.title}“ hat {pool.subscribers} Abonnenten und beschreibt sich mit den Begriffen "
-                           f"{', '.join(shared)}, die auch unser Thema tragen. Dieses Publikum kennt uns nicht."),
+                   "intent": intent or None,
+                   "why": (f"„{pool.title}“ hat {pool.subscribers} Abonnenten und trifft "
+                           + (f"unseren belegten Audience-Intent „{hit['label']}“ "
+                              f"({', '.join(hit['head']+(hit.get('context') or []))})" if hit
+                              else f"die Begriffe {', '.join(shared)}, die auch unser Thema tragen")
+                           + ". Dieses Publikum kennt uns nicht."),
                    "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss nicht gemessen."},
                   {"traffic_potential": score_candidate(shared, pool.views, pool.subscribers,
                                                         entry.get("weight", 1.0)),
@@ -1161,7 +1193,23 @@ def run(session, now=None, budget=None, http=None):
 
 
 # ----------------------------------------------------------------------------- read model
-def pool_report(session):
+def audience_report(session):
+    """Welche Audience-Intents aus unseren realen Daten abgeleitet wurden – mit ihren Belegen."""
+    from . import audience
+    titles = {v.id: v.title for v in session.scalars(select(Video))}
+    rows = []
+    for intent in audience.intents(session):
+        rows.append({"video_id": intent["video_id"], "video": titles.get(intent["video_id"], intent["video_id"]),
+                     "label": intent["label"], "kind": intent["kind"], "query": intent["query"],
+                     "head": intent["head"], "context": intent["context"],
+                     "attestations": intent["attestations"], "score": intent["score"],
+                     "evidence": intent["evidence"][:6], "history": intent["history"],
+                     "strength": ("belegt" if intent["attestations"] >= audience.MIN_ATTESTATIONS
+                                  else "einfach belegt")})
+    return rows
+
+
+def pool_report(session, active_queries=()):
     """Was die Pool-Suche wirklich gefunden hat und was damit passiert ist - ohne Beschoenigung."""
     probe, run = {}, session.scalar(select(DiscoveryRun).order_by(DiscoveryRun.id.desc()))
     if run is not None:
@@ -1173,6 +1221,8 @@ def pool_report(session):
         verdict = details.get("verdict") or {}
         candidates.append({"kind": pool.kind, "title": pool.title, "url": pool.url, "query": pool.query,
                            "query_source": details.get("query_source"), "size": pool_size(pool),
+                           "intent": (details.get("intent") or {}).get("label"),
+                           "stale": bool(active_queries) and pool.query not in active_queries,
                            "found_day": str(pool.first_seen_day) if pool.first_seen_day else None,
                            "kept": verdict.get("kept"), "reason": verdict.get("reason"),
                            "shared_tokens": verdict.get("shared_tokens") or []})
@@ -1229,6 +1279,7 @@ def overview(session, now=None):
                             "detail": (row.evaluation or {}).get("detail")})
     for rank, entry in enumerate(queue[:QUEUE_LIMIT], 1):
         entry["rank"] = rank
+    intents_view = audience_report(session)
     blocked = []
     for surface in sorted(surfaces, key=lambda s: -(s.scores or {}).get("traffic_potential", 0)):
         if not (surface.access or {}).get("actionable", True):
@@ -1249,7 +1300,8 @@ def overview(session, now=None):
                           "why": (s.evidence or {}).get("why")}
                          for s in sorted(surfaces, key=lambda s: -(s.scores or {}).get("traffic_potential", 0))[:12]],
             "scoreboard": scoreboard(session), "learning": weights(session), "levers": lever_record(session),
-            "pools": pool_report(session),
+            "pools": pool_report(session, {row["query"] for row in intents_view}),
+            "audience_intents": intents_view,
             "capabilities": {"used": ["Eigene Analytics: externe Referrer (EXT_URL-Detail)",
                                       "Eigene Analytics: empfehlende Videos und deren Kanäle",
                                       "Eigene Analytics: reale Suchbegriffe",

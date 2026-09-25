@@ -509,8 +509,8 @@ def test_todays_surfaces_are_rebuilt_so_a_retired_one_disappears(session):
     assert aq.overview(session, NOW)["traffic_queue"] == []
 
 
-def test_verified_adjacency_with_public_reach_is_actionable_with_an_honest_caveat(session):
-    """Ein Kanal, neben dem YouTube uns ausliefert, ist eine echte Fläche – auch bei nur einem View."""
+def test_a_surface_with_almost_no_measurable_inflow_is_evidence_not_a_task(session):
+    """Ein einziger View in 90 Tagen sind ~0,08 Views/Woche: das darf nicht unsere wichtigste Aktion sein."""
     session.add(DiscoveryItem(video_id="NB123456789", channel_id="UCM", title="Anii cei mai dragi din viata mea",
                               channel_title="Mihai Ciobanu (Oficial)", views=180000, tags=[],
                               via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY, last_seen_day=TODAY,
@@ -522,17 +522,16 @@ def test_verified_adjacency_with_public_reach_is_actionable_with_an_honest_cavea
     aq.collect(session, NOW, http=FakeHttp())
     rows = {r.kind: r for r in session.scalars(select(TrafficSurface))}
     channel = rows["recommending_channel"]
-    assert channel.access["actionable"] is True and channel.access["evidence_grade"] == "adjacency_plus_public_reach"
-    assert "1 View in 90 Tagen" in channel.access["caveat"] and "95000 Abonnenten" in channel.access["caveat"]
-    assert channel.scores["traffic_potential"] > 20, "belegte Nachbarschaft plus Reichweite zaehlt mehr als ein View"
-    assert channel.scores["subscribers"] == 95000
-    video = rows["recommending_video"]
-    assert video.access["actionable"] is True and "180000 öffentliche Views" in video.access["caveat"]
-    result = aq.propose(session, NOW)
-    assert result["proposed"] == 1
-    entry = aq.overview(session, NOW)["traffic_queue"][0]
-    assert entry["video_id"] == "b" and entry["traffic_source"] == "RELATED_VIDEO"
-    assert entry["steps"] and entry["mechanism"] and entry["primary_metric"].startswith("zusätzliche qualifizierte")
+    assert channel.access["actionable"] is False and channel.access["evidence_grade"] == "adjacency_only"
+    assert "0.08 Views pro Woche" in channel.access["why_not"].replace(",", ".")
+    assert "95000 Publikum" in channel.access["why_not"], "die Nachbarschaft bleibt als Beleg sichtbar"
+    assert channel.scores["subscribers"] == 95000, "die Fläche wird weiter gemessen"
+    assert rows["recommending_video"].access["actionable"] is False
+    # Nichts davon darf in JETZT TUN landen.
+    assert aq.propose(session, NOW)["proposed"] == 0
+    view = aq.overview(session, NOW)
+    assert view["traffic_queue"] == []
+    assert any(s["title"] == "Mihai Ciobanu (Oficial)" for s in view["surfaces"]), "als Fläche weiter sichtbar"
     # Ohne oeffentliche Reichweite bleibt ein einzelner View eine blosse Beobachtung.
     session.query(DiscoveryChannel).delete()
     session.query(DiscoveryItem).delete()
@@ -571,7 +570,7 @@ def test_an_open_proposal_is_updated_or_replaced_by_a_better_surface(session):
                               seen_count=1))
     session.add(DiscoveryChannel(channel_id="UCM", title="Rail Nights", subscribers=400000, video_count=200,
                                  views=90000000, first_seen_day=TODAY, last_seen_day=TODAY))
-    signal(session, "a", "own_suggested_source", "NB123456789", 3)
+    signal(session, "a", "own_suggested_source", "NB123456789", 12)
     session.commit()
     even_later = NOW+timedelta(days=2)
     aq.collect(session, even_later, http=FakeHttp())
