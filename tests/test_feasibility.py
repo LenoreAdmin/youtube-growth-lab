@@ -47,16 +47,14 @@ def test_an_existing_playlist_is_named_only_when_the_inventory_reported_it():
                                                "named": ["Ambient Train Journeys"], "evidence": None}
 
 
-def test_without_any_verified_resource_a_new_playlist_is_its_own_experiment():
+def test_a_new_playlist_is_never_a_substitute_growth_action():
+    """Eine Oberflaeche nur zum Messen anzulegen bringt keine zusaetzliche organische Reichweite."""
     f = starved()
     channel = {"playlists": NO_PLAYLISTS, "source_candidates": [], "source": None}
     action, notes = ge.distribution_action(f, BASE, None, channel)
-    assert action == "create_playlist_context"
-    steps = ge.experiment_steps(action, "Trainstories", f, None, channel)
-    assert any("Neue thematische Playlist anlegen" in s for s in steps)
-    assert any("laut Inventar keine" in s for s in steps)
-    assert ge.LEVERS[action].startswith("neue thematische Playlist")
-    assert any("Endscreen-Verlinkung" in x for x in ge.DEFERRED_LEVERS[action]), "andere Hebel bleiben eigene Experimente"
+    assert action == "observe"
+    assert any("keine zusätzliche organische Reichweite" in n for n in notes)
+    assert "create_playlist_context" in ge.EVIDENCE_ONLY and "probe_missing_evidence" in ge.EVIDENCE_ONLY
     # Ungeprueft ist nicht „nicht vorhanden“: dann wird gar nichts vorgeschlagen.
     unknown_action, unknown_notes = ge.distribution_action(f, BASE, None, {"playlists": UNKNOWN, "source_candidates": []})
     assert unknown_action == "observe" and any("Ressourcenlage ungeprüft" in n for n in unknown_notes)

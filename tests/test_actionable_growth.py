@@ -151,23 +151,25 @@ def test_observe_is_never_the_end_state_when_delivery_is_practically_zero():
     assert ge.state_of(starved(paid_views_32d=5), {"regime": "paid_excluded"}, BASE, {"candidate": False}) == "paid_excluded"
 
 
-def test_without_a_route_the_system_names_the_missing_evidence_and_probes_it():
+def test_without_a_hypothesis_there_is_no_task_at_all():
+    """Der Nutzer will zusaetzliche Reichweite, nicht mehr Evidenz: ohne Hypothese entsteht keine Aufgabe."""
     f = starved(traffic_total_7d=4)            # unter MIN_ROUTE_VIEWS: keine Route benennbar
     assert ge.known_route(f) is None
     action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, None, CHANNEL)
-    assert action == "probe_missing_evidence" and action not in ge.PASSIVE_ACTIONS
-    assert any("Keine belastbare Hypothese" in n for n in notes)
-    d = details_for(action, f, notes)
-    assert d["target_metric"] == "impressions_7d", "gemessen wird die Auslieferung selbst"
-    assert any("Aggregationsschwelle" in m for m in d["missing_evidence"])
-    assert any("Endscreen" in s and "Shine On" in s for s in d["steps"])
-    assert all("Playlist" not in s for s in d["steps"])
-    assert "Impressions" in d["success_criterion"] and "Titel" in d["do_not_change"]
-    # Fehlende Evidenz aus V6 wird woertlich uebernommen, wenn vorhanden.
-    external = {"missing_evidence": [{"family": "own_term_demand", "what": "Eigene Suchbegriff-Details"}], "actionable": False,
-                "evidence_level": "weak_proxy", "score": 40}
-    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, external, CHANNEL)[0] == "probe_missing_evidence"
-    assert details_for("probe_missing_evidence", f, [], external)["missing_evidence"] == ["Eigene Suchbegriff-Details"]
+    assert action == "observe"
+    assert any("Keine datenbegründete Growth-Hypothese" in n for n in notes)
+    assert any("Ersatzversuch ohne algorithmische" in n for n in notes)
+    # Auch mit einer schwachen externen Chance bleibt es dabei.
+    weak = {"missing_evidence": [{"family": "own_term_demand", "what": "Eigene Suchbegriff-Details"}],
+            "actionable": False, "evidence_level": "weak_proxy", "score": 40}
+    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, weak, CHANNEL)[0] == "observe"
+    # Eine belegte Chance dagegen erzeugt eine echte Growth-Maßnahme am eigenen Asset.
+    strong = {"actionable": True, "evidence_level": "own_analytics", "score": 61.1, "context_usable": True,
+              "gap": "suggested_opportunity", "kind": "suggested", "key": "nachbarschaft",
+              "audience": "Nachbarcluster"}
+    action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, strong, CHANNEL)
+    assert action == "target_suggested_cluster" and action in ge.GROWTH_LEVERS
+    assert ge.DISCOVERY_SURFACES[action].startswith("Suggested/Related")
 
 
 def test_multi_signal_proxy_may_steer_the_action_but_a_single_proxy_may_not():
@@ -205,7 +207,7 @@ def queue_row(video_id, title, state, action, score, **changes):
 
 def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone():
     rows = [queue_row("a", "Trainstories", "needs_distribution", "distribute_playlist_context", 70),
-            queue_row("b", "Shine On", "needs_distribution", "probe_missing_evidence", 60),
+            queue_row("b", "Shine On", "needs_distribution", "target_suggested_cluster", 60),
             queue_row("c", "Dritter", "protect_momentum", "protect_no_change", 95),
             queue_row("d", "Vierter", "needs_discovery", "improve_discovery", 55, action_status="running",
                       started_day=str(TODAY-timedelta(days=3)), held_since=str(TODAY-timedelta(days=3))),
@@ -219,11 +221,14 @@ def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone
     queue = plan["queue"]
     assert 0 < len(queue) <= ge.QUEUE_LIMIT == 3
     # Belegte Hypothesen zuerst; "b" beschafft nur Evidenz und rutscht dahinter, trotz hoeherem Score als "e".
-    assert [q["video_id"] for q in queue] == ["a", "e", "b"], "nach aktiver Prioritaet, je Video hoechstens eines"
+    # Echter Growth-Hebel am eigenen Asset zuerst, dann die uebrigen nach Potenzial.
+    assert queue[0]["video_id"] == "b" and queue[0]["action"] in ge.GROWTH_LEVERS
+    assert [q["video_id"] for q in queue] == ["b", "a", "e"], "Reichweiten-Hebel vor interner Wegeleitung"
     assert len({q["video_id"] for q in queue}) == len(queue)
     assert all(q["video_id"] not in ("c", "d", "f") for q in queue), "geschuetzt, laufend oder passiv bleibt draussen"
-    assert plan["now_do"]["video_id"] == "a" and plan["now_do"]["rank"] == 1
-    assert queue[-1]["action"] == "probe_missing_evidence"
+    assert plan["now_do"]["video_id"] == "b" and plan["now_do"]["rank"] == 1, "die Reichweiten-Maßnahme fuehrt"
+    assert queue[-1]["action"] == "distribute_playlist_context", "interne Wegeleitung steht hinten"
+    assert all(q["action"] not in ge.EVIDENCE_ONLY for q in queue), "Datenerzeugung ist keine Aufgabe"
     entry = queue[0]
     for key in ("steps", "baseline", "success_criterion", "stop_criterion", "window_days", "evaluate_after", "measure_from",
                 "expected_signal", "evidence", "do_not_change", "objective", "target_metric", "why"):
@@ -244,7 +249,8 @@ def test_queue_is_empty_and_says_why_when_nothing_is_actionable():
             queue_row("f", "Sechster", "observe", "observe", 45, priority=2)]
     plan = ge.daily_plan(rows, TODAY, {})
     assert plan["queue"] == [] and plan["now_do"] is None
-    assert plan["active_status"] == "none" and "kein ausführbares Experiment" in plan["queue_note"]
+    assert plan["active_status"] == "none"
+    assert "keine datenbegründete Reichweiten-Maßnahme" in plan["queue_note"]
 
 
 # ---------------------------------------------------------------------------- Lernschleife
@@ -399,30 +405,3 @@ def test_a_proxy_intent_never_replaces_a_chance_from_our_own_analytics(session):
 
 
 
-def test_too_little_delivery_keeps_the_decision_with_the_cold_start_path():
-    """Produktionsfall Shine On: 1 View und 5 Impressions/Woche bei belegter Suggested-Chance.
-
-    Vorher lenkte die externe Chance auf target_suggested_cluster – eine Wortlaut-Maßnahme –, und die
-    Messbarkeitsschwelle verwarf sie danach komplett; das Video fiel aus der Queue. Bei fast keiner
-    Auslieferung ist der Wortlaut nicht der Engpass, also behaelt der Zustand die Entscheidung und der
-    vorhandene Verteilungs-/Evidenzpfad greift.
-    """
-    starved = {"views_7d": 1, "impressions_7d": 5}
-    healthy = {"views_7d": 40, "impressions_7d": 900}
-    assert ge.steerable("needs_distribution", starved, "target_suggested_cluster") is False
-    assert ge.steerable("needs_distribution", starved, "target_search_opportunity") is False
-    assert ge.steerable("needs_distribution", healthy, "target_suggested_cluster") is True
-    assert ge.steerable("scale_opportunity", starved, "target_suggested_cluster") is True, "nur der Cold Start"
-    # Die Schwelle ist nicht gesenkt: sie sperrt die Optimierung weiter und laesst nur die Evidenzbeschaffung zu.
-    assert ge.measurable(starved, "discovery_views_7d")[0] is False
-    ok, note = ge.measurable(starved, "impressions_7d", "probe_missing_evidence")
-    assert ok is True and "Befund, nicht die" in note
-    # Und sie wirkt beim Ergebnis: ohne lesbare Auslieferung bleibt der Versuch ausdruecklich unklar.
-    row = SimpleNamespace(target_metric="impressions_7d", action="probe_missing_evidence")
-    small = {"paid_views": 0, "observed_days": 7, "impressions": 5, "views": 1, "ctr": None, "watch_minutes": 1,
-             "discovery_views": 1, "subscribers": 0}
-    barely = {**small, "impressions": 8}
-    real = {**small, "impressions": 120}
-    assert ge._outcome(row, small, barely, BASE)[0] == "inconclusive"
-    assert "keine Auslieferung entstanden" in ge._outcome(row, small, barely, BASE)[1]["reason"]
-    assert ge._outcome(row, small, real, BASE)[0] == "positive"

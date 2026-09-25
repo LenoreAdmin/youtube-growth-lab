@@ -104,6 +104,7 @@ function renderQueue(p){
   const ev=e.evidence||{},b=e.baseline||{};
   return `<article class="queue-item"><h3>#${e.rank} ${esc(e.title)} — ${esc(ACTION_LABELS[e.action]||e.action)}</h3>
   <p><strong>Ziel:</strong> ${esc(e.objective||"—")}${e.audience?" · <strong>Audience/Kontext:</strong> "+esc(e.audience):""}</p>
+  <p><strong>Algorithmische Fläche:</strong> ${esc(e.discovery_surface||"—")}${e.reliability?` · <strong>Aussagekraft:</strong> ${esc(e.reliability)}${e.reliability_note?` <small>${esc(e.reliability_note)}</small>`:""}`:""}</p>
   <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
   <p><strong>Evidenz:</strong> ${esc(EVIDENCE_LABELS[ev.level]||"keine externe Chance")}${ev.demand_source?" · "+esc(evidenceText(ev)):""}${ev.uncertainty?" · Unsicherheit "+esc(ev.uncertainty):""}${ev.confidence?" · Confidence "+esc(ev.confidence):""}</p>
   ${(ev.family_labels||[]).length?`<ul class="muted">${ev.family_labels.map(f=>"<li>"+esc(f)+"</li>").join("")}</ul>`:""}

@@ -117,6 +117,38 @@ DEFERRED_LEVERS = {"distribute_playlist_context": ["Beschreibungstext auf ein be
                                                "Titel oder Thumbnail testen"],
                    "target_search_opportunity": ["Playlist-Platzierung", "Titel"],
                    "target_suggested_cluster": ["Titel", "Thumbnail"]}
+# Die beeinflussbaren Eigenschaften des eigenen Assets, die auf algorithmische Auslieferung zielen.
+# Interne Wegeleitung (Endscreen, Playlist, Verlinkung) ist ausdruecklich KEIN Growth-Mechanismus und
+# niemals ein Ersatz, nur damit ein Experiment existiert.
+GROWTH_LEVERS = ("test_title", "test_thumbnail", "test_title_thumbnail", "packaging_for_audience",
+                 "target_search_opportunity", "target_suggested_cluster", "improve_discovery",
+                 "revive_existing_video", "investigate_retention")
+ROUTING_LEVERS = ("link_from_own_video", "place_in_existing_playlist", "create_playlist_context",
+                  "probe_missing_evidence", "cross_promote")
+# Welche YouTube-Discovery-Flaeche eine Maßnahme beeinflussen soll – gehoert in jeden Vorschlag.
+DISCOVERY_SURFACES = {
+    "test_title": "Browse/Home und Suggested: Klickentscheidung bei bestehender Auslieferung",
+    "test_thumbnail": "Browse/Home und Suggested: Klickentscheidung bei bestehender Auslieferung",
+    "test_title_thumbnail": "Browse/Home und Suggested: Klickentscheidung bei bestehender Auslieferung",
+    "packaging_for_audience": "Browse/Home: Auslieferung an die belegte Zielgruppe",
+    "target_search_opportunity": "YouTube-Suche: Treffer auf real gemessene Suchbegriffe",
+    "target_suggested_cluster": "Suggested/Related: Nachbarschaft der Videos, neben denen wir ausgeliefert werden",
+    "improve_discovery": "Browse und Suggested: thematische Einordnung des Videos",
+    "revive_existing_video": "Browse/Suggested: erneute Auslieferung eines vorhandenen Videos",
+    "investigate_retention": "Suggested: Sitzungswert entscheidet, ob YouTube weiter ausliefert",
+    "link_from_own_video": "Interne Wegeleitung (keine algorithmische Flaeche)",
+    "place_in_existing_playlist": "Playlist-Seite und Autoplay (interne Wegeleitung)",
+    "create_playlist_context": "Playlist-Seite (interne Wegeleitung)",
+    "probe_missing_evidence": "Evidenzbeschaffung, keine algorithmische Flaeche",
+    "cross_promote": "Interne Wegeleitung (keine algorithmische Flaeche)",
+    "observe": "keine", "protect_no_change": "keine", "create_followup_content": "Browse/Suggested (neues Video)"}
+# Belastbarkeit der spaeteren Aussage – getrennt von der Frage, ob die Hypothese zulaessig ist.
+RELIABLE, INDICATIVE = "belastbar", "indikativ"
+# Aktionen, deren Zweck Datenerzeugung oder Messbarkeit ist. Sie sind interne Mittel und gehoeren nicht in
+# JETZT TUN: der Nutzer will zusaetzliche organische Reichweite, nicht mehr Evidenz.
+EVIDENCE_ONLY = ("probe_missing_evidence", "create_playlist_context")
+EVIDENCE_LEVEL_RANK = {"own_analytics": 3, "multi_signal_proxy": 2, "weak_proxy": 1}
+STRONG_EVIDENCE = ("own_analytics", "multi_signal_proxy")
 MIN_MEASURABLE_VIEWS_7D = 3        # Darunter kann ein Effekt nicht von Rauschen getrennt werden.
 MIN_MEASURABLE_IMPRESSIONS_7D = 10
 # Lebenszyklus einer Maßnahme. Ohne Bestätigung durch den Menschen bleibt sie ein Vorschlag:
@@ -501,21 +533,26 @@ def distribution_action(f, base, external, channel=None):
         rejected = [f"Externe Chance „{external.get('key')}“ bleibt Hypothese und lenkt keinen Wortlaut: "
                     f"{external.get('context_reason') or 'thematische Relevanz nicht ausreichend belegt'}"]
     lever, lever_note = feasible_lever(channel)
-    if lever is None:
+    if lever is None or lever in EVIDENCE_ONLY:
+        # Eine Playlist anzulegen oder Evidenz zu beschaffen erzeugt keine algorithmische Auslieferung.
         return "observe", [head]+rejected+[lever_note,
-                "Sobald der nächste Discovery-Lauf das Playlist-Inventar geprüft hat, entsteht hier ein ausführbares Experiment."]
+                "Daraus entsteht keine Aufgabe: eine Oberfläche nur zum Messen anzulegen bringt keine "
+                "zusätzliche organische Reichweite."]
     if route:
         return lever, [head]+rejected+[f"Belegte eigene Route: {route['label']} "
                 f"({route['share']*100:.0f} % von {route['views_7d']} Views der letzten bekannten Woche) – dort ansetzen, "
                 "ohne Titel oder Thumbnail anzufassen.", lever_note]
+    # Ohne belegte eigene Route und ohne tragfaehige Chance gibt es keine datenbegruendete Hypothese. Dann
+    # entsteht hier ausdruecklich keine Maßnahme: eine Playlist anzulegen oder irgendwo einen Endscreen zu
+    # setzen, nur damit ein Experiment existiert, erzeugt keine algorithmische Auslieferung.
     missing = [m["what"] for m in ((external or {}).get("missing_evidence") or [])][:3]
-    hypothesis = ["Keine belastbare Hypothese: "
-                  + ("Es fehlt " + "; ".join(missing)+"." if missing else
-                     f"Der eigene Quellenmix der letzten Woche hat weniger als {MIN_ROUTE_VIEWS} Views und nennt keine Route."),
-                  "Risikoarmes Experiment beschafft genau diese Evidenz, ohne das Paket zu verändern.", lever_note]
-    # Ohne belegte Ressource gibt es nichts zu verlinken: dann ist das Anlegen der Ressource das Experiment.
-    action = "probe_missing_evidence" if lever != "create_playlist_context" else lever
-    return action, [head]+rejected+hypothesis
+    return "observe", [head]+rejected+[
+        "Keine datenbegründete Growth-Hypothese für dieses Video: "
+        + ("es fehlt " + "; ".join(missing)+"." if missing else
+           f"der eigene Quellenmix der letzten Woche hat weniger als {MIN_ROUTE_VIEWS} Views und nennt keine Route, "
+           "und es liegt keine belegte Audience-/Placement-Chance vor."),
+        "Interne Wegeleitung oder eine neue Playlist wären hier nur ein Ersatzversuch ohne algorithmische "
+        "Wirkung – deshalb bewusst keine Maßnahme, bis echte Signale vorliegen."]
 
 
 def baseline_snapshot(f):
@@ -579,18 +616,16 @@ def recent_results(session, limit=6):
     return out
 
 
-def steerable(state, f, action):
-    """Darf eine externe Chance diese Aktion lenken – oder ist zuerst die Auslieferung selbst das Problem?
+def strong_hypothesis(external, action):
+    """Traegt diese Maßnahme eine datenbelegte Hypothese auf zusaetzliche algorithmische Auslieferung?
 
-    Cold Start: bei fast keiner Auslieferung ist die Wortwahl nicht der Engpass. Eine Optimierungsmaßnahme
-    waere hier nicht messbar und wurde bisher deshalb *verworfen* – das Video fiel damit ganz aus der Queue,
-    obwohl der Engine fuer genau diesen Fall den Verteilungs-/Evidenzpfad kennt (distribution_action).
-    Also: ist die Ausgangsbasis fuer die gelenkte Aktion nicht messbar, behaelt der Zustand die Entscheidung.
-    Die Schwelle bleibt unveraendert; sie entscheidet nur, welcher Pfad greift.
+    Entscheidend ist die Evidenz hinter der Chance und ein Hebel am eigenen Asset – nicht, wie viel
+    Auslieferung es heute schon gibt. Wenig Distribution ist der Growth-Fall, kein Ausschlussgrund.
     """
-    if state != "needs_distribution":
-        return True
-    return measurable(baseline_snapshot(f), TARGETS.get(action))[0]     # ohne Cold-Start-Ausnahme
+    if action not in GROWTH_LEVERS:
+        return False
+    external = external or {}
+    return bool(external.get("actionable")) and external.get("evidence_level") in STRONG_EVIDENCE     # ohne Cold-Start-Ausnahme
 
 
 def choose_action(state, f, rev, base, experiments, record, external=None, channel=None):
@@ -607,8 +642,7 @@ def choose_action(state, f, rev, base, experiments, record, external=None, chann
     elif running:
         action, notes = "observe", [f"Experiment #{running[0]['decision_id']} läuft – erst messen, keine weitere Änderung stapeln."]
     elif (external and external.get("actionable") and (external.get("score") or 0) >= EXTERNAL_MIN_SCORE
-            and external.get("context_usable") and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS
-            and steerable(state, f, GAP_ACTIONS[external["gap"]])):
+            and external.get("context_usable") and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS):
         action = "revive_existing_video" if state == "revival_candidate" and external["gap"] != "packaging_opportunity" else GAP_ACTIONS[external["gap"]]
         notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Evidenz: "
                  f"{external.get('evidence_level')}) lenkt die Aktion."]
@@ -869,6 +903,8 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
                     "design": "observational", "note": "Vor der Änderung im Experiment Memory registrieren; Zeitpunkt protokollieren."}
     return {"action": action, "state": state, "reason": reason, "notes": notes, "signals": signals, "against": against,
             "confidence": conf, "target_metric": target, "window_days": window, "success_criterion": success, "stop_criterion": stop,
+            "discovery_surface": DISCOVERY_SURFACES.get(action, "algorithmische YouTube-Flächen"),
+            "reliability": RELIABLE if measurable(baseline_snapshot(f), target, action)[0] else INDICATIVE,
             "steps": experiment_steps(action, title or "dieses Video", f, external, channel),
             "primary_lever": LEVERS.get(action), "deferred_levers": DEFERRED_LEVERS.get(action, []),
             "requires": requirement(action, channel), "choices": choices_for(action, channel),
@@ -938,8 +974,14 @@ def evaluate_actions(session, now, by_id, base):
         outcome, detail = _outcome(row, before, after, base)
         linked = list(session.scalars(select(Decision.id).where(Decision.video_id == row.video_id, Decision.status.in_(["registered", "evaluated"]),
             Decision.created_at >= aware(row.created_at)-timedelta(days=1))))
+        payload = row.payload or {}
+        audience = payload.get("audience") or {}
         row.status, row.outcome, row.evaluated_at = EVALUATED, outcome, now
         row.evaluation = {"before": before, "after": after, "regime_after": regime_after, "detail": detail,
+                          "hypothesis": {"lever": row.action, "surface": payload.get("discovery_surface"),
+                                         "audience": audience.get("target"), "gap": audience.get("gap"),
+                                         "evidence_level": audience.get("evidence_level"),
+                                         "reliability": payload.get("reliability")},
                           "started_day": str(start), "frozen_baseline": row.baseline or {},
                           "decision_ids": linked, "note": "Beobachtete Veränderung, keine Kausalwirkung; Saison, Distribution und Algorithmus sind nicht kontrolliert."}
         evaluated += 1
@@ -1307,6 +1349,8 @@ def queue_entry(row, rank, today):
             "context_status": ("belegt" if (ext.get("context_usable") if ext else False) else
                                "Hypothese – gibt keinen Wortlaut vor" if ext else "kein externer Kontext"),
             "context_reason": ext.get("context_reason") if ext else None,
+            "discovery_surface": DISCOVERY_SURFACES.get(row["action"], "algorithmische YouTube-Flächen"),
+            "reliability": row.get("reliability"), "reliability_note": row.get("reliability_note"),
             "expected_signal": f"{row['target_metric']} steigt messbar über die Wochenschwankung des Kanals",
             "target_metric": row["target_metric"], "window_days": row["window_days"],
             "measure_from": str(today), "evaluate_after": row["next_evaluation"],
@@ -1323,10 +1367,14 @@ def queue_entry(row, rank, today):
 def experiment_queue(ranking, today):
     """A short daily queue: at most one experiment per video, winners protected, running tests untouched."""
     queue, running, not_testable, rank = [], [], [], 0
-    # Reihenfolge: belegte Hypothesen zuerst, reine Evidenzbeschaffung danach - sie ist Vorarbeit, keine Chance.
-    for row in sorted((r for r in ranking if r["active_eligible"]),
-                      key=lambda r: (r["action"] == "probe_missing_evidence",
-                                     -(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0))):
+    # Reihenfolge ausschliesslich nach Reichweiten-Aussicht: echter Growth-Hebel am eigenen Asset zuerst,
+    # dann die Staerke der Evidenz, dann das geschaetzte Zusatzpotenzial. Nicht nach Messbarkeit.
+    def growth_order(r):
+        external = r.get("external") or {}
+        return (0 if r["action"] in GROWTH_LEVERS else 1,
+                -EVIDENCE_LEVEL_RANK.get(external.get("evidence_level"), 0),
+                -(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0))
+    for row in sorted((r for r in ranking if r["active_eligible"]), key=growth_order):
         if row.get("action_status") == RUNNING:
             # Vom Menschen bestätigt gestartet und in Messung: sichtbar halten, nicht erneut anstoßen.
             running.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
@@ -1335,7 +1383,20 @@ def experiment_queue(ranking, today):
                             "evaluate_after": row["next_evaluation"], "target_metric": row["target_metric"],
                             "note": "Läuft seit deiner Bestätigung – bis zur Auswertung nichts weiter an diesem Video ändern."})
             continue
+        if row["action"] in EVIDENCE_ONLY:
+            # Sicherheitsnetz: falls ein anderer Pfad so etwas waehlt, bleibt es intern.
+            not_testable.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
+                                 "state": row["state"], "baseline": row.get("baseline"),
+                                 "reason": ("Datenerzeugung ist keine Reichweiten-Maßnahme und erscheint nicht in "
+                                            "JETZT TUN.")})
+            continue
         ok, why = measurable(row.get("baseline"), row.get("target_metric"), row.get("action"))
+        row["reliability"] = RELIABLE if ok else INDICATIVE
+        row["reliability_note"] = why if not ok else None
+        if not ok and strong_hypothesis(row.get("external_full") or row.get("external"), row["action"]):
+            # Zulaessigkeit und Sicherheit sind zwei Fragen: die Hypothese ist belegt, die spaetere Aussage
+            # bleibt indikativ. Beides wird benannt, nichts wird behauptet.
+            ok = True
         if not ok:
             # Ohne messbare Ausgangsbasis waere jedes Ergebnis "unklar": sichtbar machen, aber nicht priorisieren.
             not_testable.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
@@ -1379,7 +1440,8 @@ def daily_plan(ranking, today, record, results=None):
             "now_do": queue[0] if queue else None,
             "queue_note": ("Ausführbare Experimente für heute – von dir auszuführen, das System ändert nichts auf YouTube. "
                            f"Höchstens {QUEUE_LIMIT} gleichzeitig und nie zwei am selben Video."
-                           if queue else "Heute kein ausführbares Experiment: geschützte oder laufende Videos, oder Evidenz reicht nicht."),
+                           if queue else "Heute keine datenbegründete Reichweiten-Maßnahme: geschützte oder laufende "
+                                        "Videos, oder für kein Video liegt eine belegte Audience-/Placement-Chance vor."),
             "momentum_top": {"video_id": momentum_top["video_id"], "title": momentum_top["title"], "state": momentum_top["state"],
                              "opportunity_score": momentum_top["opportunity_score"]} if momentum_top else None,
             "subscriber_focus": subscriber["video_id"] if subscriber else None, "viewer_focus": viewer["video_id"] if viewer else None,

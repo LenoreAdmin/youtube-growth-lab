@@ -107,20 +107,43 @@ def test_the_wording_experiment_leaves_playlist_and_packaging_alone():
 
 
 # ---------------------------------------------------------------------------- Messbarkeit / Priorisierung
-def test_a_video_without_a_measurable_baseline_is_not_queued():
+def test_a_low_baseline_limits_the_certainty_not_the_growth_measure():
+    """Zwei verschiedene Fragen: darf die Hypothese laufen, und wie sicher ist die spaetere Aussage?"""
     ok, reason = ge.measurable({"views_7d": 0, "impressions_7d": 2})
     assert ok is False and "Keine messbare Ausgangsbasis" in reason
     assert ge.measurable({"views_7d": 18, "impressions_7d": 42})[0] is True
     assert ge.measurable({"views_7d": 5, "impressions_7d": 11})[0] is True
+    strong = {"actionable": True, "evidence_level": "own_analytics", "score": 61.1, "gap": "suggested_opportunity",
+              "kind": "suggested", "key": "nachbarschaft"}
     rows = [queue_row("a", "Trainstories", "needs_distribution", "link_from_own_video", 70, priority=1,
                       baseline={"views_7d": 18, "impressions_7d": 42, "ctr_7d": .08}),
-            queue_row("b", "Shine On", "needs_distribution", "probe_missing_evidence", 60, priority=2,
-                      baseline={"views_7d": 5, "impressions_7d": 11, "ctr_7d": .06}),
+            queue_row("b", "Shine On", "needs_distribution", "target_suggested_cluster", 60, priority=2,
+                      baseline={"views_7d": 1, "impressions_7d": 5, "ctr_7d": .06}, external=strong),
             queue_row("c", "11AM Album - Teaser", "needs_distribution", "link_from_own_video", 80, priority=3,
                       baseline={"views_7d": 0, "impressions_7d": 1, "ctr_7d": None})]
     plan = ge.daily_plan(rows, TODAY, {})
-    assert [q["video_id"] for q in plan["queue"]] == ["a", "b"], "Trainstories zuerst, dann Shine On"
+    ids = [q["video_id"] for q in plan["queue"]]
+    assert ids[0] == "b", "die belegte Reichweiten-Hypothese steht vorn"
+    assert "a" in ids and "c" not in ids, "ohne Hypothese und ohne messbare Basis keine Aufgabe"
+    shine = next(q for q in plan["queue"] if q["video_id"] == "b")
+    assert shine["reliability"] == ge.INDICATIVE and "Keine messbare Ausgangsbasis" in shine["reliability_note"]
+    assert next(q for q in plan["queue"] if q["video_id"] == "a")["reliability"] == ge.RELIABLE
     assert [x["video_id"] for x in plan["not_testable"]] == ["c"]
-    assert "Keine messbare Ausgangsbasis" in plan["not_testable"][0]["reason"]
-    # Trotz hoechstem Score bekommt das nicht messbare Video keine Aufgabe.
-    assert plan["now_do"]["video_id"] == "a"
+
+
+def test_every_growth_action_names_its_discovery_surface_and_certainty():
+    """Jede Maßnahme sagt, welche algorithmische Flaeche sie treffen soll und wie sicher die Aussage ist."""
+    from pathlib import Path
+    for lever in ge.GROWTH_LEVERS:
+        assert ge.DISCOVERY_SURFACES.get(lever), lever
+    assert "Suggested" in ge.DISCOVERY_SURFACES["target_suggested_cluster"]
+    assert "Suche" in ge.DISCOVERY_SURFACES["target_search_opportunity"]
+    assert "Browse" in ge.DISCOVERY_SURFACES["packaging_for_audience"]
+    row = queue_row("a", "Trainstories", "needs_distribution", "target_suggested_cluster", 70, priority=1,
+                    external={"actionable": True, "evidence_level": "own_analytics", "score": 61.1,
+                              "gap": "suggested_opportunity", "kind": "suggested", "key": "nachbarschaft"})
+    entry = ge.daily_plan([row], TODAY, {})["queue"][0]
+    assert entry["discovery_surface"].startswith("Suggested/Related")
+    assert entry["reliability"] in (ge.RELIABLE, ge.INDICATIVE)
+    js = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert "Algorithmische Fläche" in js and "Aussagekraft" in js
