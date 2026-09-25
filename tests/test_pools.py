@@ -207,7 +207,8 @@ def test_a_playlist_needs_a_real_theme_or_a_proven_neighbourhood(session):
     assert "PLtiny" not in kept, "zwei Titel sind kein gepflegter Ort"
     surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "PLneighbour"))
     assert surface.evidence["neighbourhood_overlap"] == ["Night train ambient journey"]
-    assert "belegten Nachbarschaft" in surface.evidence["why"]
+    assert surface.evidence["audience_fit"]["class"] == "neighbourhood"
+    assert "belegte Nachbarschaft" in surface.evidence["why"]
     assert surface.traffic_source == "PLAYLIST" and surface.lever_class == "playlist_placement"
 
 
@@ -245,7 +246,8 @@ def test_every_rejected_candidate_names_its_concrete_reason(session):
     assert verdicts["Night train ambient journeys"]["kept"] is True
     assert "Titel" in verdicts["Night train ambient"]["reason"] and "mindestens 5" in verdicts["Night train ambient"]["reason"]
     assert "Abonnenten" in verdicts["Night Train Tiny"]["reason"]
-    assert "Kein Bezug" in verdicts["Kochkanal"]["reason"] or "Themenbezug zu schwach" in verdicts["Kochkanal"]["reason"]
+    assert "Keine belegbare Audience-Naehe" in verdicts["Kochkanal"]["reason"]
+    assert verdicts["Kochkanal"]["fit_class"] is None
     assert verdicts["Night train ambient journeys"]["size"] == "30 Titel"
     assert verdicts["Night Train Tiny"]["size"] == "12 Abonnenten"
     # Das Verdikt haengt am Kandidaten, damit das Dashboard es ohne neuen Lauf zeigen kann.
@@ -346,3 +348,42 @@ def test_a_playlist_pitch_becomes_an_executable_proposal(session):
     entry = aq.overview(session, NOW)["traffic_queue"][0]
     assert entry["surface_url"] == "https://www.youtube.com/playlist?list=PLgood"
     assert entry["traffic_source"] == "PLAYLIST"
+
+
+def test_playlist_outreach_picks_the_full_music_video_not_the_album_teaser(session):
+    """Produktionsfall: die Swiss-Pop-Playlists bekamen automatisch den 11AM-Album-Teaser angeboten."""
+    from app.models import Video as V
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.get(Video, "a").duration_seconds = 214
+    session.add(V(id="c", channel_id=session.get(Video, "a").channel_id, title="11AM Album - Teaser",
+                  published_at=session.get(Video, "a").published_at, duration_seconds=42, active=True))
+    session.commit()
+    seed_profile(session, tags=["swiss pop", "pop", "ambient"], description="Schweizer Pop aus dem Nachtzug.",
+                 topics=("https://en.wikipedia.org/wiki/Pop_music",))
+    seed_profile(session, video_id="c", tags=["swiss pop", "pop"], description="11AM Album Teaser", topics=(),
+                 channel_description="", channel_keywords="")
+    pool(session, "playlist", "PLswiss", "Swiss Pop Music", item_count=120, subscribers=8000,
+         channel_title="Swiss Charts", description="Die besten Songs aus der Schweiz: swiss pop",
+         query="switzerland pop", details={"items": ["Ein Schweizer Pop Song", "Noch ein Pop Titel"]})
+    result = aq.collect(session, NOW, http=FakeHttp())
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "curated_playlist"))
+    assert surface is not None, [v["reason"] for v in result["pools"]["verdicts"]]
+    assert surface.video_id == "a", "ein 42-Sekunden-Teaser gehoert in keine Playlist-Anfrage"
+    assert "Trainstories" in surface.evidence["why"]
+    assert surface.evidence["audience_fit"]["class"] in ("genre", "topic", "neighbourhood")
+
+
+def test_a_channel_needs_genre_or_neighbourhood_evidence_not_only_english_words(session):
+    """YT_OTHER_PAGE ist eine Kommentar-Flaeche: dort zaehlt musikalische Naehe oder belegte Nachbarschaft."""
+    seed_theme(session)
+    pool(session, "channel", "UCrandom", "Long Ride Trucking", subscribers=40000, item_count=200,
+         description="long rides out on the road, good times", query="night train ambient")
+    pool(session, "channel", "UCmusic", "Night Ambient Radio", subscribers=40000, item_count=200,
+         description="ambient night train music radio", query="night train ambient",
+         details={"topics": ["https://en.wikipedia.org/wiki/Ambient_music"], "keywords": "ambient night"})
+    result = aq.collect(session, NOW, http=FakeHttp())
+    verdicts = {v["title"]: v for v in result["pools"]["verdicts"]}
+    assert verdicts["Long Ride Trucking"]["kept"] is False
+    assert verdicts["Long Ride Trucking"]["fit_class"] is None
+    assert verdicts["Night Ambient Radio"]["kept"] is True
+    assert verdicts["Night Ambient Radio"]["fit_class"] in ("genre", "neighbourhood")

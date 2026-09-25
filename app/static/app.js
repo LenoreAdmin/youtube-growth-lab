@@ -64,7 +64,7 @@ function renderTraffic(a){
   <code>${esc(i.query)}</code><br><small>Belege: ${(i.evidence||[]).map(e=>esc(e.label)+" – „"+esc(e.detail)+"“").join(" · ")}</small></li>`).join("")}</ul>`
   :`<p class="muted">Noch keine belegten Audience-Intents: aus Titel, Beschreibung, Tags, Themenkategorien, realen Suchbegriffen und belegter Nachbarschaft ergibt sich noch kein Thema mit Kontext.</p>`;
  const pq=(pools.queries||[]).map(x=>`<li><code>${esc(x.query)}</code> (${esc(x.kind)}, Intent ${esc(x.intent||x.source||"—")}): ${num(x.results)} Treffer, ${num(x.stored)} gespeichert${x.note?" – "+esc(x.note):""}${(x.titles||[]).length?`<br><small>${(x.titles||[]).map(esc).join(" · ")}</small>`:""}</li>`).join("");
- const pc=(pools.candidates||[]).map(c=>`<li>${c.kept?"✓":"✗"} <strong>${esc(c.title||"—")}</strong> <small>${esc(c.kind)} · ${esc(c.size||"")}${c.query?` · gefunden über „${esc(c.query)}“`:""}${c.intent?` · Intent: ${esc(c.intent)}`:""}${c.stale?" · aus einem früheren, inzwischen verworfenen Query":""}</small>${c.url?` <a href="${esc(c.url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""}<br><small>${esc(c.reason||"noch nicht geprüft")}</small></li>`).join("");
+ const pc=(pools.candidates||[]).map(c=>`<li>${c.kept?"✓":"✗"} <strong>${esc(c.title||"—")}</strong> <small>${esc(c.kind)} · ${esc(c.size||"")}${c.query?` · gefunden über „${esc(c.query)}“`:""}${c.intent?` · Intent: ${esc(c.intent)}`:""}${c.stale?" · aus einem früheren, inzwischen verworfenen Query":""}${c.fit_class?` · Fit: ${esc(c.fit_class)}`:""}</small>${c.url?` <a href="${esc(c.url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""}<br><small>${esc(c.reason||"noch nicht geprüft")}</small></li>`).join("");
  $("trafficPools").innerHTML=`<h3>Suche nach fremden Playlists und Kanälen</h3>`
   +(pools.searched?`<ul>${pq}</ul>`:`<p class="muted">${esc(pools.note||"In diesem Lauf wurde keine Pool-Suche ausgeführt.")}</p>`)
   +(pc?`<p><strong>Kandidaten und Filtergründe</strong> (${num(pools.kept)} aufgenommen, ${num(pools.rejected)} verworfen)</p><ul>${pc}</ul>`:"");
@@ -76,6 +76,7 @@ function renderTraffic(a){
  $("trafficQueue").innerHTML=q.map(e=>`<article class="queue-item"><h3>#${e.rank} ${esc(e.title)} — ${esc(e.action_label||e.action)}</h3>
   <p><strong>Trafficquelle:</strong> ${esc(e.surface||"—")}${e.surface_url?` <a href="${esc(e.surface_url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""} <small>${esc(e.traffic_source||"")}${e.verified?" · erreichbar geprüft":""}</small></p>
   <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
+  ${e.audience_fit?`<p><strong>Audience-Fit:</strong> ${esc(e.audience_fit.class||"—")}${(e.audience_fit.genre||[]).length?` · Genre/Stimmung: ${(e.audience_fit.genre||[]).map(esc).join(", ")}`:""}${(e.audience_fit.topic||[]).length?` · Thema: ${(e.audience_fit.topic||[]).map(esc).join(", ")}`:""}<br><small>${esc(e.audience_fit.why||"")}</small></p>`:""}
   <p><strong>Wirkmechanismus:</strong> ${esc(e.mechanism_status||"unbekannt")}${e.mechanism_note?" – "+esc(e.mechanism_note):""}${e.upgrade_rule?" <small>"+esc(e.upgrade_rule)+"</small>":""}</p>
   <p><strong>Aktion:</strong></p><ol>${(e.steps||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>
   <p><strong>Erwarteter Mechanismus:</strong> ${esc(e.mechanism||"")}</p>

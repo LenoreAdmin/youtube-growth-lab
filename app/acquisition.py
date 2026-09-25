@@ -37,6 +37,17 @@ MIN_CANDIDATE_VIEWS = 2000   # Öffentliche Reichweite, ab der ein fremdes Video
 MIN_CANDIDATE_SUBSCRIBERS = 500
 MIN_SHARED_TOKENS = 2        # Ein gemeinsames Wort ist keine Themengleichheit (siehe V6).
 MIN_EXPECTED_WEEKLY_VIEWS = 0.35  # Darunter ist eine Quelle eine Beobachtung, keine Traffic-Aktion.
+# Beweiskraft der Audience-Naehe, absteigend. Fuer YT_OTHER_PAGE (Kanaele) verlangen wir mindestens
+# „topic“; blosse Wortueberlappung hat gar keine Klasse und kommt nicht durch.
+FIT_RANK = {"neighbourhood": 3, "genre": 2, "topic": 1}
+FIT_LABELS = {"neighbourhood": "belegte Nachbarschaft", "genre": "gemeinsames Genre/Stil",
+              "topic": "inhaltliche Themennaehe"}
+TEASER_SECONDS = 90         # Kuerzer ist ein Teaser, kein vollstaendiges Musikvideo.
+# Themennaehe ohne musikalische Evidenz ist eine schwaechere Spur und darf nicht oben stehen.
+FIT_FACTOR = {"neighbourhood": 1.0, "genre": 1.0, "topic": 0.8}
+# Wer in eine Playlist aufgenommen wird, wird dort gespielt; ein Kommentar laedt nur zum Klick ein.
+# Das ist ein Unterschied im Mechanismus, nicht in der Sympathie – und er gehoert in die Reihenfolge.
+MECHANISM_FACTOR = {"curated_playlist": 1.0, "pool_channel": 0.85}
 MIN_PLAYLIST_ITEMS = 5       # Unter fuenf Titeln ist es kein gepflegter Ort, sondern ein Entwurf.
 # Formatwörter beschreiben die Verpackung, nicht das Thema: „Album Teaser“ passt auf jedes Album-Teaser
 # der Welt. Der erste Lauf hat darüber ein BLACKPINK-Video als Fläche für unser Teaser-Video vorgeschlagen.
@@ -379,6 +390,50 @@ def own_vocabulary(session):
     return {video_id: set(list(words)[:MAX_VOCAB_TOKENS*3]) for video_id, words in vocab.items()}
 
 
+def video_profiles(session, generic=None):
+    """Das musikalische Profil je eigenem Video – einmal je Lauf, damit jede Pruefung dieselbe Basis hat."""
+    from . import audience
+    generic = generic_tokens(session) if generic is None else generic
+    return {video.id: audience.music_profile(session, video, generic)
+            for video in session.scalars(select(Video).where(Video.active.is_(True)))}
+
+
+def full_release(video):
+    """Ein vollstaendiges Musikvideo – kein Teaser, kein Schnipsel."""
+    from . import audience
+    from .discovery import tokens as split
+    words = set(split(video.title))
+    return (video.duration_seconds or 0) >= TEASER_SECONDS and not (words & (FORMAT_WORDS | audience.LABEL_WORDS))
+
+
+def best_video_for(session, words, profiles, prefer_full=False, tags=(), topics=(), intent=None,
+                   neighbourhood=()):
+    """Welches unserer Videos passt inhaltlich wirklich zu diesem Ort – und ist ueberhaupt vorzeigbar?
+
+    Fuer eine Playlist-Anfrage ist ein 45-Sekunden-Teaser der falsche Kandidat, selbst wenn seine Worte
+    zufaellig passen: der Kurator soll etwas aufnehmen koennen. Deshalb entscheidet die Passung, und bei
+    aehnlicher Passung das vollstaendige Video.
+    """
+    from . import audience
+    best, best_key = None, None
+    for video in session.scalars(select(Video).where(Video.active.is_(True))):
+        profile = profiles.get(video.id)
+        if profile is None:
+            continue
+        fit = audience.audience_fit(words, profile, intent_hit=intent if (intent or {}).get("video_id") == video.id
+                                    else None, neighbourhood=neighbourhood, topics=topics, tags=tags)
+        if fit["class"] is None:
+            continue
+        complete = 1 if full_release(video) else 0
+        # Fuer eine Playlist-Anfrage entscheidet zuerst, ob es ueberhaupt ein vollstaendiges Video ist:
+        # ein Album-Teaser laesst sich nicht in eine Playlist aufnehmen, auch wenn seine Worte passen.
+        key = ((complete, FIT_RANK[fit["class"]], len(fit["shared"])) if prefer_full
+               else (FIT_RANK[fit["class"]], len(fit["shared"]), complete))+(video.duration_seconds or 0,)
+        if best_key is None or key > best_key:
+            best, best_key = (video, fit), key
+    return best
+
+
 def generic_tokens(session):
     """Begriffe, die in vielen fremden Titeln stehen, taugen nicht als Themenbeleg – datengetrieben ermittelt."""
     from .discovery import tokens as split
@@ -393,23 +448,41 @@ def generic_tokens(session):
     return frequent | FORMAT_WORDS
 
 
-def candidate_matches(session, vocab, generic=None):
-    """Fremde Videos aus den Suchproben, die thematisch mehrfach zu einem unserer Videos passen."""
-    from .discovery import tokens as split, BRAND
+def candidate_matches(session, vocab, generic=None, profiles=None):
+    """Fremde Videos aus den Suchproben, die belegbar zur Audience eines eigenen Videos passen.
+
+    Wortueberlappung allein genuegt nicht. „Long Ride“ von Young Nudy teilte mit uns long, out und ride –
+    das ist eine Sprache, keine Zielgruppe. Gefordert ist ein Fit nach app/audience.py: gemeinsames Genre
+    mit musikalischer Klassifizierung, belegte Nachbarschaft oder mindestens zwei Begriffe mit erkennbarer
+    Bedeutung.
+    """
+    from . import audience
+    from .discovery import tokens as split
     generic = generic if generic is not None else generic_tokens(session)
-    ignore = BRAND | generic
+    profiles = profiles if profiles is not None else video_profiles(session, generic)
+    neighbours = {row.detail for row in session.scalars(select(DiscoverySignal).where(
+        DiscoverySignal.kind == "own_suggested_source"))}
     matches = []
     for item in session.scalars(select(DiscoveryItem)):
         if not (item.via or {}).get("queries") or item.video_id in vocab:
             continue
         words = set(split(item.title))|{t for tag in (item.tags or []) for t in split(tag)}
-        best, shared = None, []
+        best, fit = None, None
         for video_id, own in vocab.items():
-            common = sorted((words & own)-ignore)
-            if len(common) > len(shared):
-                best, shared = video_id, common
-        if best is not None and len(shared) >= MIN_SHARED_TOKENS:
-            matches.append((item, best, tuple(shared)))
+            profile = profiles.get(video_id)
+            if profile is None:
+                continue
+            candidate = audience.audience_fit(specific(words & own, generic) + sorted(words & profile["genres"]),
+                                              profile, tags=item.tags or [],
+                                              neighbourhood=[item.title] if item.video_id in neighbours else ())
+            if candidate["class"] is None:
+                continue
+            if fit is None or FIT_RANK[candidate["class"]] > FIT_RANK[fit["class"]] \
+                    or (FIT_RANK[candidate["class"]] == FIT_RANK[fit["class"]]
+                        and len(candidate["shared"]) > len(fit["shared"])):
+                best, fit = video_id, candidate
+        if best is not None:
+            matches.append((item, best, tuple(fit["shared"]), fit))
     return matches
 
 
@@ -421,8 +494,11 @@ ACTIVITY_PATTERNS = ((r"([\d.,]+)\s*(?:k\s*)?(?:members|mitglieder|subscribers|a
 
 
 def specific(tokens_in, generic):
+    """Begriffe, die ueberhaupt etwas ueber ein Thema sagen: keine Marken, keine Formate, keine Fuellwoerter."""
+    from . import audience
     from .discovery import BRAND
-    return sorted({t for t in tokens_in if t not in generic and t not in BRAND and len(t) >= 4})
+    return sorted({t for t in tokens_in if t not in generic and t not in BRAND and len(t) >= 4
+                   and t not in audience.HELPER_WORDS and t not in audience.LABEL_WORDS})
 
 
 def pool_size(pool):
@@ -431,7 +507,7 @@ def pool_size(pool):
     return f"{pool.subscribers if pool.subscribers is not None else '?'} Abonnenten"
 
 
-def collect_pools(session, vocab, learned, generic, store):
+def collect_pools(session, vocab, learned, generic, store, profiles=None):
     """Gefundene Playlists und Kanaele pruefen: passt das Thema wirklich, ist der Ort gepflegt, wie gross ist er?
 
     Zwei Wege zur Relevanz. Erstens mindestens zwei spezifische gemeinsame Begriffe. Zweitens - staerker -
@@ -444,6 +520,7 @@ def collect_pools(session, vocab, learned, generic, store):
     from . import audience
     from .discovery import tokens as split
     neighbour_titles = {row.title for row in session.scalars(select(DiscoveryItem)) if row.title}
+    profiles = video_profiles(session, generic) if profiles is None else profiles
     verdicts = []
     for pool in session.scalars(select(AudiencePool)):
         details = pool.details or {}
@@ -461,37 +538,40 @@ def collect_pools(session, vocab, learned, generic, store):
         # Videotitel kein Wort teilt („Mongolian Trains“ vs. „Sealand Trainstories“).
         intent = details.get("intent") or {}
         hit = audience.matches(intent, words) if intent.get("head") else None
-        if hit and intent.get("video_id") is None and best is None:
-            best = next(iter(vocab), None)
-        if hit and intent.get("video_id") in vocab:
-            best = intent["video_id"]
+        # Welches unserer Videos passt hier wirklich – und ist es vorzeigbar? Fuer eine Playlist-Anfrage
+        # ist ein Album-Teaser der falsche Kandidat, auch wenn seine Worte zufaellig passen.
+        chosen = best_video_for(session, sorted(words), profiles, prefer_full=True,
+                               tags=details.get("items") or [], topics=details.get("topics") or [],
+                               intent=intent, neighbourhood=overlap[:2])
+        fit = chosen[1] if chosen else audience.audience_fit(sorted(words), next(iter(profiles.values()), {
+            "genres": set(), "moods": set(), "places": set(), "topics": set(), "terms": {}}))
+        if chosen:
+            best = chosen[0].id
+            shared = sorted(set(shared) | set(fit["shared"]))
         verdict = {"kind": pool.kind, "title": pool.title, "url": pool.url, "query": pool.query,
                    "query_source": details.get("query_source"), "size": pool_size(pool),
                    "shared_tokens": shared, "neighbourhood_overlap": overlap[:2], "kept": False, "reason": None,
-                   "intent": intent.get("label"), "intent_hit": (hit or {}).get("head")}
+                   "intent": intent.get("label"), "intent_hit": (hit or {}).get("head"),
+                   "fit_class": fit["class"], "fit_why": fit["why"],
+                   "video": chosen[0].title if chosen else None}
 
         def decide(reason, kept=False):
             verdict["reason"], verdict["kept"] = reason, kept
             verdicts.append(verdict)
-            pool.details = {**details, "verdict": {"kept": kept, "reason": reason, "shared_tokens": shared}}
+            pool.details = {**details, "verdict": {"kept": kept, "reason": reason, "shared_tokens": shared,
+                                                  "fit_class": fit["class"]}}
             return kept
 
-        if best is None:
-            decide("Kein Bezug zu einem unserer Videos: keine gemeinsamen spezifischen Begriffe.")
+        if best is None or fit["class"] is None:
+            detail = (f" Der Audience-Intent „{intent['label']}“ traegt hier nicht: "
+                      f"{', '.join(intent.get('head') or [])} fehlt im Titel, in der Beschreibung und im Inhalt."
+                      if intent.get("head") and not hit else "")
+            decide(fit["why"]+detail)
             continue
-        if len(shared) < MIN_SHARED_TOKENS and not overlap and not hit:
-            detail = (f" Der Audience-Intent „{intent['label']}“ ist hier nicht getroffen: keines der Themenwörter "
-                      f"({', '.join(intent.get('head') or [])}) steht im Titel, in der Beschreibung oder im Inhalt."
-                      if intent.get("head") else "")
-            decide(f"Themenbezug zu schwach: {len(shared)} spezifischer gemeinsamer Begriff"
-                   + (f" ({', '.join(shared)})" if shared else "")
-                   + f", mindestens {MIN_SHARED_TOKENS} noetig, und kein Video aus unserer belegten Nachbarschaft "
-                     "enthalten."+detail)
+        if pool.kind == "channel" and FIT_RANK[fit["class"]] < FIT_RANK["topic"]:
+            decide("Fuer einen Kanal verlangen wir Genre-, Stil- oder Nachbarschaftsevidenz; "
+                   "gemeinsame Allerweltswoerter genuegen nicht.")
             continue
-        if hit:
-            # Die getroffenen Intent-Begriffe sind selbst belegt und zaehlen damit als gemeinsame Begriffe.
-            shared = sorted(set(shared) | set(hit["head"]) | set(hit.get("context") or []))
-            verdict["shared_tokens"] = shared
         if pool.kind == "playlist":
             if (pool.item_count or 0) < MIN_PLAYLIST_ITEMS:
                 decide(f"Kein gepflegter Ort: {pool.item_count or 0} Titel, mindestens {MIN_PLAYLIST_ITEMS} noetig.")
@@ -500,23 +580,23 @@ def collect_pools(session, vocab, learned, generic, store):
             if entry.get("retired"):
                 decide("Hebel „Playlist-Platzierung“ ist nach erfolglosen Versuchen zurueckgestellt.")
                 continue
-            reason = (f"Die Playlist „{pool.title}“ von „{pool.channel_title}“ enthält {pool.item_count} Titel"
-                      + (f" und liegt auf unserem belegten Audience-Intent „{hit['label']}“ "
-                         f"(Treffer: {', '.join(hit['head']+ (hit.get('context') or []))})" if hit else "")
-                      + (f" und teilt die Begriffe {', '.join(shared)} mit unserem Thema" if shared and not hit else "")
-                      + (f"; darin liegen Videos aus unserer belegten Nachbarschaft ({', '.join(overlap[:2])})"
-                         if overlap else "")
-                      + ". Wer sie pflegt, kuratiert für genau diese Zuschauer.")
-            decide("Aufgenommen: Thema belegt, Ort gepflegt, Betreiber ansprechbar.", kept=True)
+            reason = (f"Die Playlist „{pool.title}“ von „{pool.channel_title}“ enthält {pool.item_count} Titel. "
+                      f"Audience-Fit ({FIT_LABELS[fit['class']]}): {fit['why']}"
+                      + (f" Passendes eigenes Video: „{chosen[0].title}“." if chosen else "")
+                      + (f" Gesucht wurde über den Intent „{hit['label']}“." if hit else "")
+                      + " Wer die Playlist pflegt, kuratiert für genau diese Zuschauer.")
+            decide(f"Aufgenommen ({FIT_LABELS[fit['class']]}): {fit['why']}", kept=True)
             store("curated_playlist", pool.key, best, pool.title, pool.url,
                   {"item_count": pool.item_count, "owner": pool.channel_title, "owner_subscribers": pool.subscribers,
                    "shared_tokens": shared, "neighbourhood_overlap": overlap[:3], "query": pool.query,
                    "sample_items": (details.get("items") or [])[:5], "intent": intent or None,
-                   "demand_source": "public_youtube_search", "why": reason,
+                   "audience_fit": fit, "demand_source": "public_youtube_search", "why": reason,
                    "uncertainty": ("mittel: Größe und Inhalt sind öffentlich belegt, ob der Kurator reagiert und ob "
                                    "daraus Views entstehen, ist offen.")},
                   {"traffic_potential": score_candidate(shared or ["nachbarschaft", "belegt"], pool.views,
-                                                        pool.subscribers, entry.get("weight", 1.0)),
+                                                        pool.subscribers,
+                                                        entry.get("weight", 1.0)*FIT_FACTOR[fit["class"]]
+                                                        * MECHANISM_FACTOR["curated_playlist"]),
                    "expected_weekly_views": None, "item_count": pool.item_count, "owner_subscribers": pool.subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -527,28 +607,24 @@ def collect_pools(session, vocab, learned, generic, store):
                 decide(f"Zu kleine oder verborgene Reichweite: {pool.subscribers if pool.subscribers is not None else 'keine Angabe'}"
                        f" Abonnenten, mindestens {MIN_CANDIDATE_SUBSCRIBERS} noetig.")
                 continue
-            if len(shared) < MIN_SHARED_TOKENS and not hit:
-                decide(f"Bei Kanaelen zaehlt nur echte Themengleichheit: {len(shared)} gemeinsamer Begriff, "
-                       f"mindestens {MIN_SHARED_TOKENS} noetig.")
-                continue
             entry = learned.get("pool_channel", {})
             if entry.get("retired"):
                 decide("Hebel „Community-Teilnahme“ ist nach erfolglosen Versuchen zurueckgestellt.")
                 continue
-            decide("Aufgenommen: Thema belegt, Reichweite oeffentlich nachpruefbar.", kept=True)
+            decide(f"Aufgenommen ({FIT_LABELS[fit['class']]}): {fit['why']}", kept=True)
             store("pool_channel", pool.key, best, pool.title, pool.url,
                   {"subscribers": pool.subscribers, "video_count": pool.item_count, "views": pool.views,
                    "shared_tokens": shared, "topics": (details.get("topics") or [])[:4], "query": pool.query,
                    "country": details.get("country"), "demand_source": "public_youtube_search",
-                   "intent": intent or None,
-                   "why": (f"„{pool.title}“ hat {pool.subscribers} Abonnenten und trifft "
-                           + (f"unseren belegten Audience-Intent „{hit['label']}“ "
-                              f"({', '.join(hit['head']+(hit.get('context') or []))})" if hit
-                              else f"die Begriffe {', '.join(shared)}, die auch unser Thema tragen")
-                           + ". Dieses Publikum kennt uns nicht."),
+                   "intent": intent or None, "audience_fit": fit,
+                   "why": (f"„{pool.title}“ hat {pool.subscribers} Abonnenten. Audience-Fit "
+                           f"({FIT_LABELS[fit['class']]}): {fit['why']}"
+                           + (f" Passendes eigenes Video: „{chosen[0].title}“." if chosen else "")
+                           + " Dieses Publikum kennt uns nicht."),
                    "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss nicht gemessen."},
                   {"traffic_potential": score_candidate(shared, pool.views, pool.subscribers,
-                                                        entry.get("weight", 1.0)),
+                                                        entry.get("weight", 1.0)*FIT_FACTOR[fit["class"]]
+                                                        * MECHANISM_FACTOR["pool_channel"]),
                    "expected_weekly_views": None, "subscribers": pool.subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -595,13 +671,14 @@ def collect_candidates(session, vocab, learned, store):
     ausdrücklich nicht gemessen. Genau deshalb der Abschlag in der Bewertung und der Proxy-Hinweis.
     """
     generic = generic_tokens(session)
-    matches = candidate_matches(session, vocab, generic)
+    profiles = video_profiles(session, generic)
+    matches = candidate_matches(session, vocab, generic, profiles)
     channels = {row.channel_id: row for row in session.scalars(select(DiscoveryChannel))}
     seen_channels = set()
-    for item, video_id, shared in sorted(matches, key=lambda m: -(m[0].views or 0)):
+    for item, video_id, shared, fit in sorted(matches, key=lambda m: (-FIT_RANK[m[3]["class"]], -(m[0].views or 0))):
         # Korroboration auf Themenebene: andere Treffer desselben Videos, die mindestens zwei Begriffe
         # mit diesem teilen. Identische Wortmengen zu verlangen waere zu streng – Titel sind verschieden.
-        related = [(other, other_channel) for other, other_video, other_shared in matches
+        related = [(other, other_channel) for other, other_video, other_shared, _ in matches
                    for other_channel in [other.channel_id]
                    if other_video == video_id and len(set(other_shared) & set(shared)) >= MIN_SHARED_TOKENS]
         members = len(related)
@@ -611,19 +688,22 @@ def collect_candidates(session, vocab, learned, store):
         channel = channels.get(item.channel_id)
         subscribers = channel.subscribers if channel else None
         corroboration = (f"{members} Videos aus {distinct} verschiedenen Kanälen teilen die Begriffe "
-                         f"{', '.join(shared)} mit unserem Video.")
+                         f"{', '.join(shared)} mit unserem Video. Audience-Fit: "
+                         f"{FIT_LABELS[fit['class']]} – {fit['why']}")
         if (item.views or 0) >= MIN_CANDIDATE_VIEWS and not learned.get("candidate_video", {}).get("retired"):
             store("candidate_video", item.video_id, video_id, item.title,
                   f"https://www.youtube.com/watch?v={item.video_id}",
                   {"public_views": item.views, "channel": item.channel_title, "subscribers": subscribers,
                    "shared_tokens": list(shared), "members": members, "channels": distinct,
+                   "audience_fit": fit,
                    "demand_source": "public_proxy_corroborated", "found_via": (item.via or {}).get("queries", [])[:3],
                    "generic_words_ignored": sorted(generic & set(shared)) or None,
                    "why": (f"Dieses Video hat {item.views} öffentlich gezählte Views und liegt thematisch neben uns: "
                            f"{corroboration} Sein Publikum ist belegt vorhanden – es erreicht uns nur noch nicht."),
                    "uncertainty": "mittel: Reichweite öffentlich belegt, eigener Zufluss noch nicht gemessen."},
                   {"traffic_potential": score_candidate(shared, item.views, subscribers,
-                                                        learned.get("candidate_video", {}).get("weight", 1.0)),
+                                                        learned.get("candidate_video", {}).get("weight", 1.0)
+                                                        * FIT_FACTOR[fit["class"]]),
                    "expected_weekly_views": None, "public_views": item.views,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -637,11 +717,13 @@ def collect_candidates(session, vocab, learned, store):
                   f"https://www.youtube.com/channel/{channel.channel_id}",
                   {"subscribers": subscribers, "video_count": channel.video_count, "shared_tokens": list(shared),
                    "members": members, "channels": distinct, "demand_source": "public_proxy_corroborated",
+                   "audience_fit": fit,
                    "why": (f"„{channel.title}“ hat {subscribers} Abonnenten und veröffentlicht thematisch nahe Videos: "
                            f"{corroboration} Dort ist ein Publikum, das zu unserem Video passt."),
                    "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss noch nicht gemessen."},
                   {"traffic_potential": score_candidate(shared, channel.views, subscribers,
-                                                        learned.get("candidate_channel", {}).get("weight", 1.0)),
+                                                        learned.get("candidate_channel", {}).get("weight", 1.0)
+                                                        * FIT_FACTOR[fit["class"]]),
                    "expected_weekly_views": None, "subscribers": subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -836,7 +918,8 @@ def collect(session, now=None, budget=None, http=None):
     vocab = own_vocabulary(session)
     collect_candidates(session, vocab, learned, store)
     collect_embed_sites(session, learned, store, now, http)
-    pools = collect_pools(session, vocab, learned, generic_tokens(session), store)
+    pools = collect_pools(session, vocab, learned, generic_tokens(session), store,
+                          video_profiles(session, generic_tokens(session)))
     session.commit()
     if owned_http is not None:
         owned_http.close()
@@ -1232,6 +1315,7 @@ def pool_report(session, active_queries=()):
                            "stale": bool(active_queries) and pool.query not in active_queries,
                            "found_day": str(pool.first_seen_day) if pool.first_seen_day else None,
                            "kept": verdict.get("kept"), "reason": verdict.get("reason"),
+                           "fit_class": verdict.get("fit_class"),
                            "shared_tokens": verdict.get("shared_tokens") or []})
     return {"searched": bool(probe.get("queries")), "note": probe.get("note"),
             "queries": probe.get("queries") or [], "available_queries": probe.get("available_queries") or [],
@@ -1260,6 +1344,7 @@ def overview(session, now=None):
                  "lever_class": row.lever_class, "surface": payload.get("surface_title"),
                  "surface_url": payload.get("surface_url"), "surface_kind": payload.get("surface_kind"),
                  "why": payload.get("why"), "mechanism": payload.get("mechanism"), "steps": payload.get("steps") or [],
+                 "audience_fit": (payload.get("evidence") or {}).get("audience_fit"),
                  "mechanism_status": payload.get("mechanism_status"), "mechanism_note": payload.get("mechanism_note"),
                  "upgrade_rule": payload.get("upgrade_rule"), "activity": (payload.get("evidence") or {}).get("activity"),
                  "primary_metric": payload.get("primary_metric"), "target_metric": row.target_metric,

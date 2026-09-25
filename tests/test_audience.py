@@ -102,12 +102,12 @@ def test_a_proven_neighbour_artist_becomes_its_own_intent(session):
 
 
 def test_an_intent_that_only_ever_produced_rejects_is_retired(session):
-    """Lernen an echten Ergebnissen: „good times“ hat acht Kandidaten und keinen Treffer gebracht."""
+    """Lernen an echten Ergebnissen: ein Query mit vielen Kandidaten und null Treffern wird zurueckgestellt."""
     session.get(Video, "a").title = "Sealand Trainstories"
     session.commit()
-    profile(session, tags=["good times", "ambient"], description="good times ambient")
+    profile(session, tags=["trans mongolian", "ambient"], description="Ambient zur Reise nach Mongolian.")
     live = audience.build_intents(session, session.get(Video, "a"))
-    query = next(i["query"] for i in live if "good" in i["head"] or "times" in i["head"])
+    query = next(i["query"] for i in live if "mongolian" in i["head"])
     for index in range(audience.RETIRE_AFTER_CANDIDATES+1):
         pool(session, "playlist", f"PLjunk{index}", f"Good Times Full Episodes {index}", item_count=30, query=query,
              details={"verdict": {"kept": False, "reason": "kein Bezug"}})
@@ -132,8 +132,10 @@ def test_query_evidence_counts_as_relevance_proof(session):
     assert verdict["kept"] is True, verdict["reason"]
     assert "mongolian" in (verdict["intent_hit"] or [])
     surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "UCmong"))
-    assert surface is not None and "Audience-Intent" in surface.evidence["why"]
-    assert surface.evidence["intent"]["label"] == intent["label"]
+    assert surface is not None and surface.evidence["intent"]["label"] == intent["label"]
+    # Die Begruendung nennt die Evidenz, nicht nur die Wortgleichheit.
+    assert surface.evidence["audience_fit"]["class"] in ("topic", "genre", "neighbourhood")
+    assert "mongolian" in surface.evidence["audience_fit"]["topic"]
 
 
 def test_a_single_attested_intent_still_needs_its_context_to_match(session):
@@ -190,3 +192,56 @@ def test_the_channel_search_uses_the_topic_head_and_the_playlist_search_the_full
         # deshalb bleibt dort der Kontext dabei.
         assert job["query"] == (" ".join(head) if len(head) >= 2 else job["intent"]["query"])
         assert len(job["query"].split()) >= 2, "ein Wort allein ist keine Suche"
+
+
+# ---------------------------------------------------------------------------- die Produktionsfaelle
+DESCRIPTION = """Trainstories ist die zweite Single unseres Albums.
+
+Musik: Sanchez
+Musicvideo: Factoria GmbH
+Webpage: www.sealandmusic.ch
+Released 2026. Check out our new album!
+Eine Reise mit der Transmongolischen Eisenbahn, aufgenommen im Nachtzug."""
+
+
+def test_credits_websites_and_sentence_fragments_never_become_intents(session):
+    """Produktion lieferte webpage pop, factoria pop, sanchez pop, released pop, check rock, unser rock."""
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.commit()
+    profile(session, tags=["trans mongolian", "ambient", "pop"], description=DESCRIPTION,
+            topics=["https://en.wikipedia.org/wiki/Pop_music"])
+    rows = {row["term"]: row for row in audience.profile_terms(session, session.get(Video, "a"))}
+    for name in ("sanchez", "factoria", "webpage", "sealandmusic", "musicvideo"):
+        assert name not in rows or rows[name]["category"] == "format", f"{name} ist kein Audience-Thema"
+    for filler in ("released", "check", "unser", "good", "times", "long"):
+        assert filler not in rows or rows[filler]["category"] == "format"
+    heads = {" ".join(intent["head"]) for intent in audience.build_intents(session, session.get(Video, "a"))}
+    assert not {h for h in heads if h in ("webpage", "factoria", "sanchez", "released", "check", "musicvideo")}
+    assert any("mongolian" in head for head in heads), "das echte Motiv bleibt"
+
+
+def test_shared_english_words_alone_are_never_an_audience_fit(session):
+    """Produktionsfall: Trainstories → Young Nudy „Long Ride“ wegen long, out, ride."""
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.commit()
+    profile(session, tags=["trans mongolian", "ambient"], description="Ambient aus dem Nachtzug. Check it out!")
+    prof = audience.music_profile(session, session.get(Video, "a"))
+    fit = audience.audience_fit({"long", "ride", "out", "young", "nudy"}, prof, tags=["rap", "trap"])
+    assert fit["class"] is None and "keine gemeinsame Zielgruppe" in fit["why"]
+
+
+def test_a_shared_genre_with_a_musical_candidate_is_a_real_fit(session):
+    """Shine On → The Dead South: folk ist die Evidenz, good und out sind keine."""
+    session.get(Video, "b").title = "Sealand Shine On"
+    session.commit()
+    profile(session, video_id="b", tags=["folk", "acoustic"], description="Ruhiger Folk mit Gitarre.",
+            topics=["https://en.wikipedia.org/wiki/Folk_music"])
+    prof = audience.music_profile(session, session.get(Video, "b"))
+    fit = audience.audience_fit({"dead", "south", "good", "company", "folk", "out"}, prof,
+                                tags=["folk", "bluegrass"])
+    assert fit["class"] == "genre" and fit["genre"] == ["folk"]
+    assert "folk" in fit["why"] and "good" not in fit["shared"] and "out" not in fit["shared"]
+    # Ohne gemeinsames Genre bleibt von demselben Kandidaten nichts uebrig.
+    session.get(Video, "b").title = "Sealand Shine On"
+    plain = audience.audience_fit({"dead", "south", "good", "company", "out"}, prof, tags=["bluegrass"])
+    assert plain["class"] is None

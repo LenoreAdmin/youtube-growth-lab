@@ -102,8 +102,29 @@ class QuotaExhausted(Exception):
 
 
 # ----------------------------------------------------------------------------- text helpers
+# „K-Pop“, „J-Rock“, „G-Funk“ sind eigene Genres. Ohne diese Zeile zerfaellt „K-pop“ in „pop“ und
+# ein K-Pop-Tanzworkshop teilt plötzlich unser Genre.
+COMPOUND_GENRES = ("pop", "rock", "rap", "jazz", "punk", "funk", "soul", "wave", "metal", "house", "step")
+LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
+
+def join_compound_genres(text):
+    """„K-Pop“, „J-Rock“, „G-Funk“ sind eigene Genres.
+
+    Ohne diesen Schritt zerfaellt „K-pop“ beim Zerlegen in „pop“, und ein K-Pop-Tanzworkshop teilt
+    ploetzlich unser Genre. Ein Bindestrich zwischen einem einzelnen Buchstaben und einem Genrenamen
+    gehoert zum Namen.
+    """
+    for genre in COMPOUND_GENRES:
+        if genre not in text:
+            continue
+        for letter in LETTERS:
+            text = text.replace(f"{letter}-{genre}", f"{letter}{genre}")
+    return text
+
+
 def tokens(text, keep_brand=False):
-    words = re.findall(r"[a-z0-9äöüß]+", (text or "").lower())
+    words = re.findall(r"[a-z0-9äöüß]+", join_compound_genres((text or "").lower()))
     return [w for w in words if len(w) >= 3 and (w not in STOPWORDS or (keep_brand and w in BRAND))]
 
 

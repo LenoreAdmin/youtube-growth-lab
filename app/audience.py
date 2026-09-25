@@ -24,6 +24,45 @@ from .models import AudiencePool, DiscoveryItem, DiscoverySignal, Video, VideoPr
 
 # Genres und Stile. Ein Begriff zählt nur, wenn er in unseren Daten vorkommt – die Liste sagt nur,
 # in welche Schublade er dann gehört.
+# Wörter aus Beschreibungstexten, die nichts über die Zielgruppe sagen: Aufrufe an die Zuschauer,
+# Verweise auf eigene Seiten, Credits-Vokabular, Bindewörter und Satzfragmente. Genau daraus entstanden
+# „webpage pop“, „released pop“, „check rock“, „unser rock“ und „musicvideo pop“.
+HELPER_WORDS = {
+    # Verweise und Aufrufe
+    "webpage", "website", "homepage", "page", "seite", "link", "links", "click", "klick", "subscribe",
+    "abonnieren", "abo", "follow", "folge", "listen", "hoeren", "hören", "stream", "streaming", "download",
+    "available", "verfuegbar", "verfügbar", "shop", "merch", "store", "kaufen", "buy", "order", "spotify",
+    "apple", "deezer", "tidal", "instagram", "facebook", "tiktok", "twitter", "socials", "kanal", "channel",
+    # Credits und Produktion
+    "credits", "produced", "produktion", "production", "produzent", "prod", "mixed", "mixing", "master",
+    "mastered", "mastering", "recorded", "aufnahme", "aufgenommen", "written", "composed", "komposition",
+    "arrangement", "regie", "directed", "director", "kamera", "camera", "schnitt", "editing", "artwork",
+    "design", "grafik", "foto", "photo", "photography", "label", "booking", "management", "rights",
+    "copyright", "reserved", "verlag", "publishing", "musicvideo", "videoclip",
+    # Wertende und zaehlende Fuellwoerter: sie sagen nichts ueber ein Publikum aus. „Long Ride“ teilte
+    # mit uns genau solche Woerter.
+    "good", "best", "better", "great", "nice", "beautiful", "amazing", "awesome", "favorite", "favourite",
+    "times", "time", "long", "short", "little", "full", "part", "thing", "things", "way", "ways", "real",
+    "true", "free", "easy", "hard", "top", "big", "small", "old", "young", "high", "low", "last", "next",
+    # Satzfragmente und Fuellwoerter
+    "released", "release", "out", "now", "new", "neu", "neue", "neuer", "neues", "from", "with", "this",
+    "that", "here", "hier", "check", "schau", "unser", "unsere", "unseren", "meine", "mein", "our", "your",
+    "you", "ich", "wir", "uns", "dir", "euch", "special", "debut", "first", "erste", "erstes", "second",
+    "all", "alle", "more", "mehr", "about", "ueber", "über", "thanks", "danke", "please", "bitte", "enjoy",
+    "watch", "sehen", "gesehen", "made", "gemacht", "gibt", "kommt", "wurde", "wird", "sind", "haben",
+    "hat", "war", "waren", "sein", "seine", "sowie", "auch", "noch", "schon", "immer", "wieder", "sehr",
+    "ganz", "viel", "viele", "nach", "vor", "bei", "aus", "auf", "durch", "ohne", "gegen", "zwischen",
+    "jetzt", "heute", "morgen", "gestern", "dann", "wenn", "aber", "oder", "denn", "weil", "dass"}
+# Zeilen mit diesen Markern sind Credits oder Kontaktangaben: dort stehen Namen von Menschen und Firmen,
+# keine Themen. Ein Name wie „Factoria“ oder „Sanchez“ ist keine Zielgruppe.
+CREDIT_MARKERS = ("musik", "music by", "text", "lyrics", "prod", "produ", "mix", "master", "recorded",
+                  "aufnahme", "kamera", "camera", "video by", "regie", "directed", "written", "composed",
+                  "artwork", "design", "foto", "photo", "label", "booking", "management", "copyright",
+                  "credits", "mastering", "mixing", "schnitt", "grafik", "cover by", "feat", "with ")
+URL_PATTERN = re.compile(r"https?://\S+|www\.\S+|\b[\w-]{2,}\.(?:ch|com|de|net|org|io|me|fm|tv|to|at|uk|eu)\b",
+                         re.IGNORECASE)
+CONTACT_PATTERN = re.compile(r"[@#]\S+|\S+@\S+\.\S+")
+
 # „music“ und Verwandtes ordnen ein Thema ein, sind aber selbst keines: nach „music“ zu suchen liefert
 # die halbe Plattform. Diese Woerter duerfen nur Kontext sein, niemals Themenkopf.
 MUSIC_WORDS = {"music", "musik", "song", "songs", "sound", "sounds", "audio", "playlist", "mixtape"}
@@ -94,6 +133,27 @@ def topic_words(urls):
     return words
 
 
+def description_words(text):
+    """Nur die inhaltlichen Wörter einer Beschreibung – ohne Links, Kontakte und Credits-Zeilen.
+
+    Eine Videobeschreibung besteht zum groessten Teil aus Verweisen und Credits. „Musik: Sanchez“,
+    „Webpage: …“ oder „Musicvideo: Factoria“ nennen Menschen, Firmen und Seiten. Wer das mitliest,
+    haelt Personennamen fuer Themen – genau das ist passiert.
+    """
+    kept = []
+    for line in re.split(r"[\n\r]+", text or ""):
+        clean = CONTACT_PATTERN.sub(" ", URL_PATTERN.sub(" ", line))
+        lowered = clean.lower().strip()
+        if not lowered:
+            continue
+        if any(marker in lowered for marker in CREDIT_MARKERS):
+            continue        # Credits-Zeile: enthaelt Namen, keine Themen.
+        if ":" in clean and len(clean.split(":")[0].split()) <= 3:
+            continue        # „Label: X“, „Kamera: Y“ – dieselbe Bauform ohne bekanntes Stichwort.
+        kept.append(clean)
+    return _tokens(" ".join(kept))
+
+
 def collect_terms(session, video):
     """Alle Begriffe über dieses Video, mit Quelle und – wo vorhanden – gemessenen Views."""
     terms = defaultdict(lambda: {"sources": {}, "views": 0, "phrases": set()})
@@ -111,7 +171,7 @@ def collect_terms(session, video):
     for word in _tokens(video.title):
         add(word, "own_title", video.title)
     if profile is not None:
-        for word in _tokens(profile.description)[:120]:
+        for word in description_words(profile.description)[:120]:
             add(word, "own_description", (profile.description or "")[:160])
         for tag in (profile.tags or [])[:30]:
             phrase = " ".join(_tokens(tag))
@@ -156,16 +216,16 @@ def classify(term, brand, release, generic, sources=()):
     """Welche Rolle spielt dieser Begriff – und darf er ein Audience-Thema sein?"""
     if term in brand:
         return "marke"
-    if term in release or RELEASE_PATTERN.match(term):
-        return "release"
+    if term in LABEL_WORDS or term in HELPER_WORDS:
+        return "format"
     if term in GENRE_WORDS or term in MUSIC_WORDS:
         return "genre"
     if term in MOOD_WORDS:
         return "mood"
     if term in TRAVEL_WORDS:
         return "ort"
-    if term in LABEL_WORDS:
-        return "format"
+    if term in release or RELEASE_PATTERN.match(term):
+        return "release"
     if sources and not any(source in OWN_SOURCES for source in sources):
         # Der Begriff steht ausschliesslich in einem fremden Kanal- oder Videotitel: das ist deren Name,
         # nicht unser Thema. Als Bestaetigung eines eigenen Begriffs zaehlt er weiter, als Themenkopf nicht.
@@ -235,10 +295,15 @@ def build_intents(session, video, generic=None, history=None):
     by_term = {row["term"]: row for row in rows}
     heads, contexts = [], []
     for row in rows:
-        if row["category"] in HEAD_CATEGORIES and len(row["term"]) >= MIN_HEAD_LENGTH:
-            heads.append(row)
-        elif row["category"] in CONTEXT_CATEGORIES:
-            contexts.append(row)
+        if row["category"] not in HEAD_CATEGORIES or len(row["term"]) < MIN_HEAD_LENGTH:
+            if row["category"] in CONTEXT_CATEGORIES:
+                contexts.append(row)
+            continue
+        # Ein Begriff ohne erkennbare Kategorie (Kategorie „thema“) kann ein Satzfragment sein. Als
+        # Themenkopf taugt er nur, wenn ihn mindestens zwei unabhaengige eigene Quellen tragen.
+        if row["category"] == "thema" and row["attestations"] < MIN_ATTESTATIONS:
+            continue
+        heads.append(row)
     contexts.sort(key=lambda r: (-r["attestations"], -r["views"], r["df"], r["term"]))
     heads.sort(key=lambda r: (-r["attestations"], -(1 if r["phrases"] else 0), r["df"], -r["views"], r["term"]))
     intents = []
@@ -298,6 +363,11 @@ def build_intents(session, video, generic=None, history=None):
         phrase = next((p for p in head["phrases"] if len(p.split()) > 1), None)
         head_terms = phrase.split() if phrase else [head["term"]]
         rows_in = [by_term[t] for t in head_terms if t in by_term] or [head]
+        carries_style = any(by_term[t]["category"] in CONTEXT_CATEGORIES for t in head_terms if t in by_term)
+        if carries_style and len(head_terms) >= 2:
+            # Der Kopf nennt Stil und Thema schon selbst („swiss rock“): ein weiteres Genre verwaessert ihn nur.
+            add("topic_context", head_terms, [], f"„{' '.join(head_terms)}“", rows_in)
+            continue
         context = next((c["term"] for c in contexts if c["term"] not in head_terms), None)
         if context is None:
             continue
@@ -340,6 +410,95 @@ def intents(session, videos=None, generic=None):
     best = sorted((rows[0] for rows in per_video.values()), key=lambda i: -i["score"])
     rest = sorted((i for rows in per_video.values() for i in rows[1:]), key=lambda i: -i["score"])
     return best+rest
+
+
+MUSIC_TOPIC_MARKERS = ("music", "musik", "song", "genre", "band", "artist")
+
+
+def music_profile(session, video, generic=None):
+    """Das musikalische Profil eines eigenen Videos: Genres, Stimmungen, Orte, belegte Themen."""
+    rows = profile_terms(session, video, generic)
+    profile = {"genres": set(), "moods": set(), "places": set(), "topics": set(), "terms": {}, "rare": set()}
+    for row in rows:
+        profile["terms"][row["term"]] = row
+        # Ein langer Begriff, der in keinem der gespeicherten fremden Titel vorkommt, ist wirklich
+        # spezifisch: „mongolian“ ist etwas anderes als „long“.
+        if row["df"] == 0 and len(row["term"]) >= 6:
+            profile["rare"].add(row["term"])
+        if row["category"] == "genre" and row["term"] not in MUSIC_WORDS:
+            profile["genres"].add(row["term"])
+        elif row["category"] == "mood":
+            profile["moods"].add(row["term"])
+        elif row["category"] == "ort":
+            profile["places"].add(row["term"])
+        elif row["category"] == "thema" and row["attestations"] >= MIN_ATTESTATIONS:
+            profile["topics"].add(row["term"])
+    return profile
+
+
+def is_musical(words, topics=(), tags=()):
+    """Ist der Kandidat selbst musikalisch klassifiziert – nach YouTube-Themen, Tags oder Genrewörtern?"""
+    haystack = " ".join([" ".join(str(t) for t in topics or []), " ".join(str(t) for t in tags or [])]).lower()
+    if any(marker in haystack for marker in MUSIC_TOPIC_MARKERS):
+        return True
+    return bool((set(words) & GENRE_WORDS) or (set(words) & MUSIC_WORDS))
+
+
+def audience_fit(words, profile, intent_hit=None, neighbourhood=(), topics=(), tags=()):
+    """Belegt dieser Ort eine echte Audience-Naehe – oder teilt er nur englische Woerter mit uns?
+
+    Drei Klassen, absteigend nach Beweiskraft:
+
+    neighbourhood  YouTube liefert uns dort schon aus, oder der Ort enthaelt genau diese Nachbarschaft.
+    genre          Gemeinsames Genre oder gemeinsame Stimmung, und der Ort ist selbst musikalisch.
+    topic          Mindestens zwei inhaltliche Begriffe, davon einer mit erkennbarer Kategorie
+                   (Ort/Motiv oder ein mehrfach belegtes Thema) – „mongolian railway“, nicht „long out ride“.
+
+    Alles andere ist kein Fit. Fuellwoerter, Credits und Formatwoerter zaehlen nie mit, egal wie viele.
+    """
+    words = {w for w in words if w not in HELPER_WORDS and w not in LABEL_WORDS}
+    genres = sorted((profile["genres"] | profile["moods"]) & words)
+    places = sorted(profile["places"] & words)
+    topics_hit = sorted(profile["topics"] & words)
+    semantic = places+topics_hit
+    intent_head = sorted(set((intent_hit or {}).get("head") or []) & words)
+    shared = sorted(set(genres+semantic+intent_head))
+    if neighbourhood:
+        return {"class": "neighbourhood", "genre": genres, "topic": semantic or intent_head,
+                "shared": shared, "neighbourhood": list(neighbourhood)[:3],
+                "why": ("YouTube liefert uns in dieser Nachbarschaft bereits aus: "
+                        f"{', '.join(list(neighbourhood)[:2])}. Das ist gemessene Naehe, keine Wortaehnlichkeit.")}
+    if genres and (is_musical(words, topics, tags) or len(shared) >= 2):
+        return {"class": "genre", "genre": genres, "topic": semantic or intent_head, "shared": shared,
+                "why": (f"Gemeinsames Genre bzw. gemeinsame Stimmung: {', '.join(genres)}"
+                        + (f"; zusaetzlich inhaltlich: {', '.join(semantic or intent_head)}"
+                           if (semantic or intent_head) else "")
+                        + ". Der Ort ist selbst musikalisch klassifiziert."
+                        if is_musical(words, topics, tags) else
+                        f"Gemeinsames Genre bzw. gemeinsame Stimmung: {', '.join(genres)} und "
+                        f"{len(shared)} inhaltliche Begriffe: {', '.join(shared)}.")}
+    strong = sorted(set(semantic) | set(intent_head))
+    if len(strong) == 1 and strong[0] in profile.get("rare", ()):
+        # Ein einzelner, sehr spezifischer eigener Begriff traegt, wenn der Kandidat selbst derselben
+        # Kategorie zugeordnet ist: „mongolian“ plus ein Reise-/Bahnwort ist ein Motiv, kein Wortzufall.
+        family = (TRAVEL_WORDS if strong[0] in TRAVEL_WORDS else
+                  GENRE_WORDS if strong[0] in GENRE_WORDS else
+                  MOOD_WORDS if strong[0] in MOOD_WORDS else None)
+        echo = sorted((words & family)-set(strong)) if family else []
+        if echo:
+            return {"class": "topic", "genre": genres, "topic": strong+echo, "shared": sorted(set(shared+echo)),
+                    "why": (f"Der spezifische eigene Begriff „{strong[0]}“ steht dort, und der Ort ist derselben "
+                            f"Kategorie zugeordnet ({', '.join(echo[:2])}). Das ist ein gemeinsames Motiv, keine "
+                            "Wortgleichheit. Musikalische Naehe ist damit nicht belegt.")}
+    if len(strong) >= MIN_ATTESTATIONS:
+        return {"class": "topic", "genre": genres, "topic": strong, "shared": shared,
+                "why": (f"Inhaltliche Naehe ueber {', '.join(strong)} – Begriffe mit erkennbarer Bedeutung "
+                        "(Ort, Motiv oder mehrfach belegtes Thema), nicht bloss gemeinsame englische Woerter. "
+                        "Musikalische Naehe ist damit nicht belegt: das Publikum teilt das Thema, nicht den Stil.")}
+    return {"class": None, "genre": genres, "topic": strong, "shared": shared,
+            "why": ("Keine belegbare Audience-Naehe: es bleiben "
+                    + (f"nur {', '.join(shared)}" if shared else "keine inhaltlichen Begriffe")
+                    + ". Gemeinsame Allerwelts- oder Fuellwoerter beweisen keine gemeinsame Zielgruppe.")}
 
 
 def matches(intent, words):
