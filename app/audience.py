@@ -482,16 +482,15 @@ def audience_fit(words, profile, intent_hit=None, neighbourhood=(), topics=(), t
     specific_style = [s for s in style if s not in UMBRELLA_GENRES]
     # Ein Dachgenre allein ist kein Publikum. Es braucht einen Anker: einen Ort, ein Motiv, eine Stimmung
     # oder einen eigenen, engeren Stilbegriff.
-    if style and is_musical(words, topics, tags) and (anchored or len(style) >= 2 or specific_style):
+    if style and is_musical(words, topics, tags) and (anchored or specific_style):
         anchor = "semantic" if anchored else "style"
         return {"class": "genre", "anchor": anchor, "genre": style, "topic": anchored, "shared": shared,
                 "why": (f"Gemeinsamer Stil: {', '.join(style)}"
                         + (f", und inhaltlich derselbe Bezug: {', '.join(anchored)}" if anchored
-                           else f" (davon {', '.join(specific_style)} ausserhalb der breiten Sammelgenres)"
-                           if specific_style else f" in {len(style)} Merkmalen")
+                           else f" (davon {', '.join(specific_style)} ausserhalb der breiten Sammelgenres)")
                         + ". Der Ort ist selbst musikalisch klassifiziert, das Publikum hoert also "
                           "vergleichbare Musik.")}
-    if style and not (anchored or len(style) >= 2 or specific_style):
+    if style and not (anchored or specific_style):
         return {"class": None, "anchor": None, "genre": style, "topic": anchored, "shared": shared,
                 "why": (f"Nur das breite Genre {', '.join(style)} ist gemeinsam – das teilen wir mit einem "
                         "grossen Teil der Plattform. Ohne Ort, Motiv, Stimmung oder engeren Stilbegriff ist das "

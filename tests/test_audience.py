@@ -273,3 +273,15 @@ def test_the_teaser_is_never_offered_to_a_playlist_curator(session):
     session.get(Video, "a").duration_seconds = 214
     session.commit()
     assert acq.full_release(session.get(Video, "a")) is True
+
+
+def test_two_umbrella_genres_together_are_still_only_a_drawer(session):
+    """Produktionsfall: „Mix Medley Pop Rock Acústico“ kam über pop plus rock durch."""
+    session.get(Video, "b").title = "Sealand Shine On"
+    session.commit()
+    profile(session, video_id="b", tags=["swiss pop", "pop", "rock"], description="Schweizer Pop und Rock.",
+            topics=["https://en.wikipedia.org/wiki/Pop_music"])
+    prof = audience.music_profile(session, session.get(Video, "b"))
+    medley = audience.audience_fit({"banda", "beats", "mix", "medley", "pop", "rock", "doors", "beatles"}, prof,
+                                   tags=["pop rock", "covers"])
+    assert medley["class"] is None and "Schublade" in medley["why"]
