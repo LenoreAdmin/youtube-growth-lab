@@ -285,3 +285,25 @@ def test_two_umbrella_genres_together_are_still_only_a_drawer(session):
     medley = audience.audience_fit({"banda", "beats", "mix", "medley", "pop", "rock", "doors", "beatles"}, prof,
                                    tags=["pop rock", "covers"])
     assert medley["class"] is None and "Schublade" in medley["why"]
+
+
+def test_a_search_probe_hit_needs_a_content_anchor_not_just_a_style(session):
+    """Produktionsfall: „Boyce Avenue Acoustic Cover … Hit Songs“ kam ueber acoustic und songs herein."""
+    from app import acquisition as acq
+    from app.models import DiscoveryItem
+    session.get(Video, "b").title = "Sealand Shine On"
+    session.commit()
+    profile(session, video_id="b", tags=["swiss pop", "acoustic"], description="Schweizer Pop, akustisch.",
+            topics=["https://en.wikipedia.org/wiki/Pop_music"])
+    session.add(DiscoveryItem(video_id="COVER000001", channel_id="UCboyce",
+                              title="Boyce Avenue Acoustic Cover 90s Pop Rock Hit Songs", channel_title="Boyce Avenue",
+                              views=8000000, tags=["acoustic", "cover", "pop rock"], via={"queries": ["swiss pop"]},
+                              first_seen_day=TODAY, last_seen_day=TODAY, seen_count=1))
+    session.commit()
+    prof = acq.video_profiles(session)["b"]
+    fit = audience.audience_fit({"boyce", "avenue", "acoustic", "cover", "pop", "rock", "hit", "songs"}, prof,
+                                tags=["acoustic", "cover"])
+    assert fit["class"] is None or fit["anchor"] == "style", "nur Stil, kein inhaltlicher Anker"
+    result = acq.collect(session, NOW, http=FakeHttp())
+    assert not [s for s in session.scalars(select(TrafficSurface)) if s.key == "COVER000001"], \
+        "ein Cover-Kanal aus den Suchproben ohne inhaltlichen Anker wird keine Flaeche"

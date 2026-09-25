@@ -798,6 +798,11 @@ def collect_candidates(session, vocab, learned, store):
         distinct = len({channel for _, channel in related if channel})
         if members < 2 or distinct < 2:
             continue        # Ein einzelner Treffer ist Zufall, nicht ein Thema.
+        if fit.get("anchor") == "style":
+            # Ein Treffer aus den oeffentlichen Suchproben ist irgendein Video mit aehnlichem Stil. Ohne
+            # inhaltlichen Anker – Ort, Motiv, belegtes Thema – ist das dieselbe Schublade, nicht dasselbe
+            # Publikum. Genau so kamen Cover-Kanaele wie Boyce Avenue herein.
+            continue
         channel = channels.get(item.channel_id)
         subscribers = channel.subscribers if channel else None
         corroboration = (f"{members} Videos aus {distinct} verschiedenen Kanälen teilen die Begriffe "
@@ -1373,9 +1378,12 @@ def run(session, now=None, budget=None, http=None):
     try:
         view = overview(session, now)
         for entry in view["traffic_queue"]:
-            log.info("acquisition proposal video=%r surface=%r url=%s source=%s metric=%s potential=%s mechanism=%s",
+            log.info("acquisition proposal video=%r surface=%r url=%s source=%s metric=%s potential=%s mechanism=%s "
+                     "fit=%s/%s why=%r",
                      entry["title"], entry["surface"], entry.get("surface_url"), entry["traffic_source"],
-                     entry["target_metric"], entry["traffic_potential"], entry.get("mechanism_status"))
+                     entry["target_metric"], entry["traffic_potential"], entry.get("mechanism_status"),
+                     (entry.get("audience_fit") or {}).get("class"), (entry.get("audience_fit") or {}).get("anchor"),
+                     ((entry.get("audience_fit") or {}).get("why") or "")[:160])
         for surface in view["surfaces"][:8]:
             log.info("acquisition surface kind=%s video=%s title=%r url=%s potential=%s http=%s",
                      surface["kind"], surface["video_id"], surface["title"], surface.get("url"),

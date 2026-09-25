@@ -418,8 +418,8 @@ MUSIC_TOPIC_MARKERS = ("music", "musik", "song", "genre", "band", "artist")
 # Dazu gehoeren auch die Darbietungsformen: „acoustic“, „cover“, „medley“ beschreiben, wie gespielt wird,
 # nicht fuer wen. Ein Cover-Medley-Kanal lebt von bekannten Liedern, nicht von neuer eigener Musik – die
 # Ueberschneidung „acoustic + pop + rock“ ist deshalb kein Publikumsbeleg (Fall Banda Rock Beats).
-UMBRELLA_GENRES = {"pop", "rock", "music", "dance", "electronic", "alternative", "live", "acoustic", "cover",
-                   "covers", "medley", "mix", "remix", "unplugged", "karaoke", "instrumental", "session"}
+UMBRELLA_GENRES = {"pop", "rock", "dance", "electronic", "alternative", "live", "acoustic", "cover",
+                   "covers", "medley", "mix", "remix", "unplugged", "karaoke", "instrumental", "session"} | MUSIC_WORDS
 
 
 def music_profile(session, video, generic=None):
