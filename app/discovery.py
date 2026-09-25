@@ -347,6 +347,34 @@ def pool_queries(session, videos=None, generic=None, limit=MAX_POOL_SEARCHES):
     return sorted(plans, key=lambda j: j["search"] != "playlist")[:limit]
 
 
+def verify_pool_membership(session, client, quota, videos, stats, limit=12):
+    """Fuer gefundene Playlists festhalten, ob unsere Musik schon darin liegt.
+
+    Ohne diese Angabe darf keine Playlist angeschrieben werden: eine bestehende Platzierung ist eine
+    gewachsene Beziehung, und im Zweifel wird nicht kontaktiert (siehe PRODUKTREGEL in app/acquisition.py).
+    """
+    if not hasattr(client, "playlist_contains"):
+        return
+    own_ids = [v.id for v in videos]
+    checked = 0
+    for pool in session.scalars(select(AudiencePool).where(AudiencePool.kind == "playlist")
+                                .order_by(AudiencePool.last_seen_day.desc())):
+        details = pool.details or {}
+        if "contains_own" in details or checked >= limit:
+            continue
+        if quota.remaining() < LIST_COST*(len(own_ids)+2):
+            return
+        quota.spend(LIST_COST*len(own_ids))
+        try:
+            contains = bool(client.playlist_contains(pool.key, own_ids))
+        except Exception:
+            continue        # Unbekannt bleibt unbekannt – und unbekannt heisst: nicht ansprechen.
+        pool.details = {**details, "contains_own": contains}
+        checked += 1
+        stats["membership_checked"] = stats.get("membership_checked", 0)+1
+    session.commit()
+
+
 def probe_audience_pools(session, client, quota, videos, now, budget, stats):
     """Fremde Playlists und Kanaele zu unserem Thema - Audiences, die uns noch nicht kennen.
 
@@ -706,6 +734,7 @@ def _run(client, now, budget, force):
             collect_channels(s, client, quota, now, budget, stats)
             try:
                 probe_audience_pools(s, client, quota, videos, now, budget, stats)
+                verify_pool_membership(s, client, quota, videos, stats)
             except (SyncBudgetExceeded, QuotaExhausted, Throttled):
                 raise
             except Exception as exc:

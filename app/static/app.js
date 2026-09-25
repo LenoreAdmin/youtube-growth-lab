@@ -59,6 +59,10 @@ function renderTraffic(a){
  // Die Pool-Suche muss nachpruefbar sein: welcher Query, welche realen Treffer, welcher Filtergrund.
  // Audience-Intents: woher jedes Thema kommt. Ohne sichtbare Evidenz ist eine Query nicht pruefbar.
  const ints=a.audience_intents||[];
+ // Bestehende Beziehungen: sichtbar als Messsignal, ausdruecklich nicht als Aufgabe.
+ const prot=a.protected_sources||[];
+ $("trafficProtected").innerHTML=prot.length?`<h3>Geschützte bestehende Quellen — werden gemessen, nie angesprochen</h3><ul>${prot.map(x=>
+  `<li><strong>${esc(x.title||"—")}</strong> <small>${esc(x.traffic_source||"")}${x.measured_views_90d?` · ${num(x.measured_views_90d)} Views in 90 Tagen`:""} · für ${esc(x.video||"")}</small><br><small>${esc(x.why_not||"")}</small></li>`).join("")}</ul>`:"";
  $("trafficIntents").innerHTML=ints.length?`<h3>Audience-Intents aus unseren eigenen Daten</h3><ul>${ints.map(i=>
   `<li><strong>${esc(i.video)}</strong>: ${esc(i.label)} <small>${esc(i.strength)}, ${num(i.attestations)} unabhängige Quellen${i.history&&i.history.candidates?` · bisher ${num(i.history.candidates)} Kandidaten, ${num(i.history.kept)} aufgenommen`:""}</small><br>
   <code>${esc(i.query)}</code><br><small>Belege: ${(i.evidence||[]).map(e=>esc(e.label)+" – „"+esc(e.detail)+"“").join(" · ")}</small></li>`).join("")}</ul>`

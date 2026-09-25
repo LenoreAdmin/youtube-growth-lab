@@ -37,6 +37,21 @@ MIN_CANDIDATE_VIEWS = 2000   # Öffentliche Reichweite, ab der ein fremdes Video
 MIN_CANDIDATE_SUBSCRIBERS = 500
 MIN_SHARED_TOKENS = 2        # Ein gemeinsames Wort ist keine Themengleichheit (siehe V6).
 MIN_EXPECTED_WEEKLY_VIEWS = 0.35  # Darunter ist eine Quelle eine Beobachtung, keine Traffic-Aktion.
+# PRODUKTREGEL (harte Sperre, nicht verhandelbar und nicht durch Lernen aufhebbar):
+#
+# Wer unsere Musik schon selbst ausgewaehlt, gespielt oder aufgenommen hat – Radios, Redaktionen, Medien,
+# Kuratoren, einbettende Seiten –, ist eine bestehende Beziehung. Diese Beziehungen sind gewachsen, ohne
+# dass dieses System daran beteiligt war, und sie sind mehr wert als jeder Vorschlag, den es erzeugen
+# koennte. Sie werden ausschliesslich gemessen: ihre Trafficdaten tragen das Lernen ueber unser Publikum,
+# aber sie loesen niemals eine Ansprache aus. Ein einzelner unpassender Automatik-Vorschlag kann eine
+# solche Beziehung zerstoeren; kein moeglicher Zugewinn wiegt das auf.
+#
+# Praktisch: jede Flaeche, von der wir bereits gemessenen Traffic bekommen, ist geschuetzt. Ziel dieses
+# Systems sind neue YouTube-Audiences, die uns noch nicht kennen. Im Zweifel wird nicht kontaktiert.
+PROTECTED_KINDS = {"own_external_referrer", "embed_site", "recommending_video", "recommending_channel"}
+PROTECTED_NOTE = ("Bestehende Quelle: von dort kommen bereits Zuschauer. Sie wird gemessen und fliesst in das "
+                  "Audience-Lernen ein, wird aber nie angesprochen – eine gewachsene Beziehung darf durch eine "
+                  "automatische Empfehlung nicht beschaedigt werden.")
 # Beweiskraft der Audience-Naehe, absteigend. Fuer YT_OTHER_PAGE (Kanaele) verlangen wir mindestens
 # „topic“; blosse Wortueberlappung hat gar keine Klasse und kommt nicht durch.
 FIT_RANK = {"neighbourhood": 3, "genre": 2, "topic": 1}
@@ -116,10 +131,10 @@ SHARE_PLATFORMS = {"whatsapp.com", "t.co", "twitter.com", "x.com", "facebook.com
                    "news.google.com", "youtube.com", "m.youtube.com", "youtu.be", "linkedin.com", "pinterest.com",
                    "tiktok.com", "snapchat.com", "discord.com", "mail.google.com", "outlook.com", "bing.com",
                    "duckduckgo.com", "yandex.ru", "baidu.com", "messenger.com", "reddit.com", "linktr.ee"}
-ACTION_LABELS = {"reach_out_to_referrer": "Externe Quelle ansprechen, die schon Zuschauer schickt",
+ACTION_LABELS = {"reach_out_to_referrer": "Bestehende externe Quelle – nur Messsignal, keine Ansprache",
                  "pitch_to_playlist_curator": "Kurator einer fremden Playlist ansprechen",
                  "engage_pool_channel": "Neu gefundenen Kanal mit passender Audience erreichen",
-                 "reach_out_to_embed_site": "Seite ansprechen, die unser Video schon einbettet",
+                 "reach_out_to_embed_site": "Seite bettet unser Video ein – bestehende Quelle, keine Ansprache",
                  "engage_candidate_video": "Bei einem reichweitenstarken passenden Video sichtbar werden",
                  "engage_candidate_channel": "Kanal mit belegter Reichweite echt beteiligen",
                  "engage_recommending_channel": "Kanal mit passender Audience echt beteiligen",
@@ -157,6 +172,19 @@ def as_url(detail):
 
 
 def adjacency_access(views, public_reach, minimum, how, what):
+    """Auch eine empfehlende Quelle liefert bereits Zuschauer: gemessen ja, angesprochen nein.
+
+    Ob YouTube uns dort algorithmisch ausliefert oder ob dort jemand unsere Musik selbst aufgenommen hat,
+    laesst sich von aussen nicht sicher unterscheiden. Genau deshalb gilt hier die Zweifelsregel.
+    """
+    if views > 0:
+        return protected_access(views, what.rstrip(".") if what else "Diese Quelle",
+                                "Neue Audiences werden ueber die YouTube-Suche gefunden, nicht bei Quellen, "
+                                "die uns schon ausliefern.")
+    return _adjacency_access(views, public_reach, minimum, how, what)
+
+
+def _adjacency_access(views, public_reach, minimum, how, what):
     """Belegte Nachbarschaft mit oeffentlich nachpruefbarem Publikum – aber kein Ersatz fuer Zufluss.
 
     Frueher war ein einziger gemessener View hier handelbar, sobald die Flaeche gross war. Das ergab
@@ -178,6 +206,14 @@ def adjacency_access(views, public_reach, minimum, how, what):
                        f"aber klein. {what} Erwartung entsprechend klein halten und am Ergebnis messen.")}
 
 
+def protected_access(views, what, detail=""):
+    """Eine bestehende Quelle: Messsignal, kein Outreach-Ziel. Siehe PRODUKTREGEL oben."""
+    return {"actionable": False, "protected": True, "rules": NO_SPAM, "manual": True,
+            "protected_reason": "protected_existing_source",
+            "why_not": (f"{what} hat uns bereits {views} Views geschickt. {PROTECTED_NOTE}"
+                        + (f" {detail}" if detail else ""))}
+
+
 def measured_access(views, how):
     """Gemessene Flächen brauchen einen belastbaren Traffic-Pfad, sonst bleiben sie Beleg statt Aufgabe."""
     if views < MIN_ACTIONABLE_VIEWS:
@@ -188,9 +224,11 @@ def measured_access(views, how):
 
 
 def referrer_access(url, views):
-    """Kann man dort überhaupt etwas tun – und lohnt es sich nach gemessenem Publikum?"""
+    """Eine Seite, die uns schon Zuschauer schickt, ist eine bestehende Beziehung – kein Outreach-Ziel."""
     host = urlparse(url).netloc.lower()
     host = host[4:] if host.startswith("www.") else host
+    if host not in SHARE_PLATFORMS and "." in host and not host.startswith("android-app"):
+        return {**protected_access(views, f"Die Seite {host}"), "platform": host}
     if host in SHARE_PLATFORMS or host.startswith("android-app") or "." not in host:
         return {"actionable": False, "platform": host,
                 "why_not": (f"{host} ist eine Weiterleitungs- oder Teilen-Plattform, keine Redaktion: dort gibt es "
@@ -396,6 +434,54 @@ def own_vocabulary(session):
     return {video_id: set(list(words)[:MAX_VOCAB_TOKENS*3]) for video_id, words in vocab.items()}
 
 
+def existing_sources(session):
+    """Alles, von dem wir schon gemessenen Traffic bekommen – die geschuetzten bestehenden Beziehungen.
+
+    Diese Mengen sind die technische Form der PRODUKTREGEL: was hier drin steht, wird gemessen und
+    gelernt, aber nie angesprochen.
+    """
+    hosts, videos, channels, titles = set(), set(), set(), set()
+    for kind in ("own_external", "own_embed"):
+        for row in session.scalars(select(DiscoverySignal).where(DiscoverySignal.kind == kind)):
+            url = as_url(row.detail) or ""
+            host = urlparse(url).netloc.lower()
+            host = host[4:] if host.startswith("www.") else host
+            if host:
+                hosts.add(host)
+    items = {row.video_id: row for row in session.scalars(select(DiscoveryItem))}
+    for row in session.scalars(select(DiscoverySignal).where(DiscoverySignal.kind == "own_suggested_source")):
+        videos.add(row.detail)
+        item = items.get(row.detail)
+        if item is not None:
+            if item.channel_id:
+                channels.add(item.channel_id)
+            if item.channel_title:
+                titles.add(item.channel_title.strip().lower())
+    return {"hosts": hosts, "videos": videos, "channels": channels, "titles": titles}
+
+
+def protected_pool(pool, existing):
+    """Ist dieser gefundene Ort in Wahrheit eine bestehende Beziehung – oder nicht sicher auszuschliessen?"""
+    details = pool.details or {}
+    title = (pool.channel_title or pool.title or "").strip().lower()
+    if pool.kind == "channel":
+        if pool.key in existing["channels"] or title in existing["titles"]:
+            return ("Dieser Kanal liefert uns bereits Zuschauer: bestehende Quelle, nur Messsignal. "
+                    + PROTECTED_NOTE)
+    if pool.kind == "playlist":
+        if pool.channel_id in existing["channels"] or title in existing["titles"]:
+            return ("Der Betreiber dieser Playlist liefert uns bereits Zuschauer: bestehende Beziehung. "
+                    + PROTECTED_NOTE)
+        contains = details.get("contains_own")
+        if contains:
+            return ("Diese Playlist fuehrt unsere Musik bereits: eine bestehende Platzierung. Sie wird "
+                    "gemessen, aber ihr Kurator wird nicht angeschrieben. "+PROTECTED_NOTE)
+        if contains is None:
+            return ("Ob diese Playlist unsere Musik schon fuehrt, ist noch nicht geprueft. Solange das offen "
+                    "ist, wird sie nicht angeschrieben – im Zweifel nicht kontaktieren.")
+    return None
+
+
 def video_profiles(session, generic=None):
     """Das musikalische Profil je eigenem Video – einmal je Lauf, damit jede Pruefung dieselbe Basis hat."""
     from . import audience
@@ -466,11 +552,14 @@ def candidate_matches(session, vocab, generic=None, profiles=None):
     from .discovery import tokens as split
     generic = generic if generic is not None else generic_tokens(session)
     profiles = profiles if profiles is not None else video_profiles(session, generic)
-    neighbours = {row.detail for row in session.scalars(select(DiscoverySignal).where(
-        DiscoverySignal.kind == "own_suggested_source"))}
+    existing = existing_sources(session)
     matches = []
     for item in session.scalars(select(DiscoveryItem)):
         if not (item.via or {}).get("queries") or item.video_id in vocab:
+            continue
+        # PRODUKTREGEL: Quellen, die uns schon Zuschauer schicken, sind Messsignale und keine Ziele.
+        if item.video_id in existing["videos"] or item.channel_id in existing["channels"] \
+                or (item.channel_title or "").strip().lower() in existing["titles"]:
             continue
         words = set(split(item.title))|{t for tag in (item.tags or []) for t in split(tag)}
         best, fit = None, None
@@ -480,8 +569,7 @@ def candidate_matches(session, vocab, generic=None, profiles=None):
                 continue
             # Bewusst die vollstaendigen Worte des Kandidaten: der Fit prueft selbst, was davon zu uns
             # gehoert, und braucht den Rest, um zu erkennen, ob der Ort ueberhaupt musikalisch ist.
-            candidate = audience.audience_fit(words | (own & words), profile, tags=item.tags or [],
-                                              neighbourhood=[item.title] if item.video_id in neighbours else ())
+            candidate = audience.audience_fit(words | (own & words), profile, tags=item.tags or [])
             if candidate["class"] is None:
                 continue
             if fit is None or FIT_RANK[candidate["class"]] > FIT_RANK[fit["class"]] \
@@ -528,6 +616,7 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
     from .discovery import tokens as split
     neighbour_titles = {row.title for row in session.scalars(select(DiscoveryItem)) if row.title}
     profiles = video_profiles(session, generic) if profiles is None else profiles
+    existing = existing_sources(session)
     verdicts = []
     for pool in session.scalars(select(AudiencePool)):
         details = pool.details or {}
@@ -569,6 +658,10 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
                                                   "fit_class": fit["class"]}}
             return kept
 
+        guard = protected_pool(pool, existing)
+        if guard and (best is not None and fit["class"] is not None):
+            decide(guard)
+            continue
         if best is None or fit["class"] is None:
             detail = (f" Der Audience-Intent „{intent['label']}“ traegt hier nicht: "
                       f"{', '.join(intent.get('head') or [])} fehlt im Titel, in der Beschreibung und im Inhalt."
@@ -1394,7 +1487,14 @@ def overview(session, now=None):
             blocked.append({"video_id": surface.video_id, "title": titles.get(surface.video_id), "kind": surface.kind,
                             "surface": surface.title, "traffic_source": surface.traffic_source, "reason": reason,
                             "blocked_by": other.id, "until": str(other.evaluate_after)})
+    protected = [{"title": s.title, "url": s.url, "kind": s.kind, "traffic_source": s.traffic_source,
+                  "video": titles.get(s.video_id, s.video_id),
+                  "measured_views_90d": (s.evidence or {}).get("measured_views_90d"),
+                  "why_not": (s.access or {}).get("why_not")}
+                 for s in sorted(surfaces, key=lambda s: -((s.evidence or {}).get("measured_views_90d") or 0))
+                 if (s.access or {}).get("protected")]
     return {"version": VERSION, "day": str(latest) if latest else None, "today": str(today),
+            "protected_sources": protected[:12],
             "traffic_queue": queue[:QUEUE_LIMIT], "running": running, "results": results[:8],
             "blocked": blocked[:8], "surfaces_found": len(surfaces),
             "surfaces": [{"kind": s.kind, "key": s.key, "title": s.title, "url": s.url, "video_id": s.video_id,
@@ -1415,6 +1515,8 @@ def overview(session, now=None):
                                       "HTTP-Prüfung, dass eine Seite erreichbar ist"],
                              "not_used": ["Automatisches Posten, Kommentieren oder Anschreiben: findet nicht statt.",
                                           "Bezahlte Reichweite, Bots, Engagement-Pods: ausgeschlossen.",
-                                          "Externe Web-Suchanbieter: verworfen, keine zusätzlichen Kosten."]},
+                                          "Externe Web-Suchanbieter: verworfen, keine zusätzlichen Kosten.",
+                                          "Bestehende Radios, Redaktionen, Medien, Kuratoren und einbettende "
+                                          "Seiten: werden gemessen, aber nie angesprochen."]},
             "read_only": "Das System postet nichts und ändert nichts auf YouTube.",
             "goal": "Zusätzliche qualifizierte organische Views; gemessen wird die Quelle, nicht die Aktivität."}

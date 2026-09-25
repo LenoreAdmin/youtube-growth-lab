@@ -157,6 +157,19 @@ class YouTube:
             rows.extend(result.get("items", []))
         return rows
 
+    def playlist_contains(self, playlist_id, video_ids):
+        """Liegt eines unserer Videos in dieser Playlist? Exakte Antwort, eine Einheit je Abfrage.
+
+        Gebraucht fuer die Produktregel: eine Playlist, die unsere Musik schon fuehrt, ist eine bestehende
+        Platzierung und wird nie angeschrieben.
+        """
+        for video_id in video_ids:
+            result = self.execute(self.data.playlistItems().list(part="id", playlistId=playlist_id,
+                                                                 videoId=video_id, maxResults=1))
+            if result.get("items"):
+                return True
+        return False
+
     def playlist_items(self, playlist_id, max_results=10):
         """Was steckt in der Playlist und wird sie gepflegt (1 Einheit)."""
         result = self.execute(self.data.playlistItems().list(part="snippet,contentDetails", playlistId=playlist_id,

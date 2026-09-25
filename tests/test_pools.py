@@ -181,6 +181,7 @@ def test_own_embeds_are_collected_from_analytics_without_data_api_quota(session)
 
 # ---------------------------------------------------------------------------- Relevanz der Pools
 def pool(session, kind, key, title, **fields):
+    fields["details"] = {"contains_own": False, **(fields.get("details") or {})}
     session.add(AudiencePool(**{**{"kind": kind, "key": key, "title": title,
                                    "url": f"https://www.youtube.com/playlist?list={key}" if kind == "playlist"
                                           else f"https://www.youtube.com/channel/{key}",
@@ -290,15 +291,16 @@ def test_the_search_probes_leave_units_for_the_pool_search(session):
     assert client.searches < 8
 
 
-def test_an_embedding_site_becomes_an_actionable_external_surface(session):
+def test_an_embedding_site_is_measured_but_never_contacted(session):
+    """PRODUKTREGEL: wer unser Video schon einbettet, hat uns selbst ausgewaehlt. Das ist eine Beziehung."""
     signal(session, "a", "own_embed", "bahnblog.example/nachtzug", 12)
     aq.collect(session, NOW, http=FakeHttp())
     surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "embed_site"))
-    assert surface.traffic_source == "EXT_URL" and surface.lever_class == "external_outreach"
-    assert surface.access["actionable"] is True and surface.http_status == 200
+    assert surface.traffic_source == "EXT_URL" and surface.http_status == 200
     assert "bettet unser Video ein" in surface.evidence["why"] and surface.evidence["measured_views_90d"] == 12
-    steps = aq.steps_for("embed_site", surface, "Trainstories")
-    assert any("einbettet" in step for step in steps) and any("Impressum" in step for step in steps)
+    assert surface.access["actionable"] is False and surface.access["protected"] is True
+    assert surface.access["protected_reason"] == "protected_existing_source"
+    assert aq.propose(session, NOW)["proposed"] == 0
 
 
 # ---------------------------------------------------------------------------- Attribution und Konflikte
