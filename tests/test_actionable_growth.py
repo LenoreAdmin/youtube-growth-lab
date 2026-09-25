@@ -329,3 +329,41 @@ def test_a_starved_video_produces_an_executable_experiment_in_the_plan(monkeypat
     stored = session.scalar(select(GrowthAction).where(GrowthAction.video_id == "a", GrowthAction.status == "proposed"))
     assert stored.action == entry["action"] and stored.payload["steps"] == entry["steps"]
     assert stored.state == "needs_distribution"
+
+
+def test_an_attested_audience_intent_drives_an_own_asset_action(monkeypatch, session):
+    """PRODUKTAUFTRAG: der belegte Intent lenkt eine Maßnahme an unserem eigenen Video, kein Anschreiben."""
+    from app.models import VideoProfile
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=6, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)
+    end = TODAY-timedelta(days=LAG)
+    for i in range(7):
+        session.add(Reach(video_id="a", day=end-timedelta(days=i), impressions=400, ctr=.03, report_id="r"))
+        session.add(Reach(video_id="b", day=end-timedelta(days=i), impressions=2000, ctr=.05, report_id="r"))
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.add(VideoProfile(video_id="a", description="Ambient zur Reise nach Mongolian, aufgenommen im Nachtzug.",
+                             tags=["trans mongolian", "ambient"],
+                             topics=["https://en.wikipedia.org/wiki/Ambient_music"], category_id="10",
+                             channel_title="Sealand", channel_description="Ambient und Reisemusik.",
+                             channel_keywords="ambient travel", channel_topics=[], fetched_day=TODAY))
+    session.commit()
+    rows, _ = history.build(history.load(session), 168, LAG)
+    base = regimes.baselines(rows)
+    histories = {h.video.id: h for h in history.load(session)}
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": history.features_at(histories[v], TODAY),
+                 "regime": regimes.classify(history.features_at(histories[v], TODAY), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}} for v in ("a", "b")]
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
+    row = next(r for r in plan["ranking"] if r["video_id"] == "a")
+    external = row.get("external") or {}
+    assert external.get("kind") == "audience_intent", f"der belegte Intent muss die Chance tragen: {external}"
+    assert external["evidence_level"] == "multi_signal_proxy" and external["actionable"] is True
+    assert row["action"] in ge.ACTIONS and row["action"] not in ("observe", "protect_no_change")
+    assert row["target_metric"] in ("discovery_views_7d", "impressions_7d", "views_7d", "ctr_or_views")
+    # Die Wirkung wird auch nach Trafficquelle gemessen, sonst lernt das System nicht, welche Fläche waechst.
+    metrics = ge._window_metrics(histories["a"], end-timedelta(days=6), end)
+    assert "sources" in metrics and isinstance(metrics["sources"], dict)

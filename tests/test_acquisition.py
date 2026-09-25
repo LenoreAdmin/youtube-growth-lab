@@ -72,6 +72,17 @@ def traffic(session, video_id, source, day, views, paid=False, minutes=2.0):
                              paid=paid, fetched_at=NOW))
 
 
+def candidate(session, video_id, channel_id, title, views, subscribers=5000, channel_title="Rail Sounds"):
+    """Ein fremdes Video aus den Suchproben – Beleg fuer Audience-Naehe, niemals ein Kontaktziel."""
+    session.add(DiscoveryItem(video_id=video_id, channel_id=channel_id, title=title, channel_title=channel_title,
+                              views=views, tags=[], via={"queries": ["train journey"]}, first_seen_day=TODAY,
+                              last_seen_day=TODAY, seen_count=1))
+    if not session.get(DiscoveryChannel, channel_id):
+        session.add(DiscoveryChannel(channel_id=channel_id, title=channel_title, subscribers=subscribers,
+                                     video_count=50, views=views*10, first_seen_day=TODAY, last_seen_day=TODAY))
+    session.commit()
+
+
 # ---------------------------------------------------------------------------- Flächen finden
 def test_only_verifiable_places_with_measured_audience_become_surfaces(session):
     signal(session, "a", "own_external", "musikblog.example", 14)
@@ -123,47 +134,6 @@ def test_measured_audience_outranks_analytical_interest():
 
 
 # ---------------------------------------------------------------------------- Aktionen
-def test_every_proposal_answers_where_why_what_and_how_measured(session):
-    own_theme(session)
-    new_audience_channel(session)
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    assert row.status == "proposed" and row.traffic_source == "YT_OTHER_PAGE"
-    assert row.lever_class == "community_participation"
-    assert row.target_metric == "other_views_7d" and row.surface_key == "UCnew"
-    payload = row.payload
-    assert payload["surface_title"] == "Night Ambient Radio"                   # wo
-    assert "Abonnenten" in payload["why"]                                      # warum
-    assert payload["steps"] and any("kommentier" in step.lower() for step in payload["steps"])   # was genau
-    assert "YT_OTHER_PAGE" in payload["primary_metric"]                        # wie gemessen
-    assert payload["mechanism"] and payload["window_days"] == aq.WINDOW_DAYS
-    assert payload["executed_automatically"] is False and "postet nichts" in payload["note"]
-    assert "Spam" in payload["rules"] and "Bots" in payload["rules"]
-    assert "Titel" in payload["do_not_change"] and "Beschreibung" in payload["do_not_change"]
-
-
-def test_the_traffic_queue_contains_no_observation_or_protection(session):
-    signal(session, "a", "own_external", "musikblog.example", 14)
-    signal(session, "b", "own_search_term", "shine on acoustic", 12)
-    aq.collect(session, NOW, http=FakeHttp())
-    aq.propose(session, NOW)
-    view = aq.overview(session, NOW)
-    assert view["traffic_queue"], "die Traffic-Queue ist gefuellt"
-    for entry in view["traffic_queue"]:
-        assert entry["action"] in aq.ACTION_LABELS
-        assert entry["action"] not in ("observe", "probe_missing_evidence", "protect_no_change")
-        assert entry["surface"] and entry["why"] and entry["steps"] and entry["primary_metric"]
-        assert entry["confirm"]["endpoint"].endswith("/start")
-    assert "Automatisches Posten" in " ".join(view["capabilities"]["not_used"])
-    # Externe Web-Suchanbieter sind verworfen: sie duerfen nicht als genutzte Quelle auftauchen.
-    assert not any("Web-Suche" in x for x in view["capabilities"]["used"])
-    assert any("Web-Such" in x for x in view["capabilities"]["not_used"])
-    # Die Pool-Suche berichtet ueber sich selbst, auch wenn sie nichts gefunden hat.
-    assert view["pools"]["searched"] is False and view["pools"]["candidates"] == []
-
-
-# ---------------------------------------------------------------------------- Konflikte nach Hebel/Quelle
 def test_a_running_internal_test_blocks_only_what_it_cannot_be_told_apart_from(session):
     # Das laufende Experiment #8: interne Verlinkung, gemessen an discovery_views_7d.
     session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
@@ -183,48 +153,6 @@ def test_a_running_internal_test_blocks_only_what_it_cannot_be_told_apart_from(s
     assert other is not None and "selben Hebel" in reason
 
 
-def test_a_running_discovery_experiment_blocks_what_it_cannot_separate(session):
-    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
-                             state="needs_distribution", action="link_from_own_video", target_metric="discovery_views_7d",
-                             window_days=14, evaluate_after=TODAY+timedelta(days=16), status="running",
-                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
-                             traffic_source="END_SCREEN", payload={}))
-    own_theme(session)
-    new_audience_channel(session)
-    signal(session, "a", "own_search_term", "train journey music", 33)
-    aq.collect(session, NOW, http=FakeHttp())
-    result = aq.propose(session, NOW)
-    rows = list(session.scalars(select(GrowthAction).where(GrowthAction.version == aq.VERSION)))
-    # discovery_views_7d fasst alle YouTube-Oberflaechen zusammen: nichts davon ist davon trennbar.
-    assert rows == [] and result["proposed"] == 0
-    assert any("nicht trennbar" in b["reason"].lower() for b in result["blocked"])
-    # Das laufende Experiment bleibt unangetastet.
-    running = session.scalar(select(GrowthAction).where(GrowthAction.version == ge.VERSION))
-    assert running.status == "running" and running.evaluate_after == TODAY+timedelta(days=16)
-
-
-def test_starting_an_acquisition_action_uses_the_existing_lifecycle(monkeypatch, session):
-    wire(monkeypatch, session)
-    seed_history(session, "a", days=400, base=3, trend=0)
-    own_theme(session)
-    new_audience_channel(session)
-    aq.collect(session, NOW, http=FakeHttp())
-    aq.propose(session, NOW)
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    main.app.dependency_overrides[main.db] = lambda: session
-    try:
-        client = TestClient(main.app)
-        response = client.post(f"/api/growth/actions/{row.id}/start", headers=HEADERS)
-        assert response.status_code == 200 and response.json()["status"] == "running"
-        assert response.json()["executed_automatically"] is False
-        view = client.get("/api/acquisition", headers=HEADERS).json()
-        assert view["traffic_queue"] == [] and view["running"][0]["action_id"] == row.id
-        assert view["running"][0]["started_day"] == str(ge.pacific_day(utcnow()))
-    finally:
-        main.app.dependency_overrides.clear()
-
-
-# ---------------------------------------------------------------------------- Messen und lernen
 def test_the_effect_is_attributed_to_the_source_that_was_worked_on(session):
     start = TODAY-timedelta(days=20)
     row = GrowthAction(video_id="a", created_day=start, created_at=NOW, version=aq.VERSION, state="traffic_acquisition",
@@ -308,43 +236,6 @@ def test_the_scoreboard_reports_additional_views_not_activity(session):
 
 
 # ---------------------------------------------------------------------------- Ende zu Ende
-def test_production_shape_trainstories_gets_a_separable_traffic_action(monkeypatch, session):
-    """Die Definition of Done: trotz laufendem internem Test entsteht eine ausfuehrbare Traffic-Aktion."""
-    wire(monkeypatch, session)
-    seed_history(session, "a", days=400, base=3, trend=0)
-    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
-                             state="needs_distribution", action="link_from_own_video", target_metric="impressions_7d",
-                             window_days=14, evaluate_after=TODAY+timedelta(days=16), status="running",
-                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
-                             traffic_source="END_SCREEN", payload={}))
-    own_theme(session)
-    new_audience_channel(session)
-    result = aq.run(session, NOW, http=FakeHttp())
-    assert result["issues"] == [] and result["surfaces"] >= 1 and result["proposed"] == 1
-    view = aq.overview(session, NOW)
-    entry = view["traffic_queue"][0]
-    assert entry["video_id"] == "a" and entry["traffic_source"] == "YT_OTHER_PAGE"
-    assert entry["surface"] == "Night Ambient Radio"
-    assert entry["audience_fit"]["class"] in ("genre", "topic") and entry["steps"] and entry["mechanism"]
-    assert entry["primary_metric"].startswith("zusätzliche qualifizierte Views")
-    assert view["scoreboard"]["proposed"] == 1
-    assert any(b["blocked_by"] for b in view["blocked"]) is False or view["blocked"] == []
-
-
-def test_a_second_pass_never_overwrites_an_open_proposal(session):
-    signal(session, "a", "own_external", "musikblog.example", 14)
-    signal(session, "a", "own_search_term", "train journey music", 33)
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    first = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    before = (first.id, first.surface_key, first.action)
-    assert aq.propose(session, NOW)["proposed"] == 0, "der offene Vorschlag bleibt stehen"
-    session.expire_all()
-    rows = list(session.scalars(select(GrowthAction).where(GrowthAction.version == aq.VERSION)))
-    assert len(rows) == 1 and (rows[0].id, rows[0].surface_key, rows[0].action) == before
-
-
-# ---------------------------------------------------------------------------- Lehren aus dem ersten Produktionslauf
 def test_a_sharing_platform_is_evidence_but_never_an_outreach_target(session):
     """whatsapp.com kann man nicht kontaktieren – der erste Produktionslauf hätte das vorgeschlagen."""
     signal(session, "a", "own_external", "whatsapp.com", 30)
@@ -355,62 +246,6 @@ def test_a_sharing_platform_is_evidence_but_never_an_outreach_target(session):
     assert "Teilen-Plattform" in surface.access["why_not"] and "privat weitergeben" in surface.access["why_not"]
     assert aq.propose(session, NOW)["proposed"] == 0
     assert session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION)) is None
-
-
-def test_an_existing_source_is_never_a_task_however_much_traffic_it_sends(session):
-    """PRODUKTREGEL: eine Seite, die uns schon Zuschauer schickt, ist eine gewachsene Beziehung.
-
-    Sie wird gemessen und fliesst in das Audience-Lernen ein, aber dieses System spricht sie nie an –
-    weder bei einem View noch bei tausend.
-    """
-    signal(session, "a", "own_external", "kleinblog.example", 1)
-    signal(session, "a", "own_external", "radiosender.example", 4000)
-    signal(session, "a", "own_embed", "bahnblog.example/nachtzug", 120)
-    aq.collect(session, NOW, http=FakeHttp())
-    surfaces = list(session.scalars(select(TrafficSurface)))
-    assert surfaces, "die Quellen bleiben als Messsignal sichtbar"
-    for surface in surfaces:
-        assert surface.access["actionable"] is False
-        assert surface.access.get("protected") is True
-        assert surface.access["protected_reason"] == "protected_existing_source"
-        assert "nie angesprochen" in surface.access["why_not"]
-    assert aq.propose(session, NOW)["proposed"] == 0
-    # Erst ein neu gefundener Ort, der uns noch nie Zuschauer geschickt hat, wird eine Aufgabe.
-    own_theme(session)
-    new_audience_channel(session)
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    assert row.surface_key == "UCnew" and row.traffic_source == "YT_OTHER_PAGE"
-
-
-def test_an_impressions_experiment_does_not_block_external_outreach(session):
-    """Der Produktionsfall: #8 misst impressions_7d. Externe Links erzeugen Views, aber keine Impressions."""
-    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
-                             state="needs_distribution", action="probe_missing_evidence", target_metric="impressions_7d",
-                             window_days=14, evaluate_after=TODAY+timedelta(days=16), status="running",
-                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
-                             traffic_source="END_SCREEN", payload={}))
-    session.commit()
-    allowed, reason = aq.blocking(session, "a", "community_participation", "YT_OTHER_PAGE", "other_views_7d")
-    assert allowed is None, "ein Klick von einer fremden Seite erzeugt keine Impression auf unserer Oberflaeche"
-    blocked, reason = aq.blocking(session, "a", "community_participation", "RELATED_VIDEO", "suggested_views_7d")
-    assert blocked is not None and "impressions_7d" in reason
-    own_theme(session)
-    new_audience_channel(session)
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    assert row.traffic_source == "YT_OTHER_PAGE" and row.video_id == "a"
-
-
-def candidate(session, video_id, channel_id, title, views, subscribers=5000, channel_title="Rail Sounds"):
-    session.add(DiscoveryItem(video_id=video_id, channel_id=channel_id, title=title, channel_title=channel_title,
-                              views=views, tags=[], via={"queries": ["train journey"]}, first_seen_day=TODAY,
-                              last_seen_day=TODAY, seen_count=1))
-    if not session.get(DiscoveryChannel, channel_id):
-        session.add(DiscoveryChannel(channel_id=channel_id, title=channel_title, subscribers=subscribers,
-                                     video_count=50, views=views*10, first_seen_day=TODAY, last_seen_day=TODAY))
 
 
 def test_new_surfaces_need_corroboration_across_channels(session):
@@ -451,29 +286,6 @@ def test_a_new_surface_ranks_below_a_proven_one_and_offers_participation(session
     steps = aq.steps_for("candidate_video", best_candidate, "Trainstories")
     assert any("ansehen" in s for s in steps) and any("kein Link" in s for s in steps)
     assert "YT_OTHER_PAGE" in aq.mechanism("candidate_video", best_candidate)
-
-
-def test_a_proposal_is_withdrawn_when_its_surface_disappears(session):
-    own_theme(session)
-    new_audience_channel(session)
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    # Am naechsten Tag ist der Kanal nicht mehr unter den gefundenen Orten.
-    for surface in session.scalars(select(TrafficSurface)):
-        session.delete(surface)
-    session.query(AudiencePool).delete()
-    session.commit()
-    later = NOW+timedelta(days=1)
-    aq.collect(session, later, http=FakeHttp())
-    result = aq.propose(session, later)
-    session.expire_all()
-    withdrawn = session.get(GrowthAction, row.id)
-    assert withdrawn.status == "superseded" and withdrawn.outcome == "inconclusive"
-    assert "nicht mehr auf" in withdrawn.evaluation["reason"]
-    assert "nie ausgeführt" in withdrawn.evaluation["note"]
-    assert [d["action_id"] for d in result["dropped"]] == [row.id]
-    assert aq.overview(session, later)["traffic_queue"] == []
 
 
 def test_the_theme_vocabulary_comes_from_the_neighbourhood_not_only_the_own_title(session):
@@ -538,26 +350,6 @@ def test_a_surface_without_a_traffic_path_is_not_blamed_on_a_running_experiment(
     assert surface.access["actionable"] is False
 
 
-def test_todays_surfaces_are_rebuilt_so_a_retired_one_disappears(session):
-    session.get(Video, "a").title = "Sealand night train ambient"
-    candidate(session, "CAND0000003", "UC3", "Night train ambient journey", 60000, channel_title="Rail One")
-    candidate(session, "CAND0000004", "UC4", "Ambient night train ride", 70000, channel_title="Rail Two")
-    session.commit()
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    # Die Kandidaten verschwinden aus der Datenlage (z. B. weil die Regeln verschaerft wurden).
-    for item in list(session.scalars(select(DiscoveryItem))):
-        session.delete(item)
-    session.commit()
-    aq.collect(session, NOW, http=FakeHttp())
-    assert not list(session.scalars(select(TrafficSurface))), "der heutige Stand wird neu erhoben"
-    aq.propose(session, NOW)
-    session.expire_all()
-    assert session.get(GrowthAction, row.id).status == "superseded"
-    assert aq.overview(session, NOW)["traffic_queue"] == []
-
-
 def test_a_surface_with_almost_no_measurable_inflow_is_evidence_not_a_task(session):
     """Ein einziger View in 90 Tagen sind ~0,08 Views/Woche: das darf nicht unsere wichtigste Aktion sein."""
     session.add(DiscoveryItem(video_id="NB123456789", channel_id="UCM", title="Anii cei mai dragi din viata mea",
@@ -594,48 +386,56 @@ def test_a_surface_with_almost_no_measurable_inflow_is_evidence_not_a_task(sessi
     assert weak.access["actionable"] is False
 
 
-def test_an_open_proposal_is_updated_or_replaced_by_a_better_surface(session):
-    own_theme(session)
-    new_audience_channel(session, key="UCsmall", title="Small Ambient Radio", subscribers=500, views=1000)
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    assert "500 Abonnenten" in row.payload["why"]
-    # Derselbe Ort waechst: der Text muss der Messung folgen.
-    new_audience_channel(session, key="UCsmall", title="Small Ambient Radio", subscribers=520, views=1100)
-    later = NOW+timedelta(days=1)
-    aq.collect(session, later, http=FakeHttp())
-    aq.propose(session, later)
-    session.expire_all()
-    updated = session.get(GrowthAction, row.id)
-    assert updated.status == "proposed" and "520 Abonnenten" in updated.payload["why"], "Text folgt der Messung"
-    # Eine klar bessere Flaeche ersetzt den Vorschlag.
-    new_audience_channel(session, key="UCbig", title="Big Ambient Radio", subscribers=900000, views=200000000)
-    session.commit()
-    even_later = NOW+timedelta(days=2)
-    aq.collect(session, even_later, http=FakeHttp())
-    result = aq.propose(session, even_later)
-    session.expire_all()
-    assert session.get(GrowthAction, row.id).status == "superseded"
-    assert "Bessere Fläche gefunden" in session.get(GrowthAction, row.id).evaluation["reason"]
-    assert result["proposed"] == 1
-    fresh = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION,
-                                                     GrowthAction.status == "proposed"))
-    assert fresh.id != row.id and fresh.payload["surface_title"] == "Big Ambient Radio"
 
 
-def test_a_withdrawn_proposal_does_not_block_a_better_one_on_the_same_day(session):
-    """Sonst bliebe die Queue bis zum naechsten Tag leer, obwohl eine handelbare Flaeche vorliegt."""
+# ---------------------------------------------------------------------------- neuer Vertrag der Schicht
+def test_a_found_surface_is_evidence_and_never_becomes_a_task(session):
+    """PRODUKTAUFTRAG: Ziel ist algorithmische Distribution. Manuelle Akquise erzeugt keine Maßnahme mehr."""
     own_theme(session)
-    signal(session, "a", "own_external", "kleinblog.example", 1)          # geschuetzte bestehende Quelle
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 0
-    # Spaeter am selben Tag liegt ein neu gefundener Ort vor.
     new_audience_channel(session)
-    aq.collect(session, NOW, http=FakeHttp())
-    result = aq.propose(session, NOW)
-    assert result["proposed"] == 1, "die bessere Flaeche kommt noch heute in die Queue"
+    signal(session, "a", "own_external", "radiosender.example", 900)
+    result = aq.collect(session, NOW, http=FakeHttp())
+    assert result["surfaces"] >= 2, "die Flaechen werden weiter gefunden und gemessen"
+    assert aq.propose(session, NOW)["proposed"] == 0
+    assert not list(session.scalars(select(GrowthAction).where(GrowthAction.version == aq.VERSION,
+                                                              GrowthAction.status == "proposed")))
+    view = aq.overview(session, NOW)
+    assert view["traffic_queue"] == [] and view["outreach"].startswith("eingestellt")
+    assert view["assessment"]["status"] == "evidence_only"
+    assert view["audience_intents"], "die Belege bleiben sichtbar"
+
+
+def test_an_open_outreach_proposal_is_withdrawn_with_its_reason(session):
+    """Alt-Vorschlaege aus dem Akquise-Pfad muessen von selbst verschwinden."""
+    own_theme(session)
+    new_audience_channel(session)
+    session.add(GrowthAction(video_id="a", created_day=TODAY, created_at=NOW, version=aq.VERSION,
+                             state="needs_distribution", action="engage_pool_channel",
+                             target_metric="other_views_7d", window_days=aq.WINDOW_DAYS,
+                             evaluate_after=TODAY+timedelta(days=aq.WINDOW_DAYS+2), status="proposed",
+                             lever_class="community_participation", traffic_source="YT_OTHER_PAGE",
+                             surface_key="UCnew",
+                             payload={"surface_kind": "pool_channel", "surface_title": "Night Ambient Radio"}))
+    session.commit()
     row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    assert row.status == "proposed" and row.surface_key == "UCnew"
-    assert row.outcome is None and row.evaluation is None
-    assert aq.overview(session, NOW)["traffic_queue"][0]["surface"] == "Night Ambient Radio"
+    result = aq.propose(session, NOW)
+    session.expire_all()
+    withdrawn = session.get(GrowthAction, row.id)
+    assert withdrawn.status == "superseded" and withdrawn.outcome == "inconclusive"
+    assert "Manuelle Akquise ist eingestellt" in withdrawn.evaluation["reason"]
+    assert [d["action_id"] for d in result["dropped"]] == [row.id]
+
+
+def test_conflict_scoping_stays_available_for_the_own_asset_engine(session):
+    """Die Trennbarkeitspruefung wird weiter gebraucht – jetzt fuer eigene Maßnahmen."""
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence",
+                             target_metric="impressions_7d", window_days=14,
+                             evaluate_after=TODAY+timedelta(days=16), status="running",
+                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
+                             traffic_source="END_SCREEN", payload={}))
+    session.commit()
+    allowed, _ = aq.blocking(session, "a", "community_participation", "YT_OTHER_PAGE", "other_views_7d")
+    assert allowed is None, "ein Klick von ausserhalb erzeugt keine Impression auf unserer Oberflaeche"
+    blocked, reason = aq.blocking(session, "a", "search_wording", "YT_SEARCH", "search_views_7d")
+    assert blocked is not None and "impressions_7d" in reason

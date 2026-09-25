@@ -326,32 +326,6 @@ def test_the_running_impressions_test_blocks_only_the_youtube_surfaces(session):
     assert aq.blocking(session, "a", "community_participation", "YT_OTHER_PAGE", "other_views_7d")[0] is None
 
 
-def test_a_playlist_pitch_becomes_an_executable_proposal(session):
-    # Nachbarschaft nur als Themenquelle, ohne eigene Reichweite – damit die Playlist die beste Flaeche ist.
-    session.get(Video, "a").title = "Sealand Trainstories"
-    session.add(DiscoveryItem(video_id="NEIGHBOUR01", channel_id="UCN", title="Night train ambient journey",
-                              channel_title="Rail Nights", views=400, tags=[],
-                              via={"suggested_source": ["own_traffic"]}, first_seen_day=TODAY, last_seen_day=TODAY,
-                              seen_count=1))
-    session.commit()
-    signal(session, "a", "own_suggested_source", "NEIGHBOUR01", 4)
-    pool(session, "playlist", "PLgood", "Night train ambient journeys", item_count=30, subscribers=50000,
-         channel_title="Slow Travel Sounds", description="ambient night train journey")
-    aq.collect(session, NOW, http=FakeHttp())
-    assert aq.propose(session, NOW)["proposed"] == 1
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    assert row.action == "pitch_to_playlist_curator" and row.target_metric == "playlist_views_7d"
-    payload = row.payload
-    assert "Slow Travel Sounds" in payload["why"] and "30 Titel" in payload["why"]
-    assert any("Kurator" in step for step in payload["steps"])
-    assert any("keine Gegenleistung" in step for step in payload["steps"])
-    assert payload["mechanism_status"] == "hypothese"
-    assert "PLAYLIST" in payload["primary_metric"]
-    entry = aq.overview(session, NOW)["traffic_queue"][0]
-    assert entry["surface_url"] == "https://www.youtube.com/playlist?list=PLgood"
-    assert entry["traffic_source"] == "PLAYLIST"
-
-
 def test_playlist_outreach_picks_the_full_music_video_not_the_album_teaser(session):
     """Produktionsfall: die Swiss-Pop-Playlists bekamen automatisch den 11AM-Album-Teaser angeboten."""
     from app.models import Video as V
@@ -391,63 +365,15 @@ def test_a_channel_needs_genre_or_neighbourhood_evidence_not_only_english_words(
     assert verdicts["Night Ambient Radio"]["fit_class"] in ("genre", "neighbourhood")
 
 
-def test_the_engine_says_plainly_when_no_action_is_good_enough(session):
-    """Ein leeres JETZT TUN ist eine Aussage, kein Fehler – und muss als solche dastehen."""
+
+
+def test_a_verified_playlist_stays_a_placement_signal_without_any_outreach(session):
+    """Eine passende fremde Playlist ist ein Beleg fuer Audience-Naehe – keine Kuratorenaufgabe."""
     seed_theme(session)
-    pool(session, "channel", "UCnothing", "Kochkanal", subscribers=900000, item_count=800, description="Rezepte",
-         query="night train ambient")
-    aq.collect(session, NOW, http=FakeHttp())
-    view = aq.overview(session, NOW)
-    assert view["traffic_queue"] == []
-    assert view["assessment"]["status"] == "none" and view["assessment"]["actions"] == 0
-    assert "keine ausreichend gute Traffic-Aktion" in view["assessment"]["text"]
-
-
-def test_a_topic_only_fit_is_declared_a_hypothesis_and_capped(session):
-    """Produktionsfall: 1,13 Mio. Abonnenten auf einem Reisekanal sind kein Musikpublikum."""
-    seed_theme(session)
-    pool(session, "channel", "UCtravel", "Travel With Koushik", subscribers=1130000, item_count=500,
-         views=200000000, description="train journey across mongolian railway and the steppe",
-         query="trans mongolian",
-         details={"contains_own": False, "keywords": "travel train journey",
-                  "intent": {"head": ["trans", "mongolian"], "context": [], "label": "„trans mongolian“",
-                             "attestations": 2, "video_id": "a", "kind": "topic_context"}})
-    aq.collect(session, NOW, http=FakeHttp())
-    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "UCtravel"))
-    assert surface.evidence["audience_fit"]["class"] == "topic"
-    assert surface.scores["traffic_potential"] <= aq.TOPIC_ONLY_CAP, "Reichweite ersetzt keine Evidenz"
-    aq.propose(session, NOW)
-    view = aq.overview(session, NOW)
-    assert view["assessment"]["status"] == "hypothesis_only"
-    assert "Hypothese" in view["assessment"]["text"]
-
-
-def test_a_blocked_video_does_not_waste_a_playlist_that_fits_another_one(session):
-    """Massnahme #8 sperrt Trainstories fuer PLAYLIST – Shine On ist frei und passt ebenfalls."""
-    from app.models import GrowthAction
-    from app import growth_engine as ge
-    session.get(Video, "a").title = "Sealand Trainstories"
-    session.get(Video, "a").duration_seconds = 214
-    session.get(Video, "b").title = "Sealand Shine On"
-    session.get(Video, "b").duration_seconds = 248
-    session.commit()
-    seed_profile(session, tags=("swiss pop", "ambient"), description="Schweizer Pop aus dem Nachtzug.",
-                 topics=("https://en.wikipedia.org/wiki/Pop_music",))
-    seed_profile(session, video_id="b", tags=("swiss pop", "acoustic"), description="Schweizer Pop, akustisch.",
-                 topics=("https://en.wikipedia.org/wiki/Pop_music",), channel_description="", channel_keywords="")
-    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
-                             state="needs_distribution", action="probe_missing_evidence",
-                             target_metric="impressions_7d", window_days=14,
-                             evaluate_after=TODAY+timedelta(days=16), status="running",
-                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
-                             traffic_source="END_SCREEN", payload={}))
-    session.commit()
-    pool(session, "playlist", "PLswisspop", "Swiss Pop Music", item_count=120, subscribers=8000,
-         channel_title="Swiss Charts", description="swiss pop hits aus der Schweiz", query="switzerland pop",
-         details={"items": ["Schweizer Pop Song", "Pop aus Zuerich"]})
-    aq.collect(session, NOW, http=FakeHttp())
-    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "PLswisspop"))
-    assert surface is not None and surface.video_id == "b", "die freie, passende Veroeffentlichung nimmt den Platz"
-    assert aq.propose(session, NOW)["proposed"] == 1
-    entry = aq.overview(session, NOW)["traffic_queue"][0]
-    assert entry["traffic_source"] == "PLAYLIST" and entry["title"] == "Sealand Shine On"
+    pool(session, "playlist", "PLgoodfit", "Night train ambient journeys", item_count=30, subscribers=50000,
+         channel_title="Slow Travel Sounds", description="ambient night train journey", query="night train ambient")
+    result = aq.collect(session, NOW, http=FakeHttp())
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "PLgoodfit"))
+    assert surface is not None and surface.evidence["audience_fit"]["class"] in ("genre", "topic", "neighbourhood")
+    assert aq.propose(session, NOW)["proposed"] == 0, "kein Anschreiben, kein Vorschlag"
+    assert result["pools"]["kept"] >= 1, "als Beleg bleibt sie erhalten"

@@ -332,3 +332,34 @@ def test_a_filler_word_from_our_own_description_is_not_a_content_anchor(session)
     fit = audience.audience_fit({"boyce", "avenue", "acoustic", "cover", "pop", "rock", "will"}, prof,
                                 tags=["acoustic", "cover"])
     assert fit["class"] is None and "Schublade" in fit["why"]
+
+
+def test_an_attested_intent_becomes_a_placement_opportunity_for_the_engine(session):
+    """Die Brücke: aus einem belegten Intent wird die Chance, die der Engine schon lesen kann."""
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.commit()
+    profile(session, tags=["trans mongolian", "ambient"], description="Ambient zur Reise nach Mongolian.",
+            topics=["https://en.wikipedia.org/wiki/Ambient_music"])
+    chance = audience.placement_opportunity(session, "a")
+    assert chance is not None and chance["gap"] in ("search_opportunity", "suggested_opportunity")
+    assert chance["score"] >= 60 and chance["actionable"] is True and chance["context_usable"] is True
+    assert chance["evidence_level"] == "multi_signal_proxy" and chance["families"]
+    assert chance["audience"] and chance["shared_tokens"]
+    # Eine einzige Quelle darf keine Maßnahme lenken.
+    session.query(VideoProfile).delete()
+    session.commit()
+    profile(session, tags=["trans mongolian"], description="", topics=(), channel_description="",
+            channel_keywords="")
+    weak = audience.placement_opportunity(session, "a")
+    assert weak is None or (weak["score"] <= 45 and weak["actionable"] is False)
+
+
+def test_the_dashboard_puts_the_own_asset_actions_first():
+    """JETZT TUN sind die Maßnahmen an unseren Assets; die gefundenen Flächen sind Belege darunter."""
+    from pathlib import Path
+    html = Path("app/static/index.html").read_text(encoding="utf-8")
+    js = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert html.index('id="queueCard"') < html.index('id="trafficCard"')
+    assert "JETZT TUN · ALGORITHMISCHE REICHWEITE" in html
+    assert "BELEGE · AUDIENCES UND PLACEMENT-SIGNALE" in html
+    assert "keine Anschreiben und keine Kommentare" in js

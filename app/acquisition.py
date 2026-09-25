@@ -37,6 +37,17 @@ MIN_CANDIDATE_VIEWS = 2000   # Öffentliche Reichweite, ab der ein fremdes Video
 MIN_CANDIDATE_SUBSCRIBERS = 500
 MIN_SHARED_TOKENS = 2        # Ein gemeinsames Wort ist keine Themengleichheit (siehe V6).
 MIN_EXPECTED_WEEKLY_VIEWS = 0.35  # Darunter ist eine Quelle eine Beobachtung, keine Traffic-Aktion.
+# PRODUKTAUFTRAG: Ziel ist algorithmische Distribution durch YouTube selbst – Browse, Suggested, Search,
+# Playlists, Autoplay. Manuelle Akquise ist ausdruecklich kein Weg dorthin: keine Kuratoren anschreiben,
+# keine Kommentare auf fremden Videos, keine Kontaktaufnahme. Diese Schicht findet deshalb weiterhin
+# Audience-Nachbarschaften und Placement-Hinweise, erzeugt daraus aber keine Maßnahme mehr. Die Maßnahmen
+# entstehen in app/growth_engine.py an unseren eigenen Assets.
+OUTREACH_ACTIONS = {"reach_out_to_referrer", "reach_out_to_embed_site", "engage_recommending_channel",
+                    "engage_recommending_video", "engage_candidate_video", "engage_candidate_channel",
+                    "engage_pool_channel", "pitch_to_playlist_curator"}
+OUTREACH_WITHDRAWN = ("Manuelle Akquise ist eingestellt: Ziel ist algorithmische Distribution durch YouTube. "
+                      "Die Fläche bleibt als Audience- und Placement-Beleg erhalten und fließt in die "
+                      "Maßnahmen an unseren eigenen Assets ein.")
 # PRODUKTREGEL (harte Sperre, nicht verhandelbar und nicht durch Lernen aufhebbar):
 #
 # Wer unsere Musik schon selbst ausgewaehlt, gespielt oder aufgenommen hat – Radios, Redaktionen, Medien,
@@ -1167,67 +1178,28 @@ def mechanism(kind, surface):
 
 
 def propose(session, now=None, budget=None):
-    """One proposal per surface that is both promising and separately measurable. Nothing is executed."""
+    """Aus Flaechen entstehen keine Aufgaben mehr – sie sind Belege fuer den algorithmischen Loop.
+
+    Frueher wurde hier je Video eine Ansprache vorgeschlagen (Kurator, Kanal, Seite). Das ist gestrichen:
+    das Ziel ist, dass YouTube unsere Videos haeufiger den passenden Zuschauern zeigt, und dafuer aendert
+    man eigene Assets, nicht fremde Beziehungen. Offene Vorschlaege dieser Art werden hier zurueckgezogen,
+    laufende Messungen laufen aus.
+    """
     now = now or utcnow()
     today = pacific_day(now)
-    latest = session.scalar(select(func.max(TrafficSurface.day)))
-    titles = {v.id: v.title for v in session.scalars(select(Video))}
-    surfaces = sorted((s for s in session.scalars(select(TrafficSurface).where(TrafficSurface.day == latest))
-                       if s.video_id in titles),
-                      key=lambda s: -(s.scores or {}).get("traffic_potential", 0)) if latest else []
-    current = {(s.kind, s.key): s for s in surfaces}
-    # Zuerst pruefen, dann neu vorschlagen - auch wenn heute gar keine Flaeche uebrig bleibt.
-    levers = lever_record(session)
-    dropped = review_open_proposals(session, current, titles, now, levers)
-    if not surfaces:
-        session.commit()
-        return {"proposed": 0, "blocked": [], "dropped": dropped, "day": str(latest) if latest else None}
-    proposed, blocked, per_video = 0, [], defaultdict(int)
-    for surface in surfaces:
-        if budget:
-            budget.check()
-        if not (surface.access or {}).get("actionable", True):
-            continue        # Beleg ja, Aufgabe nein: siehe access.why_not
-        spec = SURFACE_KINDS[surface.kind]
-        other, reason = blocking(session, surface.video_id, surface.lever_class, surface.traffic_source, spec["metric"])
-        if other is not None:
-            blocked.append({"video_id": surface.video_id, "title": titles[surface.video_id], "surface": surface.title,
-                            "kind": surface.kind, "traffic_source": surface.traffic_source, "reason": reason,
-                            "blocked_by": other.id, "until": str(other.evaluate_after)})
-            continue
-        # Genau eine offene Acquisition-Maßnahme je Video: sonst wuerde ein zweiter Lauf den
-        # bestehenden Vorschlag ueberschreiben, auf den im Dashboard vielleicht schon ein Button zeigt.
-        open_row = session.scalar(select(GrowthAction).where(
-            GrowthAction.version == VERSION, GrowthAction.video_id == surface.video_id,
-            GrowthAction.status.in_(["proposed", "running"])))
-        if open_row is not None or per_video[surface.video_id] >= 1:
-            continue
-        payload = action_payload(surface, titles[surface.video_id], spec, levers)
-        # Je Video und Tag existiert genau eine Zeile. Eine heute zurueckgezogene darf wieder aufleben,
-        # sonst blockierte eine verworfene Quelle den Platz fuer die bessere bis zum naechsten Tag.
-        row = session.scalar(select(GrowthAction).where(GrowthAction.version == VERSION,
-                                                        GrowthAction.video_id == surface.video_id,
-                                                        GrowthAction.created_day == today))
-        if row is not None and row.status in ("running", "evaluated"):
-            continue
-        if row is None:
-            row = GrowthAction(video_id=surface.video_id, created_day=today, created_at=now, version=VERSION,
-                               state="traffic_acquisition", action=spec["action"], status="proposed")
-            session.add(row)
-        row.status, row.outcome, row.evaluation, row.evaluated_at = "proposed", None, None, None
-        row.action, row.state = spec["action"], "traffic_acquisition"
-        row.target_metric, row.window_days = spec["metric"], WINDOW_DAYS
-        row.evaluate_after = today+timedelta(days=WINDOW_DAYS+lag_days())
-        row.lever_class, row.traffic_source, row.surface_key = surface.lever_class, surface.traffic_source, surface.key
-        row.payload, row.baseline = payload, payload["baseline"]
-        session.flush()
-        per_video[surface.video_id] += 1
-        proposed += 1
+    dropped = []
+    for row in session.scalars(select(GrowthAction).where(GrowthAction.version == VERSION,
+                                                          GrowthAction.status == "proposed")):
+        row.status, row.outcome, row.evaluated_at = "superseded", "inconclusive", now
+        row.evaluation = {"reason": OUTREACH_WITHDRAWN, "superseded_on": str(today),
+                          "note": "Vorschlag, nie ausgeführt – der Weg selbst ist eingestellt."}
+        dropped.append({"action_id": row.id, "surface": (row.payload or {}).get("surface_title"),
+                        "reason": OUTREACH_WITHDRAWN})
     session.commit()
-    return {"proposed": proposed, "blocked": blocked, "dropped": dropped, "day": str(latest)}
-
-
-UPGRADE_MARGIN = 10.0        # Erst ein klar besseres Potenzial ersetzt einen offenen Vorschlag.
+    if dropped:
+        log.info("acquisition outreach withdrawn=%s", len(dropped))
+    return {"proposed": 0, "blocked": [], "dropped": dropped, "day": str(today),
+            "note": OUTREACH_WITHDRAWN}
 
 
 def review_open_proposals(session, current, titles, now, levers=None):
@@ -1424,6 +1396,15 @@ def audience_report(session):
     return rows
 
 
+def evidence_note(pools, protected, intents):
+    """Was diese Schicht beitraegt: Belege fuer den algorithmischen Loop, keine Aufgaben."""
+    return {"status": "evidence_only",
+            "text": (f"{len(intents)} belegte Audience-Intents, {pools.get('kept', 0)} bestaetigte "
+                     f"Audience-Nachbarschaften aus {len(pools.get('candidates') or [])} gepruefeten Orten und "
+                     f"{len(protected)} geschuetzte bestehende Quellen. Daraus entstehen keine Anschreiben, "
+                     "sondern Maßnahmen an unseren eigenen Assets (siehe JETZT TUN).")}
+
+
 def assessment(queue, pools, blocked, protected):
     """Ehrliche Gesamtaussage: gibt es heute eine vertretbare Aktion – oder ausdruecklich keine?
 
@@ -1546,7 +1527,8 @@ def overview(session, now=None):
     pools_view = pool_report(session, {row["query"] for row in intents_view})
     return {"version": VERSION, "day": str(latest) if latest else None, "today": str(today),
             "protected_sources": protected[:12],
-            "assessment": assessment(queue[:QUEUE_LIMIT], pools_view, blocked, protected),
+            "assessment": evidence_note(pools_view, protected, intents_view),
+            "outreach": "eingestellt – Ziel ist algorithmische Distribution durch YouTube",
             "traffic_queue": queue[:QUEUE_LIMIT], "running": running, "results": results[:8],
             "blocked": blocked[:8], "surfaces_found": len(surfaces),
             "surfaces": [{"kind": s.kind, "key": s.key, "title": s.title, "url": s.url, "video_id": s.video_id,

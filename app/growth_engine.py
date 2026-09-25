@@ -872,7 +872,9 @@ def _window_metrics(history, start, end):
     subs = sum(r.subscribers_gained for r in rows)
     reach = [history.reach[d] for d in days if d in history.reach and history.reach[d].ctr is not None]
     impressions = sum(r.impressions for r in reach)
-    return {"days": len(days), "observed_days": len(rows), "views": views, "velocity": views/len(days), "watch_minutes": sum(r.watch_minutes for r in rows),
+    return {"days": len(days), "observed_days": len(rows), "views": views, "velocity": views/len(days),
+            "sources": {s: v for s, v in sorted(totals.items(), key=lambda kv: -kv[1])},
+            "watch_minutes": sum(r.watch_minutes for r in rows),
             "impressions": impressions if reach else None,
             "subscribers": subs, "subscriber_conversion": subs/views if views else None,
             "discovery_views": discovery if traffic_total else None, "discovery_share": discovery/traffic_total if traffic_total else None,
@@ -1055,6 +1057,13 @@ def run(session, now, contexts, base, budget=None):
         peak = historical_peak(history, today)
         rev = revival(f, regime, base, peak)
         external = external_opportunity(session, video.id)
+        if external is None or not external.get("context_usable"):
+            from .audience import placement_opportunity
+            attested = placement_opportunity(session, video.id)
+            # Der belegte Intent ersetzt die aeltere Route nur, wenn er mehr traegt als sie.
+            if attested is not None and (external is None
+                                         or (attested.get("score") or 0) > (external.get("score") or 0)):
+                external = attested
         board = scores(f, regime, base, c.get("forecasts", []), momentum, peak, external)
         state = state_of(f, regime, base, rev)
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})

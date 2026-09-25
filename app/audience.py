@@ -557,3 +557,52 @@ def matches(intent, words):
     return {"head": head_hits, "context": context_hits, "label": intent.get("label"),
             "kind": intent.get("kind"), "query": intent.get("query"),
             "attestations": intent.get("attestations")}
+
+
+# ---------------------------------------------------------------------------- Brücke zum Growth-Engine
+# Ein belegter Audience-Intent ist genau das, was der bestehende Engine als „externe Chance" braucht, um
+# eine Maßnahme an unserem eigenen Video zu lenken: welchen Wortlaut die Beschreibung tragen soll, neben
+# welchem Cluster das Video stehen soll. Die Bewertung folgt den Regeln aus V6 – zwei unabhängige eigene
+# Quellen ergeben einen mehrfach belegten Proxy, eine einzelne bleibt ein schwacher Proxy und darf keine
+# Maßnahme lenken.
+GAP_BY_KIND = {"search_demand": "search_opportunity", "topic_context": "search_opportunity",
+               "mood_genre": "search_opportunity", "artist_adjacency": "suggested_opportunity"}
+PROXY_CAP, WEAK_CAP = 70.0, 45.0
+
+
+def opportunity_score(intent):
+    raw = 50+8*min(intent["attestations"], 3)+(10 if intent["views"] else 0)+(5 if intent["specificity"] == 0 else 0)
+    return round(min(raw, PROXY_CAP if intent["attestations"] >= MIN_ATTESTATIONS else WEAK_CAP), 1)
+
+
+def placement_opportunity(session, video_id, generic=None):
+    """Die stärkste belegte Placement-Chance für dieses Video – in der Form, die der Engine schon liest."""
+    from .models import Video
+    video = session.get(Video, video_id)
+    if video is None:
+        return None
+    found = [i for i in build_intents(session, video, generic) if i["kind"] in GAP_BY_KIND]
+    if not found:
+        return None
+    best = max(found, key=lambda i: (opportunity_score(i), i["score"]))
+    score = opportunity_score(best)
+    strong = best["attestations"] >= MIN_ATTESTATIONS
+    families = sorted({item["source"] for item in best["evidence"]})
+    return {"kind": "audience_intent", "key": best["query"], "gap": GAP_BY_KIND[best["kind"]],
+            "score": score, "scores": {"external_audience_score": score},
+            "evidence": {"intent": best["label"], "head": best["head"], "context": best["context"],
+                         "attestations": best["attestations"], "sources": families},
+            "day": None, "demand_source": "own_data_attested",
+            "evidence_level": "multi_signal_proxy" if strong else "weak_proxy",
+            "actionable": strong, "families": families,
+            "family_labels": [SOURCE_LABELS.get(f, f) for f in families],
+            "context_usable": strong,
+            "context_reason": (f"Der Intent „{best['label']}“ ist aus {best['attestations']} unabhängigen eigenen "
+                               "Quellen belegt." if strong else
+                               "Nur eine eigene Quelle belegt diesen Intent – als Kontext zu wenig."),
+            "missing_evidence": [] if strong else ["zweite unabhängige eigene Quelle"],
+            "uncertainty": ("mittel: das Thema ist aus eigenen Daten belegt, die algorithmische Wirkung einer "
+                            "Anpassung ist nicht garantiert."),
+            "seed_quality": "attested_intent", "members": best["head"]+best["context"],
+            "channel": None, "own_source_views_90d": {"intent_views": best["views"]},
+            "audience": best["label"], "shared_tokens": best["head"]+best["context"]}

@@ -80,28 +80,6 @@ def test_an_unverified_playlist_is_not_contacted_either(session):
     assert verdict["kept"] is False and "im Zweifel nicht kontaktieren" in verdict["reason"]
 
 
-def test_an_open_proposal_against_the_rule_is_withdrawn(session):
-    """Alt-Vorschlaege aus der Zeit vor der Regel muessen von selbst verschwinden."""
-    signal(session, "a", "own_external", "musikblog.example", 40)
-    session.add(GrowthAction(video_id="a", created_day=TODAY, created_at=NOW, version=aq.VERSION,
-                             state="needs_distribution", action="reach_out_to_referrer",
-                             target_metric="external_views_7d", window_days=aq.WINDOW_DAYS,
-                             evaluate_after=TODAY+timedelta(days=aq.WINDOW_DAYS+2), status="proposed",
-                             lever_class="external_outreach", traffic_source="EXT_URL",
-                             surface_key="https://musikblog.example",
-                             payload={"surface_kind": "own_external_referrer", "surface_title": "musikblog.example"}))
-    session.commit()
-    row = session.scalar(select(GrowthAction).where(GrowthAction.version == aq.VERSION))
-    aq.collect(session, NOW, http=FakeHttp())
-    result = aq.propose(session, NOW)
-    session.expire_all()
-    withdrawn = session.get(GrowthAction, row.id)
-    assert withdrawn.status == "superseded" and withdrawn.outcome == "inconclusive"
-    assert "nie angesprochen" in withdrawn.evaluation["reason"]
-    assert [d["action_id"] for d in result["dropped"]] == [row.id]
-    assert aq.overview(session, NOW)["traffic_queue"] == []
-
-
 def test_the_learning_loop_cannot_re_enable_a_protected_source(session):
     """Selbst wenn ein Hebel als erfolgreich gelernt wird, bleibt die Sperre bestehen."""
     signal(session, "a", "own_external", "radiosender.example", 5000)

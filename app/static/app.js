@@ -51,8 +51,8 @@ function renderTraffic(a){
  // Primaeres Ziel: zusaetzliche qualifizierte Views. Nur ausfuehrbare Acquisition-Aktionen, kein "beobachten".
  if(!a){$("trafficTitle").textContent="Noch keine Trafficquellen gefunden";return}
  const q=a.traffic_queue||[],run=a.running||[],res=a.results||[],board=a.scoreboard||{};
- $("trafficTitle").textContent=q.length?`Jetzt tun: ${q.length} Traffic-Aktion${q.length>1?"en":""}`:
-  (run.length?"Alle gefundenen Quellen laufen bereits":"Keine ausführbare Trafficquelle gefunden");
+ // Diese Karte zeigt Belege, keine Aufgaben: manuelle Akquise ist eingestellt.
+ $("trafficTitle").textContent=`${num(a.surfaces_found)} geprüfte Audience-Signale`;
  $("trafficMeta").textContent=`Flächen vom ${esc(a.day||"—")} · ${num(a.surfaces_found)} geprüfte Quellen`;
  const pools=a.pools||{};
  $("trafficGoal").textContent=a.goal||"";
@@ -81,20 +81,7 @@ function renderTraffic(a){
   ["Ausgewertet",num(board.evaluated),"mit Quellen-Attribution"],
   ["Vorschläge offen",num(board.proposed),"warten auf Durchführung"]]
   .map(([l,v,s])=>`<article><span>${l}</span><strong>${v}</strong><small>${esc(s)}</small></article>`).join("");
- $("trafficQueue").innerHTML=q.map(e=>`<article class="queue-item"><h3>#${e.rank} ${esc(e.title)} — ${esc(e.action_label||e.action)}</h3>
-  <p><strong>Trafficquelle:</strong> ${esc(e.surface||"—")}${e.surface_url?` <a href="${esc(e.surface_url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""} <small>${esc(e.traffic_source||"")}${e.verified?" · erreichbar geprüft":""}</small></p>
-  <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
-  ${e.audience_fit?`<p><strong>Audience-Fit:</strong> ${esc(e.audience_fit.class||"—")}${(e.audience_fit.genre||[]).length?` · Genre/Stimmung: ${(e.audience_fit.genre||[]).map(esc).join(", ")}`:""}${(e.audience_fit.topic||[]).length?` · Thema: ${(e.audience_fit.topic||[]).map(esc).join(", ")}`:""}<br><small>${esc(e.audience_fit.why||"")}</small></p>`:""}
-  <p><strong>Wirkmechanismus:</strong> ${esc(e.mechanism_status||"unbekannt")}${e.mechanism_note?" – "+esc(e.mechanism_note):""}${e.upgrade_rule?" <small>"+esc(e.upgrade_rule)+"</small>":""}</p>
-  <p><strong>Aktion:</strong></p><ol>${(e.steps||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>
-  <p><strong>Erwarteter Mechanismus:</strong> ${esc(e.mechanism||"")}</p>
-  <p><strong>Primärmetrik:</strong> ${esc(e.primary_metric||"")} · <strong>Messfenster:</strong> ${e.window_days} Tage (Auswertung ${esc(e.evaluate_after)})</p>
-  <p><strong>Erfolg:</strong> ${esc(e.success_criterion||"")}<br><strong>Abbruch:</strong> ${esc(e.stop_criterion||"")}</p>
-  <p><strong>Nicht gleichzeitig verändern:</strong> ${(e.do_not_change||[]).map(esc).join(", ")} <small>Hebel: ${esc(e.primary_lever||"")}</small></p>
-  <p class="muted">${esc(e.rules||"")}</p>
-  <p class="notice">${esc(e.note||"")}</p>
-  <button class="secondary start-experiment" data-action-id="${e.action_id}" title="Maßnahme #${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>
-  </article>`).join("")||"<p class='muted'>Keine ausführbare Trafficquelle: siehe gesperrte Quellen und die Grenzen der Suche unten.</p>";
+ $("trafficQueue").innerHTML=`<p class="muted">Aus diesen Signalen entstehen keine Anschreiben und keine Kommentare. Sie begründen die Maßnahmen an unseren eigenen Assets oben in JETZT TUN.</p>`;
  $("trafficRunning").innerHTML=run.length?`<h3>Läuft – von dir bestätigt</h3><ul>${run.map(r=>`<li>${esc(r.title)}: ${esc(r.action_label||r.action)} über ${esc(r.surface||r.traffic_source)} – seit ${esc(r.started_day)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
  $("trafficBlocked").innerHTML=(a.blocked||[]).length?`<h3>Gesperrt, weil nicht trennbar</h3><ul>${a.blocked.map(b=>`<li>${esc(b.title)} · ${esc(b.surface)} (${esc(b.traffic_source)}): ${esc(b.reason)}</li>`).join("")}</ul>`:"";
  $("trafficResults").innerHTML=res.length?`<h3>Ergebnisse je Quelle</h3><ul>${res.map(r=>`<li>${esc(r.title)} · ${esc(r.surface||r.traffic_source)}: <strong>${esc(OUTCOME_LABELS[r.outcome]||r.outcome||"offen")}</strong> ${r.attribution?`— ${num(r.attribution.views_before)} → ${num(r.attribution.views_after)} Views aus ${esc(r.attribution.source)} (${r.attribution.views_delta>=0?"+":""}${num(r.attribution.views_delta)})`:""}</li>`).join("")}</ul>`:"";
@@ -110,7 +97,7 @@ function renderQueue(p){
  notice.hidden=!startNotice;
  // JETZT TUN: was ein Mensch heute ausführt. YouTube bleibt read-only – nichts davon passiert automatisch.
  const q=(p&&p.queue)||[],running=(p&&p.running_experiments)||[],results=(p&&p.results)||[];
- $("queueTitle").textContent=q.length?`Jetzt tun: ${q.length} Experiment${q.length>1?"e":""}`:"Heute kein ausführbares Experiment";
+ $("queueTitle").textContent=q.length?`Jetzt tun: ${q.length} Maßnahme${q.length>1?"n":""} an unseren Assets`:"Heute keine ausführbare Maßnahme";
  $("queueMeta").textContent=p?`Plan vom ${p.day||"—"} · höchstens ${p.queue_limit||3} gleichzeitig`:"";
  $("queueNote").textContent=(p&&p.queue_note)||"";
  $("queueList").innerHTML=q.map(e=>{
