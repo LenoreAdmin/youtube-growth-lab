@@ -78,11 +78,8 @@ def seed_theme(session):
 
 # ---------------------------------------------------------------------------- Probe im Quota-Rahmen
 def test_the_probe_finds_foreign_playlists_and_channels_within_the_existing_quota(session):
-    session.add(DiscoveryQuery(query="night train ambient", source="title_bigram", seed_video_id="a", priority=500.0,
-                               created_at=NOW, probe_count=0, failures=0, results={}))
-    session.add(DiscoveryQuery(query="ambient journey", source="title_bigram", seed_video_id="a", priority=400.0,
-                               created_at=NOW, probe_count=0, failures=0, results={}))
-    session.commit()
+    seed_theme(session)
+    tags = {"a": ["night train ambient", "ambient journey"]}
     client = PoolClient(
         playlists=[{"playlist_id": "PL1", "title": "Night Train Ambient Journeys", "channel_id": "UCcur",
                     "channel_title": "Slow Travel Sounds", "published_at": "2026-01-01T00:00:00Z",
@@ -95,7 +92,7 @@ def test_the_probe_finds_foreign_playlists_and_channels_within_the_existing_quot
                            "keywords": "night train ambient journey", "topics": ["https://en.wikipedia.org/wiki/Ambient_music"]}})
     quota = discovery.Quota(session, TODAY, limit=1500)
     stats = {}
-    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, stats)
+    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, stats, tags)
     pools = {(p.kind, p.key): p for p in session.scalars(select(AudiencePool))}
     assert set(pools) == {("playlist", "PL1"), ("channel", "UCpool")}
     playlist = pools[("playlist", "PL1")]
@@ -108,17 +105,58 @@ def test_the_probe_finds_foreign_playlists_and_channels_within_the_existing_quot
     assert quota.spent_now <= 2*discovery.SEARCH_COST+5*discovery.LIST_COST
     assert stats["pools"] == 2
     assert sum(1 for call in client.calls if call[0].startswith("search")) == 2
+    # Beide Suchen laufen und sind einzeln nachpruefbar: Query, Herkunft, Trefferzahl, Titel, Gespeichertes.
+    report = stats["pool_probe"]
+    assert [q["kind"] for q in report["queries"]] == ["playlist", "channel"]
+    assert {q["query"] for q in report["queries"]} == {"night train ambient", "ambient journey"}
+    assert all(q["source"] == "own_tag" for q in report["queries"])
+    assert report["queries"][0]["titles"] == ["Night Train Ambient Journeys"]
+    assert report["queries"][0]["results"] == 1 and report["queries"][0]["stored"] == 1
+    assert report["candidates"] == 2 and report["stored"] == 2 and report["note"] is None
+
+
+def test_the_probe_never_searches_for_format_words_and_says_so_when_it_cannot(session):
+    """Der BLACKPINK-Fehlgriff kam von „album teaser“: Formatwoerter sind keine Themen."""
+    session.get(Video, "a").title = "11AM Album - Teaser"
+    session.get(Video, "b").title = "Shine On"
+    session.commit()
+    session.add(DiscoveryQuery(query="11am album teaser", source="title", seed_video_id="a", priority=500.0,
+                               created_at=NOW, probe_count=0, failures=0, results={}))
+    session.commit()
+    client = PoolClient(playlists=[], channels=[])
+    stats = {}
+    quota = discovery.Quota(session, TODAY, limit=1500)
+    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, stats,
+                                   {"a": ["album", "teaser"]})
+    assert client.calls == [] and quota.spent_now == 0
+    assert stats["pool_probe"]["queries"] == []
+    assert "Themenbegriffe" in stats["pool_probe"]["note"]
+
+
+def test_a_single_usable_theme_query_still_searches_playlists_and_channels(session):
+    """Fehler der ersten Fassung: mit nur einem Seed lief die Kanalsuche nie."""
+    seed_theme(session)
+    client = PoolClient(playlists=[], channels=[])
+    stats = {}
+    quota = discovery.Quota(session, TODAY, limit=1500)
+    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, stats,
+                                   {"a": ["night train ambient"]})
+    kinds = [call[0] for call in client.calls]
+    assert kinds == ["search_playlists", "search_channels"]
+    assert [q["note"] for q in stats["pool_probe"]["queries"]] == ["Keine fremden Playlists in den Treffern.",
+                                                                  "Keine fremden Kanaele in den Treffern."]
 
 
 def test_the_probe_stops_before_spending_a_budget_it_does_not_have(session):
-    session.add(DiscoveryQuery(query="night train ambient", source="title_bigram", seed_video_id="a", priority=500.0,
-                               created_at=NOW, probe_count=0, failures=0, results={}))
-    session.commit()
+    seed_theme(session)
     client = PoolClient(playlists=[{"playlist_id": "PL1", "title": "x", "channel_id": "UCc", "channel_title": "c",
                                     "published_at": "2026-01-01T00:00:00Z"}])
     quota = discovery.Quota(session, TODAY, limit=50)      # weniger als eine Suche kostet
-    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, {})
+    stats = {}
+    discovery.probe_audience_pools(session, client, quota, list(session.scalars(select(Video))), NOW, None, stats,
+                                   {"a": ["night train ambient"]})
     assert not list(session.scalars(select(AudiencePool))) and client.calls == []
+    assert all("Tagesbudget erschoepft" in q["note"] for q in stats["pool_probe"]["queries"])
 
 
 def test_own_embeds_are_collected_from_analytics_without_data_api_quota(session):
@@ -176,6 +214,67 @@ def test_a_found_channel_needs_theme_and_real_size(session):
     surface = session.scalar(select(TrafficSurface).where(TrafficSurface.kind == "pool_channel"))
     assert surface.evidence["subscribers"] == 45000 and surface.traffic_source == "YT_OTHER_PAGE"
     assert "kennt uns nicht" in surface.evidence["why"]
+
+
+def test_every_rejected_candidate_names_its_concrete_reason(session):
+    """Ein leerer Trichter ohne Begruendung ist nicht verbesserbar: jeder Kandidat braucht ein Verdikt."""
+    seed_theme(session)
+    pool(session, "playlist", "PLgood", "Night train ambient journeys", item_count=30, subscribers=50000,
+         channel_title="Slow Travel", description="ambient night train journey",
+         query="night train ambient", details={"query_source": "own_tag"})
+    pool(session, "playlist", "PLtiny", "Night train ambient", item_count=2, subscribers=50000,
+         channel_title="Entwurf", description="ambient night train journey", query="night train ambient")
+    pool(session, "channel", "UCsmall", "Night Train Tiny", subscribers=12, item_count=3,
+         description="ambient night train journey", query="night train ambient")
+    pool(session, "channel", "UCoff", "Kochkanal", subscribers=900000, item_count=800, description="Rezepte",
+         query="night train ambient")
+    result = aq.collect(session, NOW, http=FakeHttp())
+    verdicts = {v["title"]: v for v in result["pools"]["verdicts"]}
+    assert result["pools"]["candidates"] == 4 and result["pools"]["kept"] == 1
+    assert verdicts["Night train ambient journeys"]["kept"] is True
+    assert "Titel" in verdicts["Night train ambient"]["reason"] and "mindestens 5" in verdicts["Night train ambient"]["reason"]
+    assert "Abonnenten" in verdicts["Night Train Tiny"]["reason"]
+    assert "Kein Bezug" in verdicts["Kochkanal"]["reason"] or "Themenbezug zu schwach" in verdicts["Kochkanal"]["reason"]
+    assert verdicts["Night train ambient journeys"]["size"] == "30 Titel"
+    assert verdicts["Night Train Tiny"]["size"] == "12 Abonnenten"
+    # Das Verdikt haengt am Kandidaten, damit das Dashboard es ohne neuen Lauf zeigen kann.
+    stored = {p.key: (p.details or {}).get("verdict") for p in session.scalars(select(AudiencePool))}
+    assert stored["PLtiny"]["kept"] is False and stored["PLgood"]["kept"] is True
+    view = aq.overview(session, NOW)
+    report = view["pools"]
+    assert report["kept"] == 1 and report["rejected"] == 3
+    shown = {c["title"]: c for c in report["candidates"]}
+    assert shown["Night train ambient journeys"]["query"] == "night train ambient"
+    assert shown["Night train ambient journeys"]["query_source"] == "own_tag"
+    assert shown["Night Train Tiny"]["reason"]
+
+
+def test_the_search_probes_leave_units_for_the_pool_search(session):
+    """Vorher verbrauchten die acht Suchproben das Budget, und die Pool-Suche lief still ins Leere."""
+    for index in range(8):
+        session.add(DiscoveryQuery(query=f"thema {index}", source="title_bigram", seed_video_id="a",
+                                   priority=500.0-index, created_at=NOW, probe_count=0, failures=0, results={}))
+    session.commit()
+
+    class SearchClient:
+        def __init__(self):
+            self.searches = 0
+
+        def search(self, query, max_results=25):
+            self.searches += 1
+            return []
+
+        def videos_by_id(self, ids, part=None):
+            return []
+
+    client = SearchClient()
+    quota = discovery.Quota(session, TODAY, limit=discovery.DAILY_UNITS)
+    quota.spend(900)        # wie nach einem frueheren Lauf am selben Pacific-Tag
+    stats = {"searches": 0}
+    discovery.probe_queries(session, client, quota, list(session.scalars(select(Video))), NOW, None, stats)
+    assert stats["pool_reserve_kept"] == discovery.POOL_RESERVE
+    assert quota.remaining() >= 2*discovery.SEARCH_COST, "zwei Pool-Suchen bleiben bezahlbar"
+    assert client.searches < 8
 
 
 def test_an_embedding_site_becomes_an_actionable_external_surface(session):

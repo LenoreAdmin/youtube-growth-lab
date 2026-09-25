@@ -122,9 +122,11 @@ def test_the_traffic_queue_contains_no_observation_or_protection(session):
         assert entry["surface"] and entry["why"] and entry["steps"] and entry["primary_metric"]
         assert entry["confirm"]["endpoint"].endswith("/start")
     assert "Automatisches Posten" in " ".join(view["capabilities"]["not_used"])
-    # Der Suchstatus sagt, ob die externe Suche laeuft – und wenn nicht, was zu tun ist.
-    assert view["web_search"]["configured"] is False and view["web_search"]["setup"]
-    assert view["web_search"]["remaining_today"] == view["web_search"]["daily_limit"]
+    # Externe Web-Suchanbieter sind verworfen: sie duerfen nicht als genutzte Quelle auftauchen.
+    assert not any("Web-Suche" in x for x in view["capabilities"]["used"])
+    assert any("Web-Such" in x for x in view["capabilities"]["not_used"])
+    # Die Pool-Suche berichtet ueber sich selbst, auch wenn sie nichts gefunden hat.
+    assert view["pools"]["searched"] is False and view["pools"]["candidates"] == []
 
 
 # ---------------------------------------------------------------------------- Konflikte nach Hebel/Quelle

@@ -25,7 +25,7 @@ from .backfill import upsert
 from .budget import SyncBudgetExceeded
 from .config import settings
 from .history import pacific_day, lag_days
-from .models import (AudiencePool, ChannelPlaylist, DiscoveryChannel, DiscoveryItem, DiscoverySignal, GrowthAction,
+from .models import (AudiencePool, ChannelPlaylist, DiscoveryChannel, DiscoveryItem, DiscoveryRun, DiscoverySignal, GrowthAction,
                      TrafficDaily, TrafficSurface, Video, utcnow)
 
 log = logging.getLogger(__name__)
@@ -44,20 +44,8 @@ FORMAT_WORDS = {"album", "teaser", "single", "trailer", "visual", "preview", "sn
                 "compilation", "collection", "megamix", "session", "sessions", "acoustic", "unplugged"}
 GENERIC_SHARE = 0.05         # Ein Begriff in mehr als 5 % aller fremden Titel ist ein Formatwort, kein Thema.
 GENERIC_MIN_CORPUS = 50
-MAX_WEB_QUERIES_PER_RUN = 6   # Weit unter dem eigenen Tageslimit; der Rest folgt am naechsten Tag.
-MAX_WEB_RESULTS_PER_QUERY = 10
 HYPOTHESIS_CAP = 60.0         # Ein unbelegter Mechanismus kommt nicht ueber diesen Wert.
 UNPROVEN_FACTOR = 0.85
-# Orte, an denen eine Zielgruppe wirklich zusammenkommt – erkennbar an der Struktur, nicht am Namen.
-COMMUNITY_MARKERS = ("forum", "community", "board", "thread", "topic", "viewtopic", "showthread", "/r/",
-                     "discussion", "diskussion", "comments", "kommentare", "blog", "review", "kritik",
-                     "playlist", "subreddit", "mitglieder", "members", "posts", "beitr", "replies", "antworten")
-# Handel, Streaming, Nachschlagewerke: dort gibt es keine Community, die man beteiligen kann.
-WEB_DENY_HOSTS = {"spotify.com", "open.spotify.com", "music.apple.com", "apple.com", "amazon.de", "amazon.com",
-                  "deezer.com", "tidal.com", "wikipedia.org", "de.wikipedia.org", "en.wikipedia.org", "imdb.com",
-                  "genius.com", "azlyrics.com", "songtexte.com", "lyrics.com", "shazam.com", "chartmasters.org",
-                  "ebay.de", "ebay.com", "etsy.com", "aliexpress.com", "temu.com", "booking.com"}
-WEB_QUERY_TEMPLATES = ('"{theme}" forum', '"{theme}" community', '{theme} blog empfehlung', '{theme} playlist blog')
 MAX_VERIFY_PER_RUN = 8       # Bounded HTTP-Prüfung je Lauf; der Rest folgt am nächsten Tag.
 VERIFY_TTL_DAYS = 7
 QUEUE_LIMIT = 3
@@ -94,8 +82,6 @@ SURFACE_KINDS = {
     "candidate_channel": {"traffic_source": "YT_OTHER_PAGE", "lever_class": "community_participation",
                           "action": "engage_candidate_channel", "metric": "other_views_7d"},
     # Aussderhalb von YouTube: eine oeffentliche Seite, auf der die Zielgruppe zusammenkommt.
-    "web_community": {"traffic_source": "EXT_URL", "lever_class": "external_community",
-                      "action": "participate_in_web_community", "metric": "external_views_7d"},
     # Neu gefundene Audiences, die uns noch nicht kennen – ueber die vorhandenen YouTube-APIs entdeckt.
     "curated_playlist": {"traffic_source": "PLAYLIST", "lever_class": "playlist_placement",
                          "action": "pitch_to_playlist_curator", "metric": "playlist_views_7d"},
@@ -116,7 +102,6 @@ ACTION_LABELS = {"reach_out_to_referrer": "Externe Quelle ansprechen, die schon 
                  "pitch_to_playlist_curator": "Kurator einer fremden Playlist ansprechen",
                  "engage_pool_channel": "Neu gefundenen Kanal mit passender Audience erreichen",
                  "reach_out_to_embed_site": "Seite ansprechen, die unser Video schon einbettet",
-                 "participate_in_web_community": "Externe Community erreichen, in der die Zielgruppe zusammenkommt",
                  "engage_candidate_video": "Bei einem reichweitenstarken passenden Video sichtbar werden",
                  "engage_candidate_channel": "Kanal mit belegter Reichweite echt beteiligen",
                  "engage_recommending_channel": "Kanal mit passender Audience echt beteiligen",
@@ -420,125 +405,30 @@ ACTIVITY_PATTERNS = ((r"([\d.,]+)\s*(?:k\s*)?(?:members|mitglieder|subscribers|a
                      (r"([\d.,]+)\s*(?:views|aufrufe)", "views"))
 
 
-def activity_signals(text):
-    """Größen- und Aktivitätsindikatoren aus Titel und Snippet – nur wenn sie dort wirklich stehen."""
-    found, lowered = {}, (text or "").lower()
-    for pattern, name in ACTIVITY_PATTERNS:
-        match = re.search(pattern, lowered)
-        if not match:
-            continue
-        raw, suffix = match.group(1), lowered[match.end(1):match.end()]
-        scale = 1000 if "k" in suffix else 1
-        # „1.2k“ ist eine Dezimalzahl, „1.200“ eine Tausendertrennung – beides kommt in Snippets vor.
-        text_value = raw.replace(",", ".") if scale > 1 else raw.replace(".", "").replace(",", "")
-        try:
-            value = float(text_value)
-        except ValueError:
-            continue
-        found[name] = int(value*scale)
-    return {"known": bool(found), **found,
-            "note": ("Aus Titel und Snippet der Suchtreffer gelesen, nicht von der Seite selbst."
-                     if found else "Keine Größenangabe im Suchtreffer; Aktivität unbekannt.")}
-
-
-def community_page(url, title, snippet):
-    """Sieht die Seite nach einem Ort aus, an dem eine Zielgruppe zusammenkommt – und nicht nach Handel?"""
-    host = urlparse(url).netloc.lower()
-    host = host[4:] if host.startswith("www.") else host
-    if host in WEB_DENY_HOSTS or host in SHARE_PLATFORMS:
-        return False, f"{host} ist Handel, Streaming oder Nachschlagewerk – keine Community."
-    haystack = f"{url} {title} {snippet}".lower()
-    if not any(marker in haystack for marker in COMMUNITY_MARKERS):
-        return False, "Kein Hinweis auf Forum, Community, Blog oder Diskussion."
-    return True, f"{host}: Struktur weist auf einen Ort mit Publikum hin."
-
-
-def collect_web_communities(session, vocab, learned, levers, store, now, day, budget=None, http=None):
-    """Audience-Pools außerhalb der eigenen Reichweite: öffentliche Suche, dann streng filtern.
-
-    Keyword-Übereinstimmung allein genügt nicht: ein Treffer muss mindestens zwei spezifische Begriffe
-    mit unserem Thema teilen, strukturell nach Community aussehen, erreichbar sein und darf nicht auf
-    einer Handels-, Streaming- oder Teilen-Plattform liegen.
-    """
-    from . import websearch
-    from .discovery import tokens as split
-    if not websearch.configured():
-        return {"queries": 0, "checked": 0, "kept": 0, "reason": websearch.status()["reason"]}
-    generic = generic_tokens(session)
-    queries, checked, kept = 0, 0, set()
-    for video_id, words in sorted(vocab.items()):
-        specific = [w for w in sorted(words) if w not in generic and len(w) >= 4]
-        if len(specific) < MIN_SHARED_TOKENS:
-            continue        # Ohne eigenes Thema keine Suche – sonst sucht man nach Formatwörtern.
-        theme = " ".join(specific[:3])
-        for template in WEB_QUERY_TEMPLATES:
-            if queries >= MAX_WEB_QUERIES_PER_RUN or websearch.remaining(session, day) <= 0:
-                break
-            if budget:
-                budget.check()
-            try:
-                results = websearch.search(session, template.format(theme=theme), day,
-                                           MAX_WEB_RESULTS_PER_QUERY, http)
-            except websearch.SearchUnavailable as exc:
-                log.info("Web search unavailable (%s)", exc)
-                return {"queries": queries, "checked": checked, "kept": len(kept), "reason": str(exc)}
-            queries += 1
-            for result in results:
-                checked += 1
-                shared = sorted({t for t in split(f"{result['title']} {result['snippet']}")
-                                 if t in words and t not in generic and len(t) >= 4})
-                if len(shared) < MIN_SHARED_TOKENS:
-                    continue
-                ok, why_structure = community_page(result["url"], result["title"], result["snippet"])
-                if not ok:
-                    continue
-                status_code = verify(result["url"], http)
-                if status_code is not None and status_code >= 400:
-                    continue
-                activity = activity_signals(f"{result['title']} {result['snippet']}")
-                entry = learned.get("web_community", {})
-                if entry.get("retired"):
-                    continue
-                host = urlparse(result["url"]).netloc
-                score = score_candidate(shared, activity.get("members") or activity.get("posts") or 0,
-                                        activity.get("members"), entry.get("weight", 1.0))
-                store("web_community", result["url"], video_id, result["title"], result["url"],
-                      {"host": host, "query": result["query"], "snippet": result["snippet"],
-                       "shared_tokens": shared, "activity": activity, "structure": why_structure,
-                       "demand_source": "public_web_search",
-                       "why": (f"Diese Seite behandelt {', '.join(shared)} – dieselben Begriffe, über die unser Video "
-                               f"in der YouTube-Nachbarschaft läuft. {why_structure} "
-                               + (f"Angaben im Treffer: {', '.join(f'{k}={v}' for k, v in activity.items() if k not in ('known', 'note'))}."
-                                  if activity["known"] else "Größe der Community steht nicht im Treffer.")),
-                       "uncertainty": ("hoch: Relevanz aus Titel und Snippet, die Seite wurde nicht gelesen; "
-                                       "vor dem Handeln selbst prüfen.")},
-                      {"traffic_potential": score, "expected_weekly_views": None,
-                       "activity": {k: v for k, v in activity.items() if k not in ("known", "note")},
-                       "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
-                      {"actionable": True, "rules": NO_SPAM, "manual": True,
-                       "how": ("Die Seite lesen und prüfen, ob das Thema wirklich passt. Nur dort beitragen, wo ein "
-                               "eigener inhaltlicher Beitrag Wert hat; einen Link nur setzen, wenn die Regeln der "
-                               "Seite das ausdrücklich erlauben. Sonst Kontakt suchen und sachlich anfragen.")},
-                      status_code, now)
-                kept.add(result["url"])
-    return {"queries": queries, "checked": checked, "kept": len(kept), "reason": None}
-
-
 def specific(tokens_in, generic):
     from .discovery import BRAND
     return sorted({t for t in tokens_in if t not in generic and t not in BRAND and len(t) >= 4})
 
 
-def collect_pools(session, vocab, learned, generic, store):
-    """Gefundene Playlists und Kanäle prüfen: passt das Thema wirklich, ist der Ort gepflegt, wie groß ist er?
+def pool_size(pool):
+    if pool.kind == "playlist":
+        return f"{pool.item_count if pool.item_count is not None else '?'} Titel"
+    return f"{pool.subscribers if pool.subscribers is not None else '?'} Abonnenten"
 
-    Zwei Wege zur Relevanz. Erstens mindestens zwei spezifische gemeinsame Begriffe. Zweitens – stärker –
-    die Playlist enthält ein Video aus einem Kanal, neben dem YouTube uns schon ausliefert: dann kuratiert
+
+def collect_pools(session, vocab, learned, generic, store):
+    """Gefundene Playlists und Kanaele pruefen: passt das Thema wirklich, ist der Ort gepflegt, wie gross ist er?
+
+    Zwei Wege zur Relevanz. Erstens mindestens zwei spezifische gemeinsame Begriffe. Zweitens - staerker -
+    die Playlist enthaelt ein Video aus einem Kanal, neben dem YouTube uns schon ausliefert: dann kuratiert
     dort jemand genau unsere Nachbarschaft.
+
+    Jede Entscheidung wird begruendet und am Kandidaten gespeichert. Ein leerer Trichter ohne Begruendung
+    ist nicht auswertbar; mit Begruendung ist er die Arbeitsliste fuer die naechste Verbesserung.
     """
     from .discovery import tokens as split
-    neighbours = {row.channel_title for row in session.scalars(select(DiscoveryItem)) if row.channel_title}
     neighbour_titles = {row.title for row in session.scalars(select(DiscoveryItem)) if row.title}
+    verdicts = []
     for pool in session.scalars(select(AudiencePool)):
         details = pool.details or {}
         haystack = " ".join([pool.title or "", pool.description or "", details.get("keywords") or ""]
@@ -550,21 +440,39 @@ def collect_pools(session, vocab, learned, generic, store):
             if len(common) > len(shared):
                 best, shared = video_id, common
         overlap = [title for title in (details.get("items") or []) if title in neighbour_titles]
+        verdict = {"kind": pool.kind, "title": pool.title, "url": pool.url, "query": pool.query,
+                   "query_source": details.get("query_source"), "size": pool_size(pool),
+                   "shared_tokens": shared, "neighbourhood_overlap": overlap[:2], "kept": False, "reason": None}
+
+        def decide(reason, kept=False):
+            verdict["reason"], verdict["kept"] = reason, kept
+            verdicts.append(verdict)
+            pool.details = {**details, "verdict": {"kept": kept, "reason": reason, "shared_tokens": shared}}
+            return kept
+
         if best is None:
+            decide("Kein Bezug zu einem unserer Videos: keine gemeinsamen spezifischen Begriffe.")
             continue
         if len(shared) < MIN_SHARED_TOKENS and not overlap:
-            continue        # Wortgleichheit reicht nicht, und ohne Nachbarschaftsbeleg gibt es keinen Grund.
+            decide(f"Themenbezug zu schwach: {len(shared)} spezifischer gemeinsamer Begriff"
+                   + (f" ({', '.join(shared)})" if shared else "")
+                   + f", mindestens {MIN_SHARED_TOKENS} noetig, und kein Video aus unserer belegten Nachbarschaft "
+                     "enthalten.")
+            continue
         if pool.kind == "playlist":
             if (pool.item_count or 0) < MIN_PLAYLIST_ITEMS:
+                decide(f"Kein gepflegter Ort: {pool.item_count or 0} Titel, mindestens {MIN_PLAYLIST_ITEMS} noetig.")
                 continue
             entry = learned.get("curated_playlist", {})
             if entry.get("retired"):
+                decide("Hebel „Playlist-Platzierung“ ist nach erfolglosen Versuchen zurueckgestellt.")
                 continue
             reason = (f"Die Playlist „{pool.title}“ von „{pool.channel_title}“ enthält {pool.item_count} Titel"
                       + (f" und teilt die Begriffe {', '.join(shared)} mit unserem Thema" if shared else "")
                       + (f"; darin liegen Videos aus unserer belegten Nachbarschaft ({', '.join(overlap[:2])})"
                          if overlap else "")
                       + ". Wer sie pflegt, kuratiert für genau diese Zuschauer.")
+            decide("Aufgenommen: Thema belegt, Ort gepflegt, Betreiber ansprechbar.", kept=True)
             store("curated_playlist", pool.key, best, pool.title, pool.url,
                   {"item_count": pool.item_count, "owner": pool.channel_title, "owner_subscribers": pool.subscribers,
                    "shared_tokens": shared, "neighbourhood_overlap": overlap[:3], "query": pool.query,
@@ -580,11 +488,19 @@ def collect_pools(session, vocab, learned, generic, store):
                    "how": ("Den Kanal des Kurators öffnen, die Kontaktmöglichkeit suchen und sachlich fragen, ob das "
                            "Video in die Playlist passt – mit Link zum Video, ohne Druck und ohne Gegenleistung.")})
         elif pool.kind == "channel":
-            if (pool.subscribers or 0) < MIN_CANDIDATE_SUBSCRIBERS or len(shared) < MIN_SHARED_TOKENS:
+            if (pool.subscribers or 0) < MIN_CANDIDATE_SUBSCRIBERS:
+                decide(f"Zu kleine oder verborgene Reichweite: {pool.subscribers if pool.subscribers is not None else 'keine Angabe'}"
+                       f" Abonnenten, mindestens {MIN_CANDIDATE_SUBSCRIBERS} noetig.")
+                continue
+            if len(shared) < MIN_SHARED_TOKENS:
+                decide(f"Bei Kanaelen zaehlt nur echte Themengleichheit: {len(shared)} gemeinsamer Begriff, "
+                       f"mindestens {MIN_SHARED_TOKENS} noetig.")
                 continue
             entry = learned.get("pool_channel", {})
             if entry.get("retired"):
+                decide("Hebel „Community-Teilnahme“ ist nach erfolglosen Versuchen zurueckgestellt.")
                 continue
+            decide("Aufgenommen: Thema belegt, Reichweite oeffentlich nachpruefbar.", kept=True)
             store("pool_channel", pool.key, best, pool.title, pool.url,
                   {"subscribers": pool.subscribers, "video_count": pool.item_count, "views": pool.views,
                    "shared_tokens": shared, "topics": (details.get("topics") or [])[:4], "query": pool.query,
@@ -599,6 +515,9 @@ def collect_pools(session, vocab, learned, generic, store):
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
                    "how": ("Die neueste thematisch passende Veröffentlichung ansehen und inhaltlich kommentieren; "
                            "bei klarer Nähe eine sachliche Anfrage über die angegebene Kontaktmöglichkeit.")})
+        else:
+            decide(f"Unbekannte Pool-Art „{pool.kind}“.")
+    return verdicts
 
 
 def collect_embed_sites(session, learned, store, now, http=None):
@@ -878,14 +797,13 @@ def collect(session, now=None, budget=None, http=None):
     vocab = own_vocabulary(session)
     collect_candidates(session, vocab, learned, store)
     collect_embed_sites(session, learned, store, now, http)
-    collect_pools(session, vocab, learned, generic_tokens(session), store)
-    # Audience-Pools ausserhalb der eigenen Reichweite: oeffentliche Suche.
-    web = collect_web_communities(session, vocab, learned, levers, store, now, today, budget, http)
+    pools = collect_pools(session, vocab, learned, generic_tokens(session), store)
     session.commit()
     if owned_http is not None:
         owned_http.close()
     return {"surfaces": written, "verified": verified, "day": str(today), "per_kind": dict(per_kind),
-            "web_search": web}
+            "pools": {"candidates": len(pools), "kept": sum(1 for p in pools if p["kept"]),
+                      "verdicts": pools}}
 
 
 # ----------------------------------------------------------------------------- conflicts
@@ -952,18 +870,6 @@ def steps_for(kind, surface, video_title):
                 f"Sachlich anbieten, was für die Leser dort noch passt – etwa „{video_title}“ oder ein weiteres Video.",
                 "Nichts am Video selbst ändern. Datum und Ansprechpartner notieren.",
                 NO_SPAM]
-    if kind == "web_community":
-        evidence = surface.evidence or {}
-        activity = {k: v for k, v in (evidence.get("activity") or {}).items() if k not in ("known", "note")}
-        return [f"Seite öffnen und lesen: {surface.url}",
-                f"Prüfen, ob das Thema wirklich passt (gemeinsame Begriffe: {', '.join(evidence.get('shared_tokens') or [])}"
-                + (f"; Angaben im Treffer: {', '.join(f'{k}={v}' for k, v in activity.items())}" if activity else "")
-                + "). Passt es nicht, diese Fläche verwerfen – das ist ein gültiges Ergebnis.",
-                "Wenn es passt: einen eigenen inhaltlichen Beitrag leisten (Antwort, Kommentar, Empfehlung im "
-                "Kontext). Einen Link auf das Video nur setzen, wenn die Regeln der Seite das erlauben; sonst "
-                "Kontakt suchen und sachlich anfragen.",
-                "Datum und Zielstelle notieren. Nichts am Video selbst ändern.",
-                NO_SPAM]
     if kind == "candidate_video":
         return [f"Das Video ansehen: {surface.url} ({(surface.evidence or {}).get('public_views')} öffentliche Views)",
                 "Einen inhaltlichen Kommentar schreiben, der auch ohne Link Wert hat – konkreter Bezug zum Video, "
@@ -1006,10 +912,6 @@ def mechanism(kind, surface):
             "embed_site": ("Die Seite bettet unser Video bereits ein und hat Leser, die es sehen. Eine sachliche "
                            "Ansprache kann zu einer weiteren oder besser platzierten Einbettung führen; die Views "
                            "erscheinen als EXT_URL."),
-            "web_community": ("Auf dieser Seite kommt eine Zielgruppe zusammen, die dasselbe Thema verfolgt und uns "
-                              "nicht kennt. Ein passender eigener Beitrag dort führt Leser auf das Video; solche Klicks "
-                              "erscheinen in den Analytics als EXT_URL-Views. Dass das für diesen Kanal funktioniert, "
-                              "ist eine Hypothese und genau das, was diese Maßnahme prüft."),
             "candidate_video": ("Unter diesem Video ist ein Publikum versammelt, das thematisch zu uns passt und uns "
                                 "noch nicht kennt. Ein inhaltlich sichtbarer Kommentar führt einen Teil dieser Zuschauer "
                                 "auf unseren Kanal; solche Klicks erscheinen in den Analytics als YT_OTHER_PAGE."),
@@ -1227,10 +1129,10 @@ def run(session, now=None, budget=None, http=None):
             session.rollback()
             result["issues"].append(f"{name}: {type(exc).__name__}")
             log.error("Acquisition step %s failed (%s); raw data omitted", name, type(exc).__name__)
-    log.info("acquisition surfaces=%s per_kind=%s proposed=%s blocked=%s evaluated=%s issues=%s web=%s",
+    log.info("acquisition surfaces=%s per_kind=%s proposed=%s blocked=%s evaluated=%s issues=%s pools=%s",
              result.get("surfaces"), result.get("per_kind"), result.get("proposed"),
              len(result.get("blocked") or []), result.get("evaluated"), len(result.get("issues") or []),
-             result.get("web_search"))
+             {k: v for k, v in (result.get("pools") or {}).items() if k != "verdicts"})
     # Betriebssichtbarkeit fuer einen PC-off-Betrieb: was schlaegt die Engine heute konkret vor und
     # welche Flaechen stehen dahinter. Kanaleigene Daten, keine Secrets.
     try:
@@ -1248,19 +1150,38 @@ def run(session, now=None, budget=None, http=None):
                      item["title"], item["surface"], item["traffic_source"], item["reason"][:120])
     except Exception as exc:
         log.info("Acquisition summary unavailable (%s)", type(exc).__name__)
-    web = result.get("web_search") or {}
-    if web:
-        log.info("acquisition websearch queries=%s checked=%s kept=%s reason=%s",
-                 web.get("queries"), web.get("checked"), web.get("kept"), web.get("reason"))
+    pools = result.get("pools") or {}
+    log.info("acquisition pools candidates=%s kept=%s", pools.get("candidates"), pools.get("kept"))
+    for verdict in (pools.get("verdicts") or [])[:12]:
+        log.info("acquisition pool kind=%s kept=%s title=%r query=%r source=%s size=%s shared=%s reason=%r",
+                 verdict["kind"], verdict["kept"], verdict["title"], verdict.get("query"),
+                 verdict.get("query_source"), verdict.get("size"), verdict.get("shared_tokens"),
+                 (verdict.get("reason") or "")[:200])
     return result
 
 
 # ----------------------------------------------------------------------------- read model
-def _web_status(session, day):
-    from . import websearch
-    state = websearch.status()
-    return {**state, "used_today": websearch.used_today(session, day),
-            "remaining_today": websearch.remaining(session, day)}
+def pool_report(session):
+    """Was die Pool-Suche wirklich gefunden hat und was damit passiert ist - ohne Beschoenigung."""
+    probe, run = {}, session.scalar(select(DiscoveryRun).order_by(DiscoveryRun.id.desc()))
+    if run is not None:
+        probe = (run.stats or {}).get("pool_probe") or {}
+    candidates = []
+    for pool in session.scalars(select(AudiencePool).order_by(AudiencePool.last_seen_day.desc(),
+                                                             AudiencePool.id.desc()).limit(24)):
+        details = pool.details or {}
+        verdict = details.get("verdict") or {}
+        candidates.append({"kind": pool.kind, "title": pool.title, "url": pool.url, "query": pool.query,
+                           "query_source": details.get("query_source"), "size": pool_size(pool),
+                           "found_day": str(pool.first_seen_day) if pool.first_seen_day else None,
+                           "kept": verdict.get("kept"), "reason": verdict.get("reason"),
+                           "shared_tokens": verdict.get("shared_tokens") or []})
+    return {"searched": bool(probe.get("queries")), "note": probe.get("note"),
+            "queries": probe.get("queries") or [], "available_queries": probe.get("available_queries") or [],
+            "day": str(run.day) if run is not None else None,
+            "run_status": run.status if run is not None else None,
+            "candidates": candidates, "kept": sum(1 for c in candidates if c["kept"]),
+            "rejected": sum(1 for c in candidates if c["kept"] is False)}
 
 
 def overview(session, now=None):
@@ -1328,14 +1249,16 @@ def overview(session, now=None):
                           "why": (s.evidence or {}).get("why")}
                          for s in sorted(surfaces, key=lambda s: -(s.scores or {}).get("traffic_potential", 0))[:12]],
             "scoreboard": scoreboard(session), "learning": weights(session), "levers": lever_record(session),
-            "web_search": _web_status(session, today),
+            "pools": pool_report(session),
             "capabilities": {"used": ["Eigene Analytics: externe Referrer (EXT_URL-Detail)",
                                       "Eigene Analytics: empfehlende Videos und deren Kanäle",
                                       "Eigene Analytics: reale Suchbegriffe",
                                       "Öffentliche Suchproben (YouTube Data API) für thematisch nahe Videos/Kanäle",
-                                      "Öffentliche Web-Suche nach Communities außerhalb der eigenen Reichweite",
+                                      "Öffentliche YouTube-Suche nach fremden Playlists und Kanälen (search.list)",
+                                      "Eigene Analytics: Seiten, die unser Video einbetten",
                                       "HTTP-Prüfung, dass eine Seite erreichbar ist"],
                              "not_used": ["Automatisches Posten, Kommentieren oder Anschreiben: findet nicht statt.",
-                                          "Bezahlte Reichweite, Bots, Engagement-Pods: ausgeschlossen."]},
+                                          "Bezahlte Reichweite, Bots, Engagement-Pods: ausgeschlossen.",
+                                          "Externe Web-Suchanbieter: verworfen, keine zusätzlichen Kosten."]},
             "read_only": "Das System postet nichts und ändert nichts auf YouTube.",
             "goal": "Zusätzliche qualifizierte organische Views; gemessen wird die Quelle, nicht die Aktivität."}

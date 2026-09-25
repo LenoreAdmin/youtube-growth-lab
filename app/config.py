@@ -24,12 +24,6 @@ class Settings(BaseSettings):
     sync_interval_seconds: int = 3600
     analytics_lag_days: int = 3
     sync_budget_seconds: int = Field(default=210, ge=30, le=210)
-    # Öffentliche Web-Suche für Audience-Pools außerhalb der eigenen Reichweite. Ohne Schlüssel bleibt
-    # die Funktion aus; das Tageslimit liegt bewusst unter dem kostenlosen Kontingent des Providers.
-    web_search_provider: str = ""
-    web_search_key: str = Field(default="", repr=False)
-    web_search_cx: str = Field(default="", repr=False)
-    web_search_daily_limit: int = Field(default=50, ge=0, le=100)
 
     @property
     def hosted(self):

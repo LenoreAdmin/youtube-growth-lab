@@ -68,6 +68,10 @@ SOURCE_FOR_KIND = {"search": "YT_SEARCH", "suggested": "RELATED_VIDEO", "cluster
 SOURCE_KINDS = {"YT_SEARCH": "own_search_term", "RELATED_VIDEO": "own_suggested_source", "EXT_URL": "own_external"}
 MAX_POOL_SEARCHES = 2        # Je Lauf eine Playlist- und eine Kanalsuche: 200 Einheiten von 1500.
 MAX_POOL_ITEMS = 8           # So viele Treffer je Suche werden mit Detailabfragen angereichert.
+MAX_POOL_QUERIES = 4         # Kandidaten-Queries; verwendet werden die besten zwei.
+MIN_POOL_QUERY_TOKENS = 2    # Ein Wort ist kein Thema, sondern ein Zufallstreffer.
+POOL_RESERVE = 2*SEARCH_COST+20*LIST_COST   # Diese Einheiten bleiben fuer die Pool-Suche stehen (220).
+POOL_RESERVE_SHARE = 0.15   # Bei kleinem Tagesbudget wird entsprechend weniger reserviert.
 GAPS = ["existing_video_opportunity", "packaging_opportunity", "search_opportunity", "suggested_opportunity",
         "followup_content_opportunity", "insufficient_evidence"]
 BRAND = {"sealand", "sealandmusic"}
@@ -284,99 +288,191 @@ def collect_embeds(session, client, videos, now, budget, stats):
         session.commit()
 
 
-def probe_audience_pools(session, client, quota, videos, now, budget, stats):
-    """Fremde Playlists und Kanäle zu unserem Thema – Audiences, die uns noch nicht kennen.
+def pool_queries(session, videos, tags_by_video, generic=None, limit=MAX_POOL_QUERIES):
+    """Themen-Queries fuer die Pool-Suche, nach Belastbarkeit geordnet.
 
-    Eine kuratierte Playlist hat einen Betreiber, den man ansprechen kann, und eine nachprüfbare Größe;
-    ein Kanal hat Abonnenten. Beides sind Flächen außerhalb unserer bisherigen Reichweite. Die Suche
-    kostet 100 Einheiten, deshalb höchstens zwei je Lauf und nur mit einem belastbaren Seed.
+    Bewusst NICHT die alten DiscoveryQuery-Seeds: dort stehen Formatwoerter wie "album teaser", die
+    Mainstream-Treffer liefern (der BLACKPINK-Fehlgriff kam genau daher). Ein Pool-Query muss das Thema
+    beschreiben, nicht die Verpackung. Reihenfolge der Quellen: gemessene eigene Suchnachfrage, dann die
+    Tags, mit denen der Kanal sein Thema selbst beschreibt, dann die belegte Nachbarschaft, zuletzt der
+    eigene Titel (zirkulaer, deshalb letzte Reserve).
+    """
+    from .acquisition import FORMAT_WORDS, generic_tokens
+    ignore = set(FORMAT_WORDS) | (generic_tokens(session) if generic is None else set(generic)) | BRAND
+
+    def clean(value):
+        return [t for t in tokens(value) if t not in ignore and len(t) >= 4]
+
+    plans, seen = [], set()
+
+    def add(words, source):
+        query = " ".join(words[:3])
+        key = " ".join(sorted(query.split()))
+        if len(query.split()) < MIN_POOL_QUERY_TOKENS or key in seen:
+            return
+        seen.add(key)
+        plans.append({"query": query, "source": source})
+
+    for row in session.execute(select(DiscoverySignal.detail, DiscoverySignal.views)
+                               .where(DiscoverySignal.kind == "own_search_term")
+                               .order_by(DiscoverySignal.views.desc()).limit(20)):
+        add(clean(row[0]), "own_search_term")
+    for v in videos:
+        for tag in (tags_by_video.get(v.id) or [])[:12]:
+            add(clean(tag), "own_tag")
+    titles = {row.video_id: row.title for row in session.scalars(select(DiscoveryItem))}
+    weighted = defaultdict(int)
+    for row in session.scalars(select(DiscoverySignal).where(DiscoverySignal.kind == "own_suggested_source")):
+        title = titles.get(row.detail)
+        if not title or (row.views or 0) < 1:
+            continue
+        for token in set(clean(title)):
+            weighted[token] += row.views
+    add([t for t, _ in sorted(weighted.items(), key=lambda kv: -kv[1])[:2]], "measured_neighbourhood")
+    for v in videos:
+        add(clean(v.title), "own_title")
+    return plans[:limit]
+
+
+def probe_audience_pools(session, client, quota, videos, now, budget, stats, tags_by_video=None):
+    """Fremde Playlists und Kanaele zu unserem Thema - Audiences, die uns noch nicht kennen.
+
+    Eine kuratierte Playlist hat einen Betreiber, den man ansprechen kann, und eine nachpruefbare Groesse;
+    ein Kanal hat Abonnenten. Beides sind Flaechen ausserhalb unserer bisherigen Reichweite. Die Suche
+    kostet 100 Einheiten, deshalb hoechstens zwei je Lauf.
+
+    Jeder Schritt wird protokolliert: welcher Query, wie viele Treffer, was gespeichert wurde und warum
+    nicht. Ohne dieses Protokoll ist ein Nulllauf nicht von einem nicht stattgefundenen Lauf zu
+    unterscheiden - genau das war vorher der Fall.
     """
     today = pacific_day(now)
-    seeds = list(session.scalars(select(DiscoveryQuery).where(DiscoveryQuery.priority > 0)
-                                 .order_by(DiscoveryQuery.priority.desc()).limit(MAX_POOL_SEARCHES)))
-    if not seeds or not hasattr(client, "search_playlists"):
+    report = {"queries": [], "note": None, "stored": 0, "candidates": 0, "available_queries": []}
+    stats["pool_probe"] = report
+    if not hasattr(client, "search_playlists"):
+        report["note"] = "Der YouTube-Client dieses Laufs kann keine Pool-Suche ausfuehren."
         return
+    plans = pool_queries(session, videos, tags_by_video or {})
+    if not plans:
+        report["note"] = ("Kein belastbarer Themen-Query: nach Abzug von Marken-, Format- und Allerweltswoertern "
+                          "bleiben aus eigener Suchnachfrage, Tags, belegter Nachbarschaft und Titeln keine zwei "
+                          "Themenbegriffe uebrig.")
+        log.info("discovery pools skipped reason=%s", report["note"])
+        return
+    report["available_queries"] = [p["query"] for p in plans]
     own_channel = {v.channel_id for v in videos}
 
     def store(kind, key, title, url, **fields):
-        statement = upsert(session, AudiencePool).values(kind=kind, key=key, title=title[:300], url=url[:500],
-                                                         first_seen_day=today, last_seen_day=today, **fields)
+        statement = upsert(session, AudiencePool).values(kind=kind, key=key, title=(title or "")[:300],
+                                                        url=url[:500], first_seen_day=today, last_seen_day=today,
+                                                        **fields)
         session.execute(statement.on_conflict_do_update(index_elements=["kind", "key"], set_={
             "title": statement.excluded.title, "item_count": statement.excluded.item_count,
             "subscribers": statement.excluded.subscribers, "views": statement.excluded.views,
-            "details": statement.excluded.details, "last_seen_day": statement.excluded.last_seen_day}))
+            "details": statement.excluded.details, "query": statement.excluded.query,
+            "last_seen_day": statement.excluded.last_seen_day}))
         stats["pools"] = stats.get("pools", 0)+1
+        report["stored"] += 1
 
-    for seed in seeds[:1]:
-        if budget:
-            budget.check()
-        if quota.remaining() < SEARCH_COST+LIST_COST*3:
-            return
+    def entry_for(kind, plan):
+        item = {"kind": kind, "query": plan["query"], "source": plan["source"], "results": 0, "own": 0,
+                "stored": 0, "titles": [], "note": None}
+        report["queries"].append(item)
+        return item
+
+    playlist_plan = plans[0]
+    channel_plan = plans[1] if len(plans) > 1 else plans[0]
+
+    entry = entry_for("playlist", playlist_plan)
+    if budget:
+        budget.check()
+    if quota.remaining() < SEARCH_COST+LIST_COST*3:
+        entry["note"] = f"Tagesbudget erschoepft: {quota.remaining()} Einheiten uebrig."
+    else:
         quota.spend(SEARCH_COST)
-        found = client.search_playlists(seed.query, max_results=MAX_POOL_ITEMS)
+        found = client.search_playlists(playlist_plan["query"], max_results=MAX_POOL_ITEMS)
+        entry["results"] = len(found)
+        entry["titles"] = [str(p.get("title") or p.get("playlist_id")) for p in found][:MAX_POOL_ITEMS]
+        entry["own"] = sum(1 for p in found if p.get("channel_id") in own_channel)
         ids = [p["playlist_id"] for p in found if p.get("channel_id") not in own_channel][:MAX_POOL_ITEMS]
         if not ids:
-            continue
-        quota.spend(LIST_COST)
-        details = {p["id"]: p for p in client.playlists_by_id(ids)}
-        owners = {}
-        owner_ids = [d["snippet"].get("channelId") for d in details.values() if d["snippet"].get("channelId")]
-        if owner_ids and quota.remaining() > LIST_COST:
+            entry["note"] = "Keine fremden Playlists in den Treffern."
+        else:
             quota.spend(LIST_COST)
-            for item in client.channels_by_id(owner_ids):
-                statistics = item.get("statistics", {})
-                owners[item["id"]] = {
-                    "subscribers": None if statistics.get("hiddenSubscriberCount") else
-                                   (int(statistics["subscriberCount"]) if "subscriberCount" in statistics else None),
-                    "views": int(statistics["viewCount"]) if "viewCount" in statistics else None}
-        for entry in found:
-            meta = details.get(entry["playlist_id"])
-            if meta is None:
-                continue
-            counts = meta.get("contentDetails", {})
-            members = []
-            if quota.remaining() > LIST_COST:
+            details = {p["id"]: p for p in client.playlists_by_id(ids)}
+            # Die Groesse des Kurators gehoert zur Fläche: eine Playlist ohne Publikum bringt keine Views.
+            owners = {}
+            owner_ids = [d["snippet"].get("channelId") for d in details.values() if d["snippet"].get("channelId")]
+            if owner_ids and quota.remaining() > LIST_COST:
                 quota.spend(LIST_COST)
-                members = [i["snippet"]["title"] for i in client.playlist_items(entry["playlist_id"], 10)
-                           if i.get("snippet")]
-            owner = owners.get(meta["snippet"].get("channelId")) or {}
-            store("playlist", entry["playlist_id"], meta["snippet"]["title"],
-                  f"https://www.youtube.com/playlist?list={entry['playlist_id']}",
-                  channel_id=meta["snippet"].get("channelId"), channel_title=meta["snippet"].get("channelTitle"),
-                  item_count=counts.get("itemCount"), subscribers=owner.get("subscribers"),
-                  views=owner.get("views"),
-                  description=(meta["snippet"].get("description") or "")[:1000],
-                  published_at=None, query=seed.query,
-                  details={"items": members[:10], "privacy": (meta.get("status") or {}).get("privacyStatus")})
-        session.commit()
+                for item in client.channels_by_id(owner_ids):
+                    statistics = item.get("statistics", {})
+                    owners[item["id"]] = {
+                        "subscribers": None if statistics.get("hiddenSubscriberCount") else
+                                       (int(statistics["subscriberCount"]) if "subscriberCount" in statistics else None),
+                        "views": int(statistics["viewCount"]) if "viewCount" in statistics else None}
+            for candidate in found:
+                meta = details.get(candidate.get("playlist_id"))
+                if meta is None:
+                    continue
+                counts = meta.get("contentDetails", {})
+                members = []
+                if quota.remaining() > LIST_COST:
+                    quota.spend(LIST_COST)
+                    members = [i["snippet"]["title"] for i in client.playlist_items(candidate["playlist_id"], 10)
+                               if i.get("snippet")]
+                store("playlist", candidate["playlist_id"], meta["snippet"]["title"],
+                      f"https://www.youtube.com/playlist?list={candidate['playlist_id']}",
+                      channel_id=meta["snippet"].get("channelId"), channel_title=meta["snippet"].get("channelTitle"),
+                      item_count=counts.get("itemCount"),
+                      subscribers=(owners.get(meta["snippet"].get("channelId")) or {}).get("subscribers"),
+                      views=(owners.get(meta["snippet"].get("channelId")) or {}).get("views"),
+                      description=(meta["snippet"].get("description") or "")[:1000],
+                      published_at=None, query=playlist_plan["query"],
+                      details={"items": members[:10], "privacy": (meta.get("status") or {}).get("privacyStatus"),
+                               "query_source": playlist_plan["source"]})
+                entry["stored"] += 1
+            session.commit()
 
-    for seed in seeds[1:2]:
-        if budget:
-            budget.check()
-        if quota.remaining() < SEARCH_COST+LIST_COST:
-            return
+    entry = entry_for("channel", channel_plan)
+    if budget:
+        budget.check()
+    if quota.remaining() < SEARCH_COST+LIST_COST:
+        entry["note"] = f"Tagesbudget erschoepft: {quota.remaining()} Einheiten uebrig."
+    else:
         quota.spend(SEARCH_COST)
-        found = client.search_channels(seed.query, max_results=MAX_POOL_ITEMS)
+        found = client.search_channels(channel_plan["query"], max_results=MAX_POOL_ITEMS)
+        entry["results"] = len(found)
+        entry["titles"] = [str(c.get("title") or c.get("channel_id")) for c in found][:MAX_POOL_ITEMS]
+        entry["own"] = sum(1 for c in found if c.get("channel_id") in own_channel)
         ids = [c["channel_id"] for c in found if c["channel_id"] not in own_channel][:MAX_POOL_ITEMS]
         if not ids:
-            continue
-        quota.spend(LIST_COST)
-        for item in client.channels_by_id(ids):
-            statistics = item.get("statistics", {})
-            branding = (item.get("brandingSettings", {}) or {}).get("channel", {})
-            hidden = statistics.get("hiddenSubscriberCount")
-            store("channel", item["id"], item.get("snippet", {}).get("title", ""),
-                  f"https://www.youtube.com/channel/{item['id']}",
-                  channel_id=item["id"], channel_title=item.get("snippet", {}).get("title"),
-                  item_count=int(statistics["videoCount"]) if "videoCount" in statistics else None,
-                  subscribers=None if hidden else (int(statistics["subscriberCount"]) if "subscriberCount" in statistics else None),
-                  views=int(statistics["viewCount"]) if "viewCount" in statistics else None,
-                  description=(item.get("snippet", {}).get("description") or "")[:1000], published_at=None,
-                  query=seed.query,
-                  details={"topics": (item.get("topicDetails", {}) or {}).get("topicCategories", []),
-                           "keywords": (branding.get("keywords") or "")[:500],
-                           "country": item.get("snippet", {}).get("country")})
-        session.commit()
+            entry["note"] = "Keine fremden Kanaele in den Treffern."
+        else:
+            quota.spend(LIST_COST)
+            for item in client.channels_by_id(ids):
+                statistics = item.get("statistics", {})
+                branding = (item.get("brandingSettings", {}) or {}).get("channel", {})
+                hidden = statistics.get("hiddenSubscriberCount")
+                store("channel", item["id"], item.get("snippet", {}).get("title", ""),
+                      f"https://www.youtube.com/channel/{item['id']}",
+                      channel_id=item["id"], channel_title=item.get("snippet", {}).get("title"),
+                      item_count=int(statistics["videoCount"]) if "videoCount" in statistics else None,
+                      subscribers=None if hidden else (int(statistics["subscriberCount"]) if "subscriberCount" in statistics else None),
+                      views=int(statistics["viewCount"]) if "viewCount" in statistics else None,
+                      description=(item.get("snippet", {}).get("description") or "")[:1000], published_at=None,
+                      query=channel_plan["query"],
+                      details={"topics": (item.get("topicDetails", {}) or {}).get("topicCategories", []),
+                               "keywords": (branding.get("keywords") or "")[:500],
+                               "country": item.get("snippet", {}).get("country"),
+                               "query_source": channel_plan["source"]})
+                entry["stored"] += 1
+            session.commit()
+
+    report["candidates"] = sum(e["results"] for e in report["queries"])
+    for item in report["queries"]:
+        log.info("discovery pools kind=%s query=%r source=%s results=%s own=%s stored=%s note=%s titles=%r",
+                 item["kind"], item["query"], item["source"], item["results"], item["own"], item["stored"],
+                 item["note"], " | ".join(item["titles"][:6])[:400])
 
 
 def collect_neighbors(session, client, quota, now, budget, stats):
@@ -405,6 +501,11 @@ def probe_queries(session, client, quota, videos, now, budget, stats):
             budget.check()
         if quota.remaining() < SEARCH_COST+LIST_COST:
             raise QuotaExhausted()
+        if quota.remaining() < SEARCH_COST+LIST_COST+min(POOL_RESERVE, int(quota.limit*POOL_RESERVE_SHARE)):
+            # Die Suchproben duerfen die Pool-Suche nicht aushungern: sie laeuft als letzter Schritt und
+            # verlor bisher genau die Einheiten, die hier vorher verbraucht wurden.
+            stats["pool_reserve_kept"] = min(POOL_RESERVE, int(quota.limit*POOL_RESERVE_SHARE))
+            break
         try:
             quota.spend(SEARCH_COST)
             results = client.search(q.query, max_results=25)
@@ -550,12 +651,13 @@ def _run(client, now, budget, force):
             probe_queries(s, client, quota, videos, now, budget, stats)
             collect_channels(s, client, quota, now, budget, stats)
             try:
-                probe_audience_pools(s, client, quota, videos, now, budget, stats)
+                probe_audience_pools(s, client, quota, videos, now, budget, stats, tags)
             except (SyncBudgetExceeded, QuotaExhausted, Throttled):
                 raise
             except Exception as exc:
                 s.rollback()
                 issues.append(f"pools: {type(exc).__name__}")
+                log.info("discovery pools failed (%s)", type(exc).__name__)
             s.commit()
             stats["units_used"] = quota.spent_now
             stats["units_today"] = quota.used

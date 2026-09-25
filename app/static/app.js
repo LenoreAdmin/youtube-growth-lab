@@ -54,10 +54,14 @@ function renderTraffic(a){
  $("trafficTitle").textContent=q.length?`Jetzt tun: ${q.length} Traffic-Aktion${q.length>1?"en":""}`:
   (run.length?"Alle gefundenen Quellen laufen bereits":"Keine ausführbare Trafficquelle gefunden");
  $("trafficMeta").textContent=`Flächen vom ${esc(a.day||"—")} · ${num(a.surfaces_found)} geprüfte Quellen`;
- const web=a.web_search||{};
- $("trafficGoal").textContent=(a.goal||"")+(web.configured?` · Externe Suche aktiv (${num(web.used_today)}/${num(web.daily_limit)} Abfragen heute)`:" · Externe Suche nicht konfiguriert");
- $("trafficSearch").innerHTML=web.configured?"":`<h3>Externe Suche einschalten</h3><p>${esc(web.reason||"")}</p><ol>${(web.setup||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>`;
- $("trafficSearch").hidden=!!web.configured;
+ const pools=a.pools||{};
+ $("trafficGoal").textContent=a.goal||"";
+ // Die Pool-Suche muss nachpruefbar sein: welcher Query, welche realen Treffer, welcher Filtergrund.
+ const pq=(pools.queries||[]).map(x=>`<li><code>${esc(x.query)}</code> (${esc(x.kind)}, Quelle ${esc(x.source||"—")}): ${num(x.results)} Treffer, ${num(x.stored)} gespeichert${x.note?" – "+esc(x.note):""}${(x.titles||[]).length?`<br><small>${(x.titles||[]).map(esc).join(" · ")}</small>`:""}</li>`).join("");
+ const pc=(pools.candidates||[]).map(c=>`<li>${c.kept?"✓":"✗"} <strong>${esc(c.title||"—")}</strong> <small>${esc(c.kind)} · ${esc(c.size||"")}${c.query?` · gefunden über „${esc(c.query)}“`:""}</small>${c.url?` <a href="${esc(c.url)}" rel="noreferrer noopener" target="_blank">öffnen</a>`:""}<br><small>${esc(c.reason||"noch nicht geprüft")}</small></li>`).join("");
+ $("trafficPools").innerHTML=`<h3>Suche nach fremden Playlists und Kanälen</h3>`
+  +(pools.searched?`<ul>${pq}</ul>`:`<p class="muted">${esc(pools.note||"In diesem Lauf wurde keine Pool-Suche ausgeführt.")}</p>`)
+  +(pc?`<p><strong>Kandidaten und Filtergründe</strong> (${num(pools.kept)} aufgenommen, ${num(pools.rejected)} verworfen)</p><ul>${pc}</ul>`:"");
  $("trafficKpi").innerHTML=[["Zusätzliche Views (attribuiert)",num(board.attributed_views_delta),"aus gemessenen Quellen seit Start"],
   ["Laufende Traffic-Aktionen",num(board.running),"von dir bestätigt"],
   ["Ausgewertet",num(board.evaluated),"mit Quellen-Attribution"],
