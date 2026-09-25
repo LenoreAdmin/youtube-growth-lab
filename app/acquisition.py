@@ -507,7 +507,7 @@ def full_release(video):
 
 
 def best_video_for(session, words, profiles, prefer_full=False, tags=(), topics=(), intent=None,
-                   neighbourhood=()):
+                   neighbourhood=(), free=None):
     """Welches unserer Videos passt inhaltlich wirklich zu diesem Ort – und ist ueberhaupt vorzeigbar?
 
     Fuer eine Playlist-Anfrage ist ein 45-Sekunden-Teaser der falsche Kandidat, selbst wenn seine Worte
@@ -525,10 +525,11 @@ def best_video_for(session, words, profiles, prefer_full=False, tags=(), topics=
         if fit["class"] is None:
             continue
         complete = 1 if full_release(video) else 0
+        available = 1 if (free is None or free(video.id)) else 0
         # Fuer eine Playlist-Anfrage entscheidet zuerst, ob es ueberhaupt ein vollstaendiges Video ist:
         # ein Album-Teaser laesst sich nicht in eine Playlist aufnehmen, auch wenn seine Worte passen.
-        key = ((complete, FIT_RANK[fit["class"]], len(fit["shared"])) if prefer_full
-               else (FIT_RANK[fit["class"]], len(fit["shared"]), complete))+(video.duration_seconds or 0,)
+        key = ((available, complete, FIT_RANK[fit["class"]], len(fit["shared"])) if prefer_full
+               else (available, FIT_RANK[fit["class"]], len(fit["shared"]), complete))+(video.duration_seconds or 0,)
         if best_key is None or key > best_key:
             best, best_key = (video, fit), key
     return best
@@ -644,9 +645,12 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
         hit = audience.matches(intent, words) if intent.get("head") else None
         # Welches unserer Videos passt hier wirklich – und ist es vorzeigbar? Fuer eine Playlist-Anfrage
         # ist ein Album-Teaser der falsche Kandidat, auch wenn seine Worte zufaellig passen.
+        spec = SURFACE_KINDS["curated_playlist" if pool.kind == "playlist" else "pool_channel"]
         chosen = best_video_for(session, sorted(words), profiles, prefer_full=True,
                                tags=details.get("items") or [], topics=details.get("topics") or [],
-                               intent=intent, neighbourhood=overlap[:2])
+                               intent=intent, neighbourhood=overlap[:2],
+                               free=lambda video_id: blocking(session, video_id, spec["lever_class"],
+                                                              spec["traffic_source"], spec["metric"])[0] is None)
         fit = chosen[1] if chosen else audience.audience_fit(sorted(words), next(iter(profiles.values()), {
             "genres": set(), "moods": set(), "places": set(), "topics": set(), "terms": {}}))
         if chosen:

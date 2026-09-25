@@ -102,6 +102,11 @@ MAX_INTENTS_PER_VIDEO = 4
 KIND_BONUS = {"topic_context": 2.0, "search_demand": 2.0, "artist_adjacency": 0.5, "mood_genre": 0.0}
 MAX_ARTIST_INTENTS = 1        # Ein Nachbarschafts-Künstler je Video genügt; sonst verdrängt er das Thema.
 MIN_HEAD_LENGTH = 4           # Kürzere Wörter tragen kein Thema.
+# Ein Begriff ohne erkennbare Kategorie darf nur dann als inhaltlicher Beleg zaehlen, wenn er in den
+# gespeicherten fremden Titeln fast nicht vorkommt. „mongolian“ und „swiss“ erfuellen das, „will“, „name“
+# oder „hit“ nicht – und keine handgepflegte Wortliste wird je alle Fuellwoerter kennen. Deshalb entscheidet
+# hier die Haeufigkeit im eigenen Korpus und nicht eine Liste, die ich dreimal nachziehen musste.
+TOPIC_MAX_DF = 2
 RETIRE_AFTER_CANDIDATES = 6   # So viele Kandidaten ohne einen einzigen Treffer, dann ist der Intent tot.
 
 SOURCE_LABELS = {
@@ -425,7 +430,8 @@ UMBRELLA_GENRES = {"pop", "rock", "dance", "electronic", "alternative", "live", 
 def music_profile(session, video, generic=None):
     """Das musikalische Profil eines eigenen Videos: Genres, Stimmungen, Orte, belegte Themen."""
     rows = profile_terms(session, video, generic)
-    profile = {"genres": set(), "moods": set(), "places": set(), "topics": set(), "terms": {}, "rare": set()}
+    profile = {"genres": set(), "moods": set(), "places": set(), "topics": set(), "terms": {}, "rare": set(),
+               "specific": set(), "anchors": set()}
     for row in rows:
         profile["terms"][row["term"]] = row
         # Ein langer Begriff, der in keinem der gespeicherten fremden Titel vorkommt, ist wirklich
@@ -438,8 +444,16 @@ def music_profile(session, video, generic=None):
             profile["moods"].add(row["term"])
         elif row["category"] == "ort":
             profile["places"].add(row["term"])
-        elif row["category"] == "thema" and row["attestations"] >= MIN_ATTESTATIONS:
-            profile["topics"].add(row["term"])
+        elif row["category"] == "thema" and row["df"] <= TOPIC_MAX_DF:
+            # Spezifisch genug, um etwas zu bedeuten: „swiss“, „mongolian“, „zuerich“ – nicht „will“.
+            profile["specific"].add(row["term"])
+            if row["attestations"] >= MIN_ATTESTATIONS:
+                # Zusaetzlich mehrfach belegt: dann traegt der Begriff auch einen eigenen Themenkopf.
+                profile["topics"].add(row["term"])
+    # Was ueberhaupt als inhaltlicher Anker zaehlen darf: Orte und Motive, belegte und spezifische Themen,
+    # Stimmungen und engere Stilbegriffe. Haeufige Allerweltswoerter sind hier bewusst nicht dabei.
+    profile["anchors"] = (profile["places"] | profile["topics"] | profile["specific"] | profile["moods"]
+                          | (profile["genres"]-UMBRELLA_GENRES))
     return profile
 
 
@@ -480,8 +494,7 @@ def audience_fit(words, profile, intent_hit=None, neighbourhood=(), topics=(), t
     # Anker sind alle inhaltlich klassifizierten eigenen Begriffe, die dort ebenfalls stehen – auch ein
     # einfach belegter wie „swiss“ oder „zuerich“. Als Themenkopf taugt er nicht, als Beweis, dass es nicht
     # nur eine Genre-Schublade ist, sehr wohl.
-    extra = {w for w in words
-             if (profile.get("terms", {}).get(w) or {}).get("category") in TOPIC_CATEGORIES}
+    extra = set(words) & profile.get("anchors", set())
     anchored = sorted((set(semantic) | set(intent_head) | extra)-set(style)-UMBRELLA_GENRES)
     specific_style = [s for s in style if s not in UMBRELLA_GENRES]
     # Ein Dachgenre allein ist kein Publikum. Es braucht einen Anker: einen Ort, ein Motiv, eine Stimmung

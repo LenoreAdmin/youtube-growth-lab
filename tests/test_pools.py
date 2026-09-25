@@ -420,3 +420,34 @@ def test_a_topic_only_fit_is_declared_a_hypothesis_and_capped(session):
     view = aq.overview(session, NOW)
     assert view["assessment"]["status"] == "hypothesis_only"
     assert "Hypothese" in view["assessment"]["text"]
+
+
+def test_a_blocked_video_does_not_waste_a_playlist_that_fits_another_one(session):
+    """Massnahme #8 sperrt Trainstories fuer PLAYLIST – Shine On ist frei und passt ebenfalls."""
+    from app.models import GrowthAction
+    from app import growth_engine as ge
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.get(Video, "a").duration_seconds = 214
+    session.get(Video, "b").title = "Sealand Shine On"
+    session.get(Video, "b").duration_seconds = 248
+    session.commit()
+    seed_profile(session, tags=("swiss pop", "ambient"), description="Schweizer Pop aus dem Nachtzug.",
+                 topics=("https://en.wikipedia.org/wiki/Pop_music",))
+    seed_profile(session, video_id="b", tags=("swiss pop", "acoustic"), description="Schweizer Pop, akustisch.",
+                 topics=("https://en.wikipedia.org/wiki/Pop_music",), channel_description="", channel_keywords="")
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence",
+                             target_metric="impressions_7d", window_days=14,
+                             evaluate_after=TODAY+timedelta(days=16), status="running",
+                             started_day=TODAY-timedelta(days=1), started_at=NOW, lever_class="internal_link",
+                             traffic_source="END_SCREEN", payload={}))
+    session.commit()
+    pool(session, "playlist", "PLswisspop", "Swiss Pop Music", item_count=120, subscribers=8000,
+         channel_title="Swiss Charts", description="swiss pop hits aus der Schweiz", query="switzerland pop",
+         details={"items": ["Schweizer Pop Song", "Pop aus Zuerich"]})
+    aq.collect(session, NOW, http=FakeHttp())
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "PLswisspop"))
+    assert surface is not None and surface.video_id == "b", "die freie, passende Veroeffentlichung nimmt den Platz"
+    assert aq.propose(session, NOW)["proposed"] == 1
+    entry = aq.overview(session, NOW)["traffic_queue"][0]
+    assert entry["traffic_source"] == "PLAYLIST" and entry["title"] == "Sealand Shine On"

@@ -307,3 +307,28 @@ def test_a_search_probe_hit_needs_a_content_anchor_not_just_a_style(session):
     result = acq.collect(session, NOW, http=FakeHttp())
     assert not [s for s in session.scalars(select(TrafficSurface)) if s.key == "COVER000001"], \
         "ein Cover-Kanal aus den Suchproben ohne inhaltlichen Anker wird keine Flaeche"
+
+
+def test_a_filler_word_from_our_own_description_is_not_a_content_anchor(session):
+    """Produktionsfall: „Boyce Avenue Acoustic Cover …“ hatte als inhaltlichen Anker das Wort „will“."""
+    from app.models import DiscoveryItem
+    session.get(Video, "b").title = "Sealand Shine On"
+    session.commit()
+    profile(session, video_id="b", tags=["swiss pop", "acoustic"],
+            description="Shine On will euch durch den Sommer tragen. Schweizer Pop.",
+            topics=["https://en.wikipedia.org/wiki/Pop_music"], channel_description="Wir wollen Pop machen.",
+            channel_keywords="pop will")
+    # „will“ steht in vielen fremden Titeln – der Korpus sagt selbst, dass es kein Thema ist.
+    for index in range(6):
+        session.add(DiscoveryItem(video_id=f"FOREIGN{index:04d}", channel_id="UCx",
+                                  title=f"I will always love you {index}", channel_title="Covers",
+                                  views=1000, tags=[], via={"queries": ["pop"]}, first_seen_day=TODAY,
+                                  last_seen_day=TODAY, seen_count=1))
+    session.commit()
+    rows = {row["term"]: row for row in audience.profile_terms(session, session.get(Video, "b"))}
+    assert rows["will"]["attestations"] >= 2 and rows["will"]["df"] >= 3
+    prof = audience.music_profile(session, session.get(Video, "b"))
+    assert "will" not in prof["topics"], "haeufige Allerweltswoerter tragen keinen Beleg"
+    fit = audience.audience_fit({"boyce", "avenue", "acoustic", "cover", "pop", "rock", "will"}, prof,
+                                tags=["acoustic", "cover"])
+    assert fit["class"] is None and "Schublade" in fit["why"]
