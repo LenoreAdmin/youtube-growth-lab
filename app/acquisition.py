@@ -61,11 +61,19 @@ TEASER_SECONDS = 90         # Kuerzer ist ein Teaser, kein vollstaendiges Musikv
 # Themennaehe ohne musikalische Evidenz ist eine schwaechere Spur und darf nicht oben stehen.
 FIT_FACTOR = {"neighbourhood": 1.0, "genre": 1.0, "topic": 0.8}
 ANCHOR_FACTOR = {"neighbourhood": 1.0, "semantic": 1.0, "style": 0.85}
+# Eine Flaeche, bei der nur das Thema geteilt ist, bleibt eine Hypothese – auch mit 1,13 Millionen
+# Abonnenten. Reichweite darf fehlende musikalische Naehe nicht ersetzen (Fall Travel With Koushik).
+TOPIC_ONLY_CAP = 30.0
 
 
 def fit_weight(fit):
     """Wie stark wiegt dieser Fit? Ein gemeinsamer Ort wiegt mehr als eine gemeinsame Stilschublade."""
     return FIT_FACTOR[fit["class"]]*ANCHOR_FACTOR.get(fit.get("anchor") or "semantic", 1.0)
+
+
+def capped(score, fit):
+    """Ohne belegte musikalische Naehe kann eine Flaeche nicht aussehen wie eine starke Chance."""
+    return min(score, TOPIC_ONLY_CAP) if fit.get("class") == "topic" else score
 # Wer in eine Playlist aufgenommen wird, wird dort gespielt; ein Kommentar laedt nur zum Klick ein.
 # Das ist ein Unterschied im Mechanismus, nicht in der Sympathie – und er gehoert in die Reihenfolge.
 MECHANISM_FACTOR = {"curated_playlist": 1.0, "pool_channel": 0.85}
@@ -698,10 +706,10 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
                    "audience_fit": fit, "demand_source": "public_youtube_search", "why": reason,
                    "uncertainty": ("mittel: Größe und Inhalt sind öffentlich belegt, ob der Kurator reagiert und ob "
                                    "daraus Views entstehen, ist offen.")},
-                  {"traffic_potential": score_candidate(shared or ["nachbarschaft", "belegt"], pool.views,
-                                                        pool.subscribers,
-                                                        entry.get("weight", 1.0)*fit_weight(fit)
-                                                        * MECHANISM_FACTOR["curated_playlist"]),
+                  {"traffic_potential": capped(score_candidate(shared or ["nachbarschaft", "belegt"], pool.views,
+                                                               pool.subscribers,
+                                                               entry.get("weight", 1.0)*fit_weight(fit)
+                                                               * MECHANISM_FACTOR["curated_playlist"]), fit),
                    "expected_weekly_views": None, "item_count": pool.item_count, "owner_subscribers": pool.subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -727,9 +735,9 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
                            + (f" Passendes eigenes Video: „{chosen[0].title}“." if chosen else "")
                            + " Dieses Publikum kennt uns nicht."),
                    "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss nicht gemessen."},
-                  {"traffic_potential": score_candidate(shared, pool.views, pool.subscribers,
-                                                        entry.get("weight", 1.0)*fit_weight(fit)
-                                                        * MECHANISM_FACTOR["pool_channel"]),
+                  {"traffic_potential": capped(score_candidate(shared, pool.views, pool.subscribers,
+                                                               entry.get("weight", 1.0)*fit_weight(fit)
+                                                               * MECHANISM_FACTOR["pool_channel"]), fit),
                    "expected_weekly_views": None, "subscribers": pool.subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -806,9 +814,9 @@ def collect_candidates(session, vocab, learned, store):
                    "why": (f"Dieses Video hat {item.views} öffentlich gezählte Views und liegt thematisch neben uns: "
                            f"{corroboration} Sein Publikum ist belegt vorhanden – es erreicht uns nur noch nicht."),
                    "uncertainty": "mittel: Reichweite öffentlich belegt, eigener Zufluss noch nicht gemessen."},
-                  {"traffic_potential": score_candidate(shared, item.views, subscribers,
-                                                        learned.get("candidate_video", {}).get("weight", 1.0)
-                                                        * fit_weight(fit)),
+                  {"traffic_potential": capped(score_candidate(shared, item.views, subscribers,
+                                                               learned.get("candidate_video", {}).get("weight", 1.0)
+                                                               * fit_weight(fit)), fit),
                    "expected_weekly_views": None, "public_views": item.views,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -826,9 +834,9 @@ def collect_candidates(session, vocab, learned, store):
                    "why": (f"„{channel.title}“ hat {subscribers} Abonnenten und veröffentlicht thematisch nahe Videos: "
                            f"{corroboration} Dort ist ein Publikum, das zu unserem Video passt."),
                    "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss noch nicht gemessen."},
-                  {"traffic_potential": score_candidate(shared, channel.views, subscribers,
-                                                        learned.get("candidate_channel", {}).get("weight", 1.0)
-                                                        * fit_weight(fit)),
+                  {"traffic_potential": capped(score_candidate(shared, channel.views, subscribers,
+                                                               learned.get("candidate_channel", {}).get("weight", 1.0)
+                                                               * fit_weight(fit)), fit),
                    "expected_weekly_views": None, "subscribers": subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -1404,6 +1412,36 @@ def audience_report(session):
     return rows
 
 
+def assessment(queue, pools, blocked, protected):
+    """Ehrliche Gesamtaussage: gibt es heute eine vertretbare Aktion – oder ausdruecklich keine?
+
+    Ein leeres JETZT TUN ist kein Fehler, sondern eine Aussage. Sie muss dastehen, damit niemand aus
+    Verlegenheit eine schwache Flaeche ausprobiert.
+    """
+    strong = [e for e in queue if (e.get("audience_fit") or {}).get("class") in ("neighbourhood", "genre")]
+    weak = [e for e in queue if e not in strong]
+    if strong:
+        first = strong[0]
+        return {"status": "actionable", "actions": len(strong),
+                "text": (f"Vertretbare Aktion vorhanden: „{first['surface']}“ für {first['title']} – "
+                         f"{(first.get('audience_fit') or {}).get('why', '')}")}
+    if weak:
+        first = weak[0]
+        return {"status": "hypothesis_only", "actions": len(weak),
+                "text": ("Keine belegte musikalische Audience-Nähe gefunden. Was in der Queue steht, ist eine "
+                         f"Hypothese über gemeinsames Thema: „{first['surface']}“ für {first['title']}. "
+                         "Das ist ein Versuch wert, wenn du ihn als Versuch behandelst – kein belegter Kanal.")}
+    reasons = [c["reason"] for c in (pools.get("candidates") or []) if c.get("kept") is False and c.get("reason")]
+    return {"status": "none", "actions": 0,
+            "text": ("Aktuell keine ausreichend gute Traffic-Aktion. "
+                     + (f"Häufigster Grund bei {len(reasons)} geprüften Kandidaten: „{reasons[0][:180]}“ " if reasons
+                        else "")
+                     + (f"{len(blocked)} Fläche(n) sind wegen eines laufenden Experiments nicht trennbar. "
+                        if blocked else "")
+                     + (f"{len(protected)} bestehende Quelle(n) bleiben geschützt und werden nur gemessen."
+                        if protected else "").strip())}
+
+
 def pool_report(session, active_queries=()):
     """Was die Pool-Suche wirklich gefunden hat und was damit passiert ist - ohne Beschoenigung."""
     probe, run = {}, session.scalar(select(DiscoveryRun).order_by(DiscoveryRun.id.desc()))
@@ -1493,8 +1531,10 @@ def overview(session, now=None):
                   "why_not": (s.access or {}).get("why_not")}
                  for s in sorted(surfaces, key=lambda s: -((s.evidence or {}).get("measured_views_90d") or 0))
                  if (s.access or {}).get("protected")]
+    pools_view = pool_report(session, {row["query"] for row in intents_view})
     return {"version": VERSION, "day": str(latest) if latest else None, "today": str(today),
             "protected_sources": protected[:12],
+            "assessment": assessment(queue[:QUEUE_LIMIT], pools_view, blocked, protected),
             "traffic_queue": queue[:QUEUE_LIMIT], "running": running, "results": results[:8],
             "blocked": blocked[:8], "surfaces_found": len(surfaces),
             "surfaces": [{"kind": s.kind, "key": s.key, "title": s.title, "url": s.url, "video_id": s.video_id,
@@ -1504,8 +1544,7 @@ def overview(session, now=None):
                           "why": (s.evidence or {}).get("why")}
                          for s in sorted(surfaces, key=lambda s: -(s.scores or {}).get("traffic_potential", 0))[:12]],
             "scoreboard": scoreboard(session), "learning": weights(session), "levers": lever_record(session),
-            "pools": pool_report(session, {row["query"] for row in intents_view}),
-            "audience_intents": intents_view,
+            "pools": pools_view, "audience_intents": intents_view,
             "capabilities": {"used": ["Eigene Analytics: externe Referrer (EXT_URL-Detail)",
                                       "Eigene Analytics: empfehlende Videos und deren Kanäle",
                                       "Eigene Analytics: reale Suchbegriffe",

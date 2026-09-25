@@ -347,7 +347,7 @@ def pool_queries(session, videos=None, generic=None, limit=MAX_POOL_SEARCHES):
     return sorted(plans, key=lambda j: j["search"] != "playlist")[:limit]
 
 
-def verify_pool_membership(session, client, quota, videos, stats, limit=12):
+def verify_pool_membership(session, client, quota, videos, stats, limit=40):
     """Fuer gefundene Playlists festhalten, ob unsere Musik schon darin liegt.
 
     Ohne diese Angabe darf keine Playlist angeschrieben werden: eine bestehende Platzierung ist eine
@@ -356,14 +356,18 @@ def verify_pool_membership(session, client, quota, videos, stats, limit=12):
     if not hasattr(client, "playlist_contains"):
         return
     own_ids = [v.id for v in videos]
-    checked = 0
+    checked, open_left = 0, 0
+    # Die zuletzt gefundenen zuerst: sie sind die Kandidaten, die heute in der Queue landen koennten.
+    # Vorher lief die Pruefung nach den Suchen und hinter allen Altfunden – dann war das Tagesbudget weg
+    # und genau die neuen Playlists blieben ungeprueft.
     for pool in session.scalars(select(AudiencePool).where(AudiencePool.kind == "playlist")
-                                .order_by(AudiencePool.last_seen_day.desc())):
+                                .order_by(AudiencePool.last_seen_day.desc(), AudiencePool.id.desc())):
         details = pool.details or {}
-        if "contains_own" in details or checked >= limit:
+        if "contains_own" in details:
             continue
-        if quota.remaining() < LIST_COST*(len(own_ids)+2):
-            return
+        if checked >= limit or quota.remaining() < LIST_COST*(len(own_ids)+2):
+            open_left += 1
+            continue
         quota.spend(LIST_COST*len(own_ids))
         try:
             contains = bool(client.playlist_contains(pool.key, own_ids))
@@ -372,7 +376,9 @@ def verify_pool_membership(session, client, quota, videos, stats, limit=12):
         pool.details = {**details, "contains_own": contains}
         checked += 1
         stats["membership_checked"] = stats.get("membership_checked", 0)+1
+    stats["membership_open"] = open_left
     session.commit()
+    log.info("discovery pools membership checked=%s open=%s units_left=%s", checked, open_left, quota.remaining())
 
 
 def probe_audience_pools(session, client, quota, videos, now, budget, stats):
@@ -404,6 +410,12 @@ def probe_audience_pools(session, client, quota, videos, now, budget, stats):
     own_channel = {v.channel_id for v in videos}
 
     def store(kind, key, title, url, **fields):
+        # Geprueftes bleibt geprueft: ohne dieses Zusammenfuehren wuerde jeder neue Fund die
+        # Mitgliedschaftspruefung und das letzte Verdikt ueberschreiben.
+        previous = session.scalar(select(AudiencePool).where(AudiencePool.kind == kind, AudiencePool.key == key))
+        keep = {k: v for k, v in ((previous.details or {}) if previous else {}).items()
+                if k in ("contains_own", "verdict")}
+        fields["details"] = {**keep, **(fields.get("details") or {})}
         statement = upsert(session, AudiencePool).values(kind=kind, key=key, title=(title or "")[:300],
                                                         url=url[:500], first_seen_day=today, last_seen_day=today,
                                                         **fields)
@@ -733,6 +745,7 @@ def _run(client, now, budget, force):
             probe_queries(s, client, quota, videos, now, budget, stats)
             collect_channels(s, client, quota, now, budget, stats)
             try:
+                verify_pool_membership(s, client, quota, videos, stats)
                 probe_audience_pools(s, client, quota, videos, now, budget, stats)
                 verify_pool_membership(s, client, quota, videos, stats)
             except (SyncBudgetExceeded, QuotaExhausted, Throttled):

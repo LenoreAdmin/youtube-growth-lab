@@ -72,6 +72,10 @@ function renderTraffic(a){
  $("trafficPools").innerHTML=`<h3>Suche nach fremden Playlists und Kanälen</h3>`
   +(pools.searched?`<ul>${pq}</ul>`:`<p class="muted">${esc(pools.note||"In diesem Lauf wurde keine Pool-Suche ausgeführt.")}</p>`)
   +(pc?`<p><strong>Kandidaten und Filtergründe</strong> (${num(pools.kept)} aufgenommen, ${num(pools.rejected)} verworfen)</p><ul>${pc}</ul>`:"");
+ // Die Gesamtaussage steht oben: eine vertretbare Aktion, eine Hypothese oder ausdruecklich keine.
+ const ass=a.assessment||{};
+ $("trafficVerdict").textContent=ass.text||"";
+ $("trafficVerdict").className="notice "+(ass.status==="actionable"?"ok":ass.status==="hypothesis_only"?"warn":"muted");
  $("trafficKpi").innerHTML=[["Zusätzliche Views (attribuiert)",num(board.attributed_views_delta),"aus gemessenen Quellen seit Start"],
   ["Laufende Traffic-Aktionen",num(board.running),"von dir bestätigt"],
   ["Ausgewertet",num(board.evaluated),"mit Quellen-Attribution"],

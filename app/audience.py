@@ -415,7 +415,11 @@ def intents(session, videos=None, generic=None):
 MUSIC_TOPIC_MARKERS = ("music", "musik", "song", "genre", "band", "artist")
 # Dachgenres. „pop“ und „rock“ teilen wir mit einem grossen Teil der Plattform; allein beweisen sie
 # keine gemeinsame Zielgruppe. Genau darueber kamen Avril Lavigne und Cover-Medleys herein.
-UMBRELLA_GENRES = {"pop", "rock", "music", "dance", "electronic", "alternative", "live"}
+# Dazu gehoeren auch die Darbietungsformen: „acoustic“, „cover“, „medley“ beschreiben, wie gespielt wird,
+# nicht fuer wen. Ein Cover-Medley-Kanal lebt von bekannten Liedern, nicht von neuer eigener Musik – die
+# Ueberschneidung „acoustic + pop + rock“ ist deshalb kein Publikumsbeleg (Fall Banda Rock Beats).
+UMBRELLA_GENRES = {"pop", "rock", "music", "dance", "electronic", "alternative", "live", "acoustic", "cover",
+                   "covers", "medley", "mix", "remix", "unplugged", "karaoke", "instrumental", "session"}
 
 
 def music_profile(session, video, generic=None):

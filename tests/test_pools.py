@@ -389,3 +389,34 @@ def test_a_channel_needs_genre_or_neighbourhood_evidence_not_only_english_words(
     assert verdicts["Long Ride Trucking"]["fit_class"] is None
     assert verdicts["Night Ambient Radio"]["kept"] is True
     assert verdicts["Night Ambient Radio"]["fit_class"] in ("genre", "neighbourhood")
+
+
+def test_the_engine_says_plainly_when_no_action_is_good_enough(session):
+    """Ein leeres JETZT TUN ist eine Aussage, kein Fehler – und muss als solche dastehen."""
+    seed_theme(session)
+    pool(session, "channel", "UCnothing", "Kochkanal", subscribers=900000, item_count=800, description="Rezepte",
+         query="night train ambient")
+    aq.collect(session, NOW, http=FakeHttp())
+    view = aq.overview(session, NOW)
+    assert view["traffic_queue"] == []
+    assert view["assessment"]["status"] == "none" and view["assessment"]["actions"] == 0
+    assert "keine ausreichend gute Traffic-Aktion" in view["assessment"]["text"]
+
+
+def test_a_topic_only_fit_is_declared_a_hypothesis_and_capped(session):
+    """Produktionsfall: 1,13 Mio. Abonnenten auf einem Reisekanal sind kein Musikpublikum."""
+    seed_theme(session)
+    pool(session, "channel", "UCtravel", "Travel With Koushik", subscribers=1130000, item_count=500,
+         views=200000000, description="train journey across mongolian railway and the steppe",
+         query="trans mongolian",
+         details={"contains_own": False, "keywords": "travel train journey",
+                  "intent": {"head": ["trans", "mongolian"], "context": [], "label": "„trans mongolian“",
+                             "attestations": 2, "video_id": "a", "kind": "topic_context"}})
+    aq.collect(session, NOW, http=FakeHttp())
+    surface = session.scalar(select(TrafficSurface).where(TrafficSurface.key == "UCtravel"))
+    assert surface.evidence["audience_fit"]["class"] == "topic"
+    assert surface.scores["traffic_potential"] <= aq.TOPIC_ONLY_CAP, "Reichweite ersetzt keine Evidenz"
+    aq.propose(session, NOW)
+    view = aq.overview(session, NOW)
+    assert view["assessment"]["status"] == "hypothesis_only"
+    assert "Hypothese" in view["assessment"]["text"]
