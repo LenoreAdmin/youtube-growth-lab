@@ -386,12 +386,22 @@ def distribution_scarce(f, base):
                                               "note": "Kanalmedian für Impressions noch nicht belastbar."}
 
 
-def measurable(baseline, target_metric=None):
-    """Ohne messbare Ausgangsbasis kann ein Experiment nur „unklar“ ergeben – dann ist es keine Aufgabe."""
+# Eine Maßnahme, deren Zweck es ist, ueberhaupt Auslieferung zu erzeugen, kann keine vorhandene
+# Auslieferung zur Voraussetzung haben. Fuer sie verschiebt sich die Schwelle vom Eintritt zum Ergebnis:
+# als Wirkung zaehlt erst, wenn im Messfenster wirklich lesbare Auslieferung entsteht (siehe _outcome).
+COLD_START_ACTIONS = ("probe_missing_evidence", "create_playlist_context")
+
+
+def measurable(baseline, target_metric=None, action=None):
+    """Ohne messbare Ausgangsbasis kann ein Optimierungsexperiment nur „unklar“ ergeben – dann ist es keine Aufgabe."""
     views = (baseline or {}).get("views_7d") or 0
     impressions = (baseline or {}).get("impressions_7d") or 0
     if views >= MIN_MEASURABLE_VIEWS_7D or impressions >= MIN_MEASURABLE_IMPRESSIONS_7D:
         return True, None
+    if action in COLD_START_ACTIONS:
+        return True, (f"Cold Start: {views} Views und {impressions} Impressions sind der Befund, nicht die "
+                      f"Voraussetzung. Diese Maßnahme soll Auslieferung erzeugen; als Wirkung zaehlt erst, wenn "
+                      f"im Messfenster mindestens {MIN_MEASURABLE_IMPRESSIONS_7D} Impressions entstehen.")
     return False, (f"Keine messbare Ausgangsbasis ({views} Views und {impressions} Impressions in der letzten bekannten "
                    f"Woche; nötig {MIN_MEASURABLE_VIEWS_7D} Views oder {MIN_MEASURABLE_IMPRESSIONS_7D} Impressions). "
                    "Ein Experiment könnte hier nur „unklar“ ergeben.")
@@ -569,6 +579,20 @@ def recent_results(session, limit=6):
     return out
 
 
+def steerable(state, f, action):
+    """Darf eine externe Chance diese Aktion lenken – oder ist zuerst die Auslieferung selbst das Problem?
+
+    Cold Start: bei fast keiner Auslieferung ist die Wortwahl nicht der Engpass. Eine Optimierungsmaßnahme
+    waere hier nicht messbar und wurde bisher deshalb *verworfen* – das Video fiel damit ganz aus der Queue,
+    obwohl der Engine fuer genau diesen Fall den Verteilungs-/Evidenzpfad kennt (distribution_action).
+    Also: ist die Ausgangsbasis fuer die gelenkte Aktion nicht messbar, behaelt der Zustand die Entscheidung.
+    Die Schwelle bleibt unveraendert; sie entscheidet nur, welcher Pfad greift.
+    """
+    if state != "needs_distribution":
+        return True
+    return measurable(baseline_snapshot(f), TARGETS.get(action))[0]     # ohne Cold-Start-Ausnahme
+
+
 def choose_action(state, f, rev, base, experiments, record, external=None, channel=None):
     """Exactly one prioritised action. Winners are protected first; running experiments are measured, not stacked.
     An external opportunity (V6) may steer the action only for organic, non-protected states."""
@@ -583,7 +607,8 @@ def choose_action(state, f, rev, base, experiments, record, external=None, chann
     elif running:
         action, notes = "observe", [f"Experiment #{running[0]['decision_id']} läuft – erst messen, keine weitere Änderung stapeln."]
     elif (external and external.get("actionable") and (external.get("score") or 0) >= EXTERNAL_MIN_SCORE
-            and external.get("context_usable") and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS):
+            and external.get("context_usable") and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS
+            and steerable(state, f, GAP_ACTIONS[external["gap"]])):
         action = "revive_existing_video" if state == "revival_candidate" and external["gap"] != "packaging_opportunity" else GAP_ACTIONS[external["gap"]]
         notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Evidenz: "
                  f"{external.get('evidence_level')}) lenkt die Aktion."]
@@ -942,6 +967,17 @@ def _outcome(row, before, after, base):
     change = (a-b)/max(1.0, b)
     noise = abs(base.get("accel_7d", {}).get("q75", 0.15)) if base else 0.15
     detail = {"metric": key, "before": b, "after": a, "relative_change": change, "channel_weekly_noise_q75": noise}
+    if row.action in COLD_START_ACTIONS and (before.get("impressions") or 0) < MIN_MEASURABLE_IMPRESSIONS_7D:
+        # Aus 5 auf 8 Impressions sind +60 %, aber weiterhin keine Auslieferung. Erst ab der Schwelle ist
+        # das Ergebnis lesbar; darunter bleibt es ausdruecklich unklar.
+        reached = (after.get("impressions") or 0) >= MIN_MEASURABLE_IMPRESSIONS_7D
+        detail = {**detail, "cold_start_floor": MIN_MEASURABLE_IMPRESSIONS_7D, "reached_floor": reached}
+        if not reached:
+            return "inconclusive", {**detail,
+                                    "reason": (f"Weiterhin unter {MIN_MEASURABLE_IMPRESSIONS_7D} Impressions im "
+                                               "Messfenster: es ist keine Auslieferung entstanden, die man lesen "
+                                               "kann.")}
+        return ("positive" if change >= max(0.15, noise) else "neutral" if change > -0.15 else "negative"), detail
     if row.action == "protect_no_change":
         return ("positive" if change >= -0.15 else "negative"), detail
     if change >= max(0.15, noise):
@@ -1255,7 +1291,7 @@ def experiment_queue(ranking, today):
                             "evaluate_after": row["next_evaluation"], "target_metric": row["target_metric"],
                             "note": "Läuft seit deiner Bestätigung – bis zur Auswertung nichts weiter an diesem Video ändern."})
             continue
-        ok, why = measurable(row.get("baseline"), row.get("target_metric"))
+        ok, why = measurable(row.get("baseline"), row.get("target_metric"), row.get("action"))
         if not ok:
             # Ohne messbare Ausgangsbasis waere jedes Ergebnis "unklar": sichtbar machen, aber nicht priorisieren.
             not_testable.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],

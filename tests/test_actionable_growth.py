@@ -395,3 +395,34 @@ def test_a_proxy_intent_never_replaces_a_chance_from_our_own_analytics(session):
     from app import growth_engine as engine
     source = inspect.getsource(engine.run)
     assert 'evidence_level") != "own_analytics"' in source
+
+
+
+
+def test_too_little_delivery_keeps_the_decision_with_the_cold_start_path():
+    """Produktionsfall Shine On: 1 View und 5 Impressions/Woche bei belegter Suggested-Chance.
+
+    Vorher lenkte die externe Chance auf target_suggested_cluster – eine Wortlaut-Maßnahme –, und die
+    Messbarkeitsschwelle verwarf sie danach komplett; das Video fiel aus der Queue. Bei fast keiner
+    Auslieferung ist der Wortlaut nicht der Engpass, also behaelt der Zustand die Entscheidung und der
+    vorhandene Verteilungs-/Evidenzpfad greift.
+    """
+    starved = {"views_7d": 1, "impressions_7d": 5}
+    healthy = {"views_7d": 40, "impressions_7d": 900}
+    assert ge.steerable("needs_distribution", starved, "target_suggested_cluster") is False
+    assert ge.steerable("needs_distribution", starved, "target_search_opportunity") is False
+    assert ge.steerable("needs_distribution", healthy, "target_suggested_cluster") is True
+    assert ge.steerable("scale_opportunity", starved, "target_suggested_cluster") is True, "nur der Cold Start"
+    # Die Schwelle ist nicht gesenkt: sie sperrt die Optimierung weiter und laesst nur die Evidenzbeschaffung zu.
+    assert ge.measurable(starved, "discovery_views_7d")[0] is False
+    ok, note = ge.measurable(starved, "impressions_7d", "probe_missing_evidence")
+    assert ok is True and "Befund, nicht die" in note
+    # Und sie wirkt beim Ergebnis: ohne lesbare Auslieferung bleibt der Versuch ausdruecklich unklar.
+    row = SimpleNamespace(target_metric="impressions_7d", action="probe_missing_evidence")
+    small = {"paid_views": 0, "observed_days": 7, "impressions": 5, "views": 1, "ctr": None, "watch_minutes": 1,
+             "discovery_views": 1, "subscribers": 0}
+    barely = {**small, "impressions": 8}
+    real = {**small, "impressions": 120}
+    assert ge._outcome(row, small, barely, BASE)[0] == "inconclusive"
+    assert "keine Auslieferung entstanden" in ge._outcome(row, small, barely, BASE)[1]["reason"]
+    assert ge._outcome(row, small, real, BASE)[0] == "positive"
