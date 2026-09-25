@@ -45,6 +45,12 @@ FIT_LABELS = {"neighbourhood": "belegte Nachbarschaft", "genre": "gemeinsames Ge
 TEASER_SECONDS = 90         # Kuerzer ist ein Teaser, kein vollstaendiges Musikvideo.
 # Themennaehe ohne musikalische Evidenz ist eine schwaechere Spur und darf nicht oben stehen.
 FIT_FACTOR = {"neighbourhood": 1.0, "genre": 1.0, "topic": 0.8}
+ANCHOR_FACTOR = {"neighbourhood": 1.0, "semantic": 1.0, "style": 0.85}
+
+
+def fit_weight(fit):
+    """Wie stark wiegt dieser Fit? Ein gemeinsamer Ort wiegt mehr als eine gemeinsame Stilschublade."""
+    return FIT_FACTOR[fit["class"]]*ANCHOR_FACTOR.get(fit.get("anchor") or "semantic", 1.0)
 # Wer in eine Playlist aufgenommen wird, wird dort gespielt; ein Kommentar laedt nur zum Klick ein.
 # Das ist ein Unterschied im Mechanismus, nicht in der Sympathie – und er gehoert in die Reihenfolge.
 MECHANISM_FACTOR = {"curated_playlist": 1.0, "pool_channel": 0.85}
@@ -472,8 +478,9 @@ def candidate_matches(session, vocab, generic=None, profiles=None):
             profile = profiles.get(video_id)
             if profile is None:
                 continue
-            candidate = audience.audience_fit(specific(words & own, generic) + sorted(words & profile["genres"]),
-                                              profile, tags=item.tags or [],
+            # Bewusst die vollstaendigen Worte des Kandidaten: der Fit prueft selbst, was davon zu uns
+            # gehoert, und braucht den Rest, um zu erkennen, ob der Ort ueberhaupt musikalisch ist.
+            candidate = audience.audience_fit(words | (own & words), profile, tags=item.tags or [],
                                               neighbourhood=[item.title] if item.video_id in neighbours else ())
             if candidate["class"] is None:
                 continue
@@ -573,6 +580,11 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
                    "gemeinsame Allerweltswoerter genuegen nicht.")
             continue
         if pool.kind == "playlist":
+            if not full_release(chosen[0]):
+                decide(f"Fuer eine Playlist-Anfrage fehlt ein vollstaendiges Musikvideo mit Passung: "
+                       f"„{chosen[0].title}“ ist ein Teaser oder Ausschnitt, und ein Kurator kann nur ein "
+                       f"ganzes Stueck aufnehmen.")
+                continue
             if (pool.item_count or 0) < MIN_PLAYLIST_ITEMS:
                 decide(f"Kein gepflegter Ort: {pool.item_count or 0} Titel, mindestens {MIN_PLAYLIST_ITEMS} noetig.")
                 continue
@@ -595,7 +607,7 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
                                    "daraus Views entstehen, ist offen.")},
                   {"traffic_potential": score_candidate(shared or ["nachbarschaft", "belegt"], pool.views,
                                                         pool.subscribers,
-                                                        entry.get("weight", 1.0)*FIT_FACTOR[fit["class"]]
+                                                        entry.get("weight", 1.0)*fit_weight(fit)
                                                         * MECHANISM_FACTOR["curated_playlist"]),
                    "expected_weekly_views": None, "item_count": pool.item_count, "owner_subscribers": pool.subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
@@ -623,7 +635,7 @@ def collect_pools(session, vocab, learned, generic, store, profiles=None):
                            + " Dieses Publikum kennt uns nicht."),
                    "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss nicht gemessen."},
                   {"traffic_potential": score_candidate(shared, pool.views, pool.subscribers,
-                                                        entry.get("weight", 1.0)*FIT_FACTOR[fit["class"]]
+                                                        entry.get("weight", 1.0)*fit_weight(fit)
                                                         * MECHANISM_FACTOR["pool_channel"]),
                    "expected_weekly_views": None, "subscribers": pool.subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
@@ -703,7 +715,7 @@ def collect_candidates(session, vocab, learned, store):
                    "uncertainty": "mittel: Reichweite öffentlich belegt, eigener Zufluss noch nicht gemessen."},
                   {"traffic_potential": score_candidate(shared, item.views, subscribers,
                                                         learned.get("candidate_video", {}).get("weight", 1.0)
-                                                        * FIT_FACTOR[fit["class"]]),
+                                                        * fit_weight(fit)),
                    "expected_weekly_views": None, "public_views": item.views,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,
@@ -723,7 +735,7 @@ def collect_candidates(session, vocab, learned, store):
                    "uncertainty": "mittel: Kanalgröße öffentlich belegt, eigener Zufluss noch nicht gemessen."},
                   {"traffic_potential": score_candidate(shared, channel.views, subscribers,
                                                         learned.get("candidate_channel", {}).get("weight", 1.0)
-                                                        * FIT_FACTOR[fit["class"]]),
+                                                        * fit_weight(fit)),
                    "expected_weekly_views": None, "subscribers": subscribers,
                    "note": "Relativer Wert für diesen Kanal, keine Wahrscheinlichkeit; kein gemessener eigener Traffic."},
                   {"actionable": True, "rules": NO_SPAM, "manual": True,

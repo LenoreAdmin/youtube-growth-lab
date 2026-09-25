@@ -245,3 +245,31 @@ def test_a_shared_genre_with_a_musical_candidate_is_a_real_fit(session):
     session.get(Video, "b").title = "Sealand Shine On"
     plain = audience.audience_fit({"dead", "south", "good", "company", "out"}, prof, tags=["bluegrass"])
     assert plain["class"] is None
+
+
+def test_a_broad_genre_alone_is_a_drawer_not_an_audience(session):
+    """Produktionsfall: Avril Lavigne und Cover-Medleys kamen ueber „pop“ und „rock“ herein."""
+    session.get(Video, "b").title = "Sealand Shine On"
+    session.commit()
+    profile(session, video_id="b", tags=["swiss pop", "pop", "acoustic"], description="Schweizer Pop aus Zuerich.",
+            topics=["https://en.wikipedia.org/wiki/Pop_music"])
+    prof = audience.music_profile(session, session.get(Video, "b"))
+    mainstream = audience.audience_fit({"avril", "lavigne", "complicated", "pop"}, prof, tags=["pop", "rock"])
+    assert mainstream["class"] is None and "Schublade" in mainstream["why"]
+    # Mit einem Anker aus unseren eigenen Daten wird daraus ein belegter Fit.
+    swiss = audience.audience_fit({"swiss", "pop", "music", "schweizer"}, prof, tags=["pop"])
+    assert swiss["class"] == "genre" and swiss["anchor"] == "semantic" and "swiss" in swiss["topic"]
+
+
+def test_the_teaser_is_never_offered_to_a_playlist_curator(session):
+    """Produktionsfall: die Swiss-Rock-Playlist bekam den 11AM-Album-Teaser angeboten."""
+    from app.models import Video as V
+    from app import acquisition as acq
+    session.add(V(id="t", channel_id=session.get(Video, "a").channel_id, title="11AM Album - Teaser",
+                  published_at=session.get(Video, "a").published_at, duration_seconds=42, active=True))
+    session.commit()
+    assert acq.full_release(session.get(Video, "t")) is False
+    session.get(Video, "a").title = "Sealand Trainstories"
+    session.get(Video, "a").duration_seconds = 214
+    session.commit()
+    assert acq.full_release(session.get(Video, "a")) is True

@@ -413,6 +413,9 @@ def intents(session, videos=None, generic=None):
 
 
 MUSIC_TOPIC_MARKERS = ("music", "musik", "song", "genre", "band", "artist")
+# Dachgenres. „pop“ und „rock“ teilen wir mit einem grossen Teil der Plattform; allein beweisen sie
+# keine gemeinsame Zielgruppe. Genau darueber kamen Avril Lavigne und Cover-Medleys herein.
+UMBRELLA_GENRES = {"pop", "rock", "music", "dance", "electronic", "alternative", "live"}
 
 
 def music_profile(session, video, generic=None):
@@ -457,27 +460,46 @@ def audience_fit(words, profile, intent_hit=None, neighbourhood=(), topics=(), t
     Alles andere ist kein Fit. Fuellwoerter, Credits und Formatwoerter zaehlen nie mit, egal wie viele.
     """
     words = {w for w in words if w not in HELPER_WORDS and w not in LABEL_WORDS}
-    genres = sorted((profile["genres"] | profile["moods"]) & words)
+    genres = sorted(profile["genres"] & words)
+    moods = sorted(profile["moods"] & words)
+    style = sorted(set(genres) | set(moods))
     places = sorted(profile["places"] & words)
     topics_hit = sorted(profile["topics"] & words)
     semantic = places+topics_hit
     intent_head = sorted(set((intent_hit or {}).get("head") or []) & words)
-    shared = sorted(set(genres+semantic+intent_head))
+    shared = sorted(set(style+semantic+intent_head))
     if neighbourhood:
-        return {"class": "neighbourhood", "genre": genres, "topic": semantic or intent_head,
-                "shared": shared, "neighbourhood": list(neighbourhood)[:3],
+        return {"class": "neighbourhood", "anchor": "neighbourhood", "genre": style,
+                "topic": semantic or intent_head, "shared": shared, "neighbourhood": list(neighbourhood)[:3],
                 "why": ("YouTube liefert uns in dieser Nachbarschaft bereits aus: "
                         f"{', '.join(list(neighbourhood)[:2])}. Das ist gemessene Naehe, keine Wortaehnlichkeit.")}
-    if genres and (is_musical(words, topics, tags) or len(shared) >= 2):
-        return {"class": "genre", "genre": genres, "topic": semantic or intent_head, "shared": shared,
-                "why": (f"Gemeinsames Genre bzw. gemeinsame Stimmung: {', '.join(genres)}"
-                        + (f"; zusaetzlich inhaltlich: {', '.join(semantic or intent_head)}"
-                           if (semantic or intent_head) else "")
-                        + ". Der Ort ist selbst musikalisch klassifiziert."
-                        if is_musical(words, topics, tags) else
-                        f"Gemeinsames Genre bzw. gemeinsame Stimmung: {', '.join(genres)} und "
-                        f"{len(shared)} inhaltliche Begriffe: {', '.join(shared)}.")}
-    strong = sorted(set(semantic) | set(intent_head))
+    # Anker sind alle inhaltlich klassifizierten eigenen Begriffe, die dort ebenfalls stehen – auch ein
+    # einfach belegter wie „swiss“ oder „zuerich“. Als Themenkopf taugt er nicht, als Beweis, dass es nicht
+    # nur eine Genre-Schublade ist, sehr wohl.
+    extra = {w for w in words
+             if (profile.get("terms", {}).get(w) or {}).get("category") in TOPIC_CATEGORIES}
+    anchored = sorted((set(semantic) | set(intent_head) | extra)-set(style)-UMBRELLA_GENRES)
+    specific_style = [s for s in style if s not in UMBRELLA_GENRES]
+    # Ein Dachgenre allein ist kein Publikum. Es braucht einen Anker: einen Ort, ein Motiv, eine Stimmung
+    # oder einen eigenen, engeren Stilbegriff.
+    if style and is_musical(words, topics, tags) and (anchored or len(style) >= 2 or specific_style):
+        anchor = "semantic" if anchored else "style"
+        return {"class": "genre", "anchor": anchor, "genre": style, "topic": anchored, "shared": shared,
+                "why": (f"Gemeinsamer Stil: {', '.join(style)}"
+                        + (f", und inhaltlich derselbe Bezug: {', '.join(anchored)}" if anchored
+                           else f" (davon {', '.join(specific_style)} ausserhalb der breiten Sammelgenres)"
+                           if specific_style else f" in {len(style)} Merkmalen")
+                        + ". Der Ort ist selbst musikalisch klassifiziert, das Publikum hoert also "
+                          "vergleichbare Musik.")}
+    if style and not (anchored or len(style) >= 2 or specific_style):
+        return {"class": None, "anchor": None, "genre": style, "topic": anchored, "shared": shared,
+                "why": (f"Nur das breite Genre {', '.join(style)} ist gemeinsam – das teilen wir mit einem "
+                        "grossen Teil der Plattform. Ohne Ort, Motiv, Stimmung oder engeren Stilbegriff ist das "
+                        "kein belegtes Publikum, sondern eine Schublade.")}
+    # Fuer die Themenklasse zaehlen inhaltliche Begriffe und engere Stilbegriffe zusammen, aber mindestens
+    # einer muss inhaltlich sein: „train“ plus „night“ ist ein Motiv, „rock“ plus „acoustic“ nur eine Schublade.
+    core = sorted(set(semantic) | set(intent_head))
+    strong = sorted(set(core) | {s for s in style if s not in UMBRELLA_GENRES}) if core else core
     if len(strong) == 1 and strong[0] in profile.get("rare", ()):
         # Ein einzelner, sehr spezifischer eigener Begriff traegt, wenn der Kandidat selbst derselben
         # Kategorie zugeordnet ist: „mongolian“ plus ein Reise-/Bahnwort ist ein Motiv, kein Wortzufall.
@@ -486,16 +508,17 @@ def audience_fit(words, profile, intent_hit=None, neighbourhood=(), topics=(), t
                   MOOD_WORDS if strong[0] in MOOD_WORDS else None)
         echo = sorted((words & family)-set(strong)) if family else []
         if echo:
-            return {"class": "topic", "genre": genres, "topic": strong+echo, "shared": sorted(set(shared+echo)),
+            return {"class": "topic", "anchor": "semantic", "genre": style, "topic": strong+echo,
+                    "shared": sorted(set(shared+echo)),
                     "why": (f"Der spezifische eigene Begriff „{strong[0]}“ steht dort, und der Ort ist derselben "
                             f"Kategorie zugeordnet ({', '.join(echo[:2])}). Das ist ein gemeinsames Motiv, keine "
                             "Wortgleichheit. Musikalische Naehe ist damit nicht belegt.")}
     if len(strong) >= MIN_ATTESTATIONS:
-        return {"class": "topic", "genre": genres, "topic": strong, "shared": shared,
+        return {"class": "topic", "anchor": "semantic", "genre": style, "topic": strong, "shared": shared,
                 "why": (f"Inhaltliche Naehe ueber {', '.join(strong)} – Begriffe mit erkennbarer Bedeutung "
                         "(Ort, Motiv oder mehrfach belegtes Thema), nicht bloss gemeinsame englische Woerter. "
                         "Musikalische Naehe ist damit nicht belegt: das Publikum teilt das Thema, nicht den Stil.")}
-    return {"class": None, "genre": genres, "topic": strong, "shared": shared,
+    return {"class": None, "anchor": None, "genre": style, "topic": strong, "shared": shared,
             "why": ("Keine belegbare Audience-Naehe: es bleiben "
                     + (f"nur {', '.join(shared)}" if shared else "keine inhaltlichen Begriffe")
                     + ". Gemeinsame Allerwelts- oder Fuellwoerter beweisen keine gemeinsame Zielgruppe.")}
