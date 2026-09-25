@@ -95,7 +95,7 @@ LEVERS = {"protect_no_change": "keiner – bewusst keine Änderung", "observe": 
           "improve_discovery": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video",
           "cross_promote": "interne Verlinkung aus dem stärkeren eigenen Video",
           "create_followup_content": "neues Video", "target_search_opportunity": "Wortlaut in Beschreibung und Kapiteln",
-          "target_suggested_cluster": "Wortlaut in Beschreibung und Playlist-Benennung",
+          "target_suggested_cluster": "Wortlaut der Beschreibung dieses Videos",
           "packaging_for_audience": "genau eine Packaging-Dimension",
           "revive_existing_video": "interne Verlinkung und Playlist-Platzierung",
           "distribute_playlist_context": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video",
@@ -116,7 +116,8 @@ DEFERRED_LEVERS = {"distribute_playlist_context": ["Beschreibungstext auf ein be
                    "create_playlist_context": ["Endscreen-Verlinkung", "Beschreibungstext ausrichten",
                                                "Titel oder Thumbnail testen"],
                    "target_search_opportunity": ["Playlist-Platzierung", "Titel"],
-                   "target_suggested_cluster": ["Titel", "Thumbnail"]}
+                   "target_suggested_cluster": ["Titel", "Thumbnail", "Playlist-Benennung (eigenes Experiment und "
+                                                "nur, wenn eine Playlist existiert)"]}
 # Die beeinflussbaren Eigenschaften des eigenen Assets, die auf algorithmische Auslieferung zielen.
 # Interne Wegeleitung (Endscreen, Playlist, Verlinkung) ist ausdruecklich KEIN Growth-Mechanismus und
 # niemals ein Ersatz, nur damit ein Experiment existiert.
@@ -807,8 +808,10 @@ def experiment_steps(action, title, f, external, channel):
             "Titel, Thumbnail und Playlist-Platzierung bleiben in diesem Fenster unverändert – das sind eigene Experimente.",
             hold],
         "target_suggested_cluster": [
-            f"Nur den Wortlaut: Themenkontext {topic} in Beschreibung und Playlist-Benennung spiegeln."+surface,
-            "Titel, Thumbnail und Endscreens bleiben in diesem Fenster unverändert.",
+            f"Nur den Wortlaut: Themenkontext {topic} in den ersten zwei Beschreibungszeilen von „{title}“ "
+            "aufnehmen, in der Sprache der Zielgruppe und ohne Clickbait."+surface,
+            "Sonst nichts: Titel, Thumbnail und Endscreens bleiben unverändert, und es wird keine Playlist "
+            "angelegt oder umbenannt – das wären eigene Experimente.",
             hold],
         "improve_discovery": link,
         "cross_promote": link,
@@ -862,7 +865,7 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
         "create_followup_content": "Muster funktioniert: verwandtes Folgevideo als vorregistriertes Experiment.",
         "observe": "Keine belastbare Änderung ableitbar oder Messung läuft: beobachten und Daten sammeln.",
         "target_search_opportunity": f"Reale/proxy Suchnachfrage „{(external or {}).get('key', '')}“ passt zum Video: Titel-/Beschreibungswortlaut auf diese Suchintention ausrichten (ohne Clickbait), Kapitel und Playlist-Kontext ergänzen.",
-        "target_suggested_cluster": f"Nachbarvideo/-cluster „{(external or {}).get('audience', '')}“ erreicht eine passende Audience: Endscreens, Playlists und Beschreibung auf diesen Themenkontext ausrichten, damit die Empfehlung neben diesen Videos wahrscheinlicher wird.",
+        "target_suggested_cluster": f"YouTube liefert uns bereits neben „{(external or {}).get('audience', '')}“ aus. Trägt die Beschreibung dieses Videos denselben Themenkontext in der Sprache dieser Zuschauer, wird die Zuordnung eindeutiger und die Empfehlung neben diesen Videos wahrscheinlicher – zusätzliche Auslieferung dort, wo das passende Publikum nachweislich schon ist.",
         "packaging_for_audience": f"Das Video passt zu „{(external or {}).get('key', '')}“, aber Titel/Thumbnail sprechen diese Audience nicht an: Packaging für diese Zielgruppe testen (eine Dimension).",
         "revive_existing_video": f"Altes Video mit Revival-Signalen und externer Chance „{(external or {}).get('key', '')}“: gezielt für diese Audience reaktivieren (Playlist, Endscreens, Community-Post, ggf. Titel).",
         "distribute_playlist_context": "Kaum Auslieferung bei funktionierendem Paket: Verteilung über Playlist-Kontext und Endscreens erhöhen, "

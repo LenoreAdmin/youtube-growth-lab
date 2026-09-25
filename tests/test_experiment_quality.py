@@ -147,3 +147,23 @@ def test_every_growth_action_names_its_discovery_surface_and_certainty():
     assert entry["reliability"] in (ge.RELIABLE, ge.INDICATIVE)
     js = Path("app/static/app.js").read_text(encoding="utf-8")
     assert "Algorithmische Fläche" in js and "Aussagekraft" in js
+
+
+def test_the_suggested_cluster_measure_touches_exactly_one_existing_asset():
+    """Produktionsfehler: der Vorschlag nannte Beschreibung UND Playlist-Benennung – ohne vorhandene Playlist."""
+    f = starved(traffic_total_7d=4)
+    external = {"audience": "Mihai Ciobanu Anii cei mai dragi din viata mea", "key": "nachbarschaft",
+                "actionable": True, "evidence_level": "own_analytics", "score": 61.1, "context_usable": True,
+                "gap": "suggested_opportunity", "kind": "suggested"}
+    channel = {"playlists": {"state": "none", "items": [], "note": "geprüft: keine Playlist"},
+               "source_candidates": [], "source": None}
+    steps = ge.experiment_steps("target_suggested_cluster", "Sealand - Shine On", f, external, channel)
+    assert any("Beschreibungszeilen" in s and "Shine On" in s for s in steps)
+    assert any("keine Playlist" in s and "angelegt oder umbenannt" in s for s in steps)
+    assert not any("Playlist-Benennung spiegeln" in s for s in steps)
+    assert ge.LEVERS["target_suggested_cluster"] == "Wortlaut der Beschreibung dieses Videos"
+    assert any("Playlist-Benennung" in x for x in ge.DEFERRED_LEVERS["target_suggested_cluster"])
+    # Auch der Wirkmechanismus beschreibt nur diesen einen Hebel.
+    mechanism = details_for("target_suggested_cluster", f, [], external, title="Sealand - Shine On",
+                           channel=channel)["reason"]
+    assert "Beschreibung dieses Videos" in mechanism and "Endscreens" not in mechanism
