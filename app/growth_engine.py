@@ -8,6 +8,7 @@ analytics. Confidence inherits the V4 caps: with few videos it never exceeds "lo
 """
 from copy import deepcopy
 from datetime import date, timedelta
+import logging
 from math import tanh
 from sqlalchemy import select
 from .models import (GrowthAssessment, GrowthScore, GrowthAction, GrowthPlan, AnalyticsForecast, ChannelPlaylist,
@@ -19,6 +20,7 @@ from .strategy import confidence as v4_confidence, NO_MANIPULATION, GENERALIZATI
 from .regimes import usable_median, MIN_WEEKLY_VIEWS
 from .discovery import best_for_video as external_opportunity
 
+log = logging.getLogger(__name__)
 VERSION = "growth-v5"
 STATES = ["protect_momentum", "scale_opportunity", "needs_packaging_test", "needs_retention_analysis", "needs_discovery",
           "needs_distribution", "revival_candidate", "observe", "paid_cooldown", "paid_excluded", "insufficient_data"]
@@ -1156,6 +1158,16 @@ def run(session, now, contexts, base, budget=None):
     statement = upsert(session, GrowthPlan).values(day=today, version=VERSION, created_at=now, plan=plan)
     session.execute(statement.on_conflict_do_update(index_elements=["day", "version"], set_={"plan": statement.excluded.plan, "created_at": statement.excluded.created_at}))
     session.commit()
+    for entry in (plan.get("queue") or [])[:QUEUE_LIMIT]:
+        external = entry.get("opportunity") or {}
+        log.info("growth action rank=%s video=%r action=%s lever=%r metric=%s window=%s chance=%s/%s score=%s "
+                 "audience=%r evidence=%s why=%r",
+                 entry.get("rank"), entry.get("title"), entry.get("action"), entry.get("primary_lever"),
+                 entry.get("target_metric"), entry.get("window_days"), external.get("kind"), external.get("gap"),
+                 external.get("score"), entry.get("audience"), (entry.get("evidence") or {}).get("level"),
+                 (entry.get("why") or "")[:200])
+    log.info("growth plan day=%s queue=%s running=%s evaluated=%s note=%r", today, len(plan.get("queue") or []),
+             len(plan.get("running_experiments") or []), evaluated, (plan.get("queue_note") or "")[:160])
     return {"evaluated_actions": evaluated, "ranked": len(ranking), "priority": plan.get("priority_video_id")}
 
 
