@@ -667,10 +667,21 @@ def reach_options(state, f, external, channel=None):
             "Ein besseres Paket verbessert die Zuschauerreaktion auf vorhandene und neu entstehende "
             "Impressions und kann damit weitere Auslieferung beguenstigen."]})
     segment = channel.get("segment")
-    if attested and segment:
-        options.append({"action": "produce_for_opportunity", "notes": [
-            f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und "
-            f"verwendbares eigenes Material: {segment['evidence']}",
+    found = channel.get("content")
+    if attested and (segment or found):
+        # Mit analysierter Originaldatei stehen mehrere messbar unterschiedliche Kandidaten zur Wahl;
+        # ohne sie bleibt es beim retentionsbasierten Kandidatenmaterial.
+        if found:
+            primary = found["primary"]
+            notes = [f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und "
+                     f"{len(found['candidates'])} messbar unterschiedliche Kandidaten aus der eigenen Originaldatei.",
+                     f"Vorne in der Ordnung: Sekunde {primary['start_seconds']:.1f}–{primary['end_seconds']:.1f}. "
+                     + "; ".join(primary["evidence"][:3]),
+                     found["learning"]["note"]]
+        else:
+            notes = [f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und "
+                     f"verwendbares eigenes Material: {segment['evidence']}"]
+        options.append({"action": "produce_for_opportunity", "notes": notes+[
             "Ein neuer kurzer Inhalt erhaelt eigene Auslieferung und haengt nicht an der Impressions-Basis "
             "der bestehenden Videos."]})
     return options
@@ -722,6 +733,63 @@ def strong_segment(session, video, minimum=0.35):
                          f"{base['to_seconds']} bleiben im Schnitt {round(best['ratio']*100)} % des Publikums, "
                          f"deutlich ueber dem Mittel der Kurve ({round(mean*100)} %). Als Startpunkt geeignet; "
                          "der Schnitt selbst ist vor der Veroeffentlichung redaktionell zu pruefen.")}
+
+
+def content_material(session, video, external, today):
+    """Kandidaten aus der eigenen Originaldatei – und sie festhalten, damit spaeter gelernt werden kann.
+
+    Ohne analysierte Datei gibt es None: dann bleibt es beim retentionsbasierten Kandidatenmaterial.
+    Gespeichert wird hier, weil nur ein gespeicherter Kandidat spaeter mit dem veroeffentlichten Short
+    verbunden werden kann; ohne diese Verbindung waere die Distribution nicht zuordenbar.
+    """
+    from . import content as ci
+    try:
+        found = ci.material(session, video, external, today)
+    except Exception as exc:                        # Inhaltswissen ist eine Ergaenzung, kein Betriebsrisiko.
+        log.warning("content material video=%r failed=%s", video.title, type(exc).__name__)
+        return None
+    if not found:
+        return None
+    stored = ci.store(session, video, found["candidates"], today)
+    return {**found, "candidates": stored, "primary": stored[0], "alternatives": stored[1:]}
+
+
+def content_steps(title, channel, topic, hold):
+    """Ausfuehrbare Schritte fuer genau einen Kandidaten – mit exakter Zeit, nicht mit einer Kategorie."""
+    channel = channel or {}
+    found = channel.get("content")
+    if found:
+        primary = found["primary"]
+        rendered = primary.get("render_path")
+        others = ", ".join(f"Sekunde {c['start_seconds']:.1f}–{c['end_seconds']:.1f}"
+                           for c in found["alternatives"]) or "keine weiteren"
+        return [
+            (f"Kandidat {primary['rank']} aus „{title}“ schneiden: Sekunde {primary['start_seconds']:.1f} bis "
+             f"{primary['end_seconds']:.1f} ({primary['duration_seconds']:.1f} s)."
+             + (f" Bereits gerendert: {rendered}" if rendered else
+                " Rendern lokal mit `python -m app.cli content --render <Zielverzeichnis>`.")),
+            (f"Hook ist die an dieser Stelle gesungene Zeile: „{primary['hook']}“."
+             if primary.get("hook") else
+             "Kein zitierfaehiger eigener Wortlaut belegt – der Einstieg ist der gemessene Startpunkt, "
+             "ohne erfundenen Hook."),
+            f"Packaging des neuen Inhalts auf den Themenkontext {topic} ausrichten; das bestehende Video bleibt "
+            "unveraendert.",
+            f"Freigeben und als eigenes Video veroeffentlichen. Alternativen bleiben erhalten: {others}.",
+            ("Nach dem Upload einmal verbinden: `python -m app.cli published --candidate "
+             f"{primary.get('candidate_id')} --video-id <neue Video-ID>`. Erst dadurch werden Impressions, "
+             "Views, Trafficquellen und Retention des Shorts diesem Kandidaten zugeordnet."),
+            hold]
+    segment = channel.get("segment")
+    if not segment:
+        return None
+    return [
+        f"Kurzen Inhalt (Short, bis 60 Sekunden) aus „{title}“ schneiden: {segment.get('evidence', '')}",
+        "Hook in den ersten zwei Sekunden: genau die Stelle, an der das Publikum im Original am stabilsten "
+        "bleibt – ohne Vorlauf, ohne Intro.",
+        f"Packaging des neuen Inhalts auf den Themenkontext {topic} ausrichten; das bestehende Video bleibt "
+        "unveraendert.",
+        "Als eigenes Video veroeffentlichen. Es wird danach wie jedes Video gemessen.",
+        hold]
 
 
 def strong_hypothesis(external, action):
@@ -930,14 +998,7 @@ def experiment_steps(action, title, f, external, channel):
             "Diese drei Teile gehoeren zu einer Maßnahme und werden gemeinsam umgesetzt. Danach am Video nichts "
             "weiter aendern: kein Endscreen, keine Playlist-Zuordnung, kein Schnitt.",
             hold],
-        "produce_for_opportunity": ([
-            f"Kurzen Inhalt (Short, bis 60 Sekunden) aus „{title}“ schneiden: {(channel or {}).get('segment', {}).get('evidence', '')}",
-            "Hook in den ersten zwei Sekunden: genau die Stelle, an der das Publikum im Original am stabilsten "
-            "bleibt – ohne Vorlauf, ohne Intro.",
-            f"Packaging des neuen Inhalts auf den Themenkontext {topic} ausrichten; das bestehende Video bleibt "
-            "unveraendert.",
-            "Als eigenes Video veroeffentlichen. Es wird danach wie jedes Video gemessen.",
-            hold] if (channel or {}).get("segment") else None),
+        "produce_for_opportunity": content_steps(title, channel, topic, hold),
         "target_suggested_cluster": [
             f"Nur den Wortlaut: Themenkontext {topic} in den ersten zwei Beschreibungszeilen von „{title}“ "
             "aufnehmen, in der Sprache der Zielgruppe und ohne Clickbait."+surface,
@@ -1366,7 +1427,10 @@ def run(session, now, contexts, base, budget=None):
                    "lifetime_views": (session.scalar(select(Snapshot.views).where(Snapshot.video_id == video.id)
                                                      .order_by(Snapshot.observed_at.desc()).limit(1))
                                       or sum(row.views for row in history.daily.values())),
-                   "segment": strong_segment(session, video)}
+                   "segment": strong_segment(session, video),
+                   # Inhaltswissen aus der eigenen Originaldatei, soweit lokal analysiert. Ohne Datei
+                   # bleibt das None und die Engine entscheidet wie bisher aus Retention und Chance.
+                   "content": content_material(session, video, external, today)}
         running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING,
                                                             GrowthAction.version == VERSION,
                                                             GrowthAction.action != "produce_for_opportunity")
@@ -1437,7 +1501,9 @@ def run(session, now, contexts, base, budget=None):
             "started_day": str(current.started_day) if current and current.started_day else None,
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": details.get("held_since"), "momentum": momentum,
-            "lifetime_views": channel.get("lifetime_views"), "material": channel.get("segment"),
+            "lifetime_views": channel.get("lifetime_views"),
+            "material": channel.get("segment") or ((channel.get("content") or {}).get("primary")),
+            "content_learning": (channel.get("content") or {}).get("learning"),
             "brief": (brief_for(session, action, video, external, channel) if action in REACH_LEVERS else None),
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
                          "audience": external.get("audience"), "demand_source": external.get("demand_source"),
@@ -1450,9 +1516,12 @@ def run(session, now, contexts, base, budget=None):
         options = reach_options(state, f, external, channel)
         content = next((o for o in options if o["action"] == "produce_for_opportunity"), None)
         # Nachvollziehbar, ob und warum eine Produktionsempfehlung entstanden ist.
-        log.info("growth content video=%r chance=%s/%s usable=%s material=%s locked=%s -> %s",
+        log.info("growth content video=%r chance=%s/%s usable=%s material=%s candidates=%s learning=%s "
+                 "locked=%s -> %s",
                  video.title, (external or {}).get("evidence_level"), (external or {}).get("score"),
-                 bool((external or {}).get("context_usable")), bool(channel.get("segment")), running is not None,
+                 bool((external or {}).get("context_usable")), bool(channel.get("segment")),
+                 len(((channel.get("content") or {}).get("candidates")) or []),
+                 (channel.get("content") or {}).get("learning", {}).get("basis"), running is not None,
                  "Empfehlung moeglich" if content else "keine Empfehlung")
         if running is not None and content is not None:
             if True:
@@ -1618,8 +1687,11 @@ def shared_context(session, video, external):
     except Exception:
         return []
     words = set(aud._tokens(label))
-    shared = sorted((profile["genres"] | profile["moods"] | profile["places"] | profile["topics"]
-                     | profile.get("specific", set())) & words)
+    # Der eigene gesungene Wortlaut zaehlt wie die eigenen Metadaten – aber nur, wo er belegt ist.
+    from . import content as ci
+    own = (profile["genres"] | profile["moods"] | profile["places"] | profile["topics"]
+           | profile.get("specific", set()) | ci.vocabulary(session, video))
+    shared = sorted(own & words)
     return [t for t in shared if t not in aud.UMBRELLA_GENRES]
 
 
@@ -1643,6 +1715,39 @@ def brief_for(session, action, video, external, channel):
                 "why": ("Ein Paket, das den Themenkontext klar erkennbar macht, verbessert die Zuschauerreaktion "
                         "auf vorhandene und neu entstehende Impressions und kann damit weitere Auslieferung "
                         "beguenstigen.")}
+    found = channel.get("content")
+    if action == "produce_for_opportunity" and found:
+        primary = found["primary"]
+        listed = [{"rank": c["rank"], "candidate_id": c.get("candidate_id"),
+                   "start_seconds": c["start_seconds"], "end_seconds": c["end_seconds"],
+                   "duration_seconds": c["duration_seconds"],
+                   "window": f"Sekunde {c['start_seconds']:.1f}–{c['end_seconds']:.1f}",
+                   "hook": c.get("hook"), "hook_source": c.get("hook_source"),
+                   "properties": {k: v for k, v in (c["properties"] or {}).items() if v is not None},
+                   "evidence": c["evidence"], "render_path": c.get("render_path")}
+                  for c in found["candidates"]]
+        return {"audience": None, "format": "Short (bis 60 Sekunden)",
+                "material": (f"Eigene Originaldatei zu „{video.title}“: {len(listed)} messbar unterschiedliche "
+                             f"Kandidaten, jeder mit exakter Start- und Endzeit"),
+                "candidates": listed,
+                "hook": (f"„{primary['hook']}“ – die an Sekunde {primary['start_seconds']:.1f} tatsaechlich "
+                         f"gesungene Zeile ({primary['hook_source']})" if primary.get("hook") else
+                         f"Einstieg bei Sekunde {primary['start_seconds']:.1f}; kein zitierfaehiger eigener "
+                         "Wortlaut belegt, deshalb kein Textzitat."),
+                "review": ("Freigabe vor dem Upload bleibt menschlich; Start, Ende und Reihenfolge liegen "
+                           "gemessen fest."),
+                "evidence": " | ".join(primary["evidence"]),
+                "learning": found["learning"]["note"],
+                "concept": (f"Kandidat {primary['rank']} (Sekunde {primary['start_seconds']:.1f}–"
+                            f"{primary['end_seconds']:.1f}) als eigenstaendigen kurzen Inhalt veroeffentlichen. "
+                            "Das bestehende Video bleibt unveraendert; die weiteren Kandidaten bleiben als "
+                            "Alternativen erhalten."),
+                "audience_evidence": f"Nachbarschaft: {audience} (Evidenz, kein Packaging-Thema)",
+                "packaging": packaging,
+                "why": ("Ein neuer kurzer Inhalt erhaelt eigene Auslieferung im Shorts-Feed und in Browse und haengt "
+                        "nicht an der Impressions-Basis der bestehenden Videos. Nach der Veroeffentlichung werden "
+                        "seine eigenen Impressions, Views, Trafficquellen und Retention diesem Kandidaten "
+                        "zugeordnet und wirken auf die kuenftige Auswahl.")}
     if action == "produce_for_opportunity" and segment:
         review = segment.get("review_required")
         return {"audience": None, "format": "Short (bis 60 Sekunden)",
@@ -1687,6 +1792,8 @@ def reach_outlook(row):
         "lifetime_views": row.get("lifetime_views"),
         "chance": external.get("evidence_level"),
         "material": bool(row.get("material")),
+        "content_candidates": len(((row.get("brief") or {}).get("candidates")) or []),
+        "learning_basis": (row.get("content_learning") or {}).get("basis"),
     }
     lever_rank = 2 if row["action"] in REACH_LEVERS else 1 if row["action"] in GROWTH_LEVERS else 0
     history_rank = 2 if (row.get("lifetime_views") or 0) >= 10000 else 1 if (row.get("lifetime_views") or 0) > 0 else 0

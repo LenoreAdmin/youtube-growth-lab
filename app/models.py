@@ -595,3 +595,91 @@ class VideoRetention(Base):
     window_start: Mapped[date] = mapped_column(Date)
     window_end: Mapped[date] = mapped_column(Date)
     fetched_day: Mapped[date] = mapped_column(Date)
+
+
+class MediaAsset(Base):
+    """Eine eigene Originaldatei, die lokal verarbeitet wurde. Die Datei selbst bleibt lokal.
+
+    Identitaet ist der SHA-256 der Datei: eine unveraenderte Datei wird nie zweimal analysiert, und
+    jedes abgeleitete Merkmal ist auf genau diese Dateiversion zurueckfuehrbar. Die Zuordnung zu einem
+    veroeffentlichten Video wird geprueft (Dauer) und nicht geraten; bleibt sie mehrdeutig, ist
+    video_id leer und die Engine arbeitet weiter ohne Inhaltswissen statt mit falschem.
+    """
+    __tablename__ = "media_assets"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id", ondelete="SET NULL"), index=True)
+    path: Mapped[str] = mapped_column(String(1024))
+    bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    has_video: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_audio: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(32), default="analysed")
+    note: Mapped[str | None] = mapped_column(String(1000))
+    tools: Mapped[dict] = mapped_column(JSON, default=dict)
+    analysed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ContentSection(Base):
+    """Ein gemessener Abschnitt einer eigenen Datei – ausschliesslich Messwerte, keine Benennung.
+
+    Hier steht nicht, was ein Abschnitt *ist*. Hier steht, was an ihm gemessen wurde: Energie relativ
+    zum eigenen Mittel, wie stark er sich im Stueck wiederholt, wie viel Gesang darin vorkommt, wie
+    scharf seine Grenze ist und wie viele Bildschnitte darin liegen. Ein semantisches Label wie
+    „Refrain“ wird daraus nicht abgeleitet; die Growth-Entscheidung braucht es nicht.
+    """
+    __tablename__ = "content_sections"
+    asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id", ondelete="CASCADE"), primary_key=True)
+    idx: Mapped[int] = mapped_column(Integer, primary_key=True)
+    start_seconds: Mapped[float] = mapped_column(Float)
+    end_seconds: Mapped[float] = mapped_column(Float)
+    energy: Mapped[float | None] = mapped_column(Float)
+    energy_rel: Mapped[float | None] = mapped_column(Float)
+    repetition_strength: Mapped[float | None] = mapped_column(Float)
+    repetition_group: Mapped[int | None] = mapped_column(Integer)
+    vocal_presence: Mapped[float | None] = mapped_column(Float)
+    novelty: Mapped[float | None] = mapped_column(Float)
+    visual_cuts: Mapped[int | None] = mapped_column(Integer)
+    visual_cut_density: Mapped[float | None] = mapped_column(Float)
+    brightness: Mapped[float | None] = mapped_column(Float)
+    boundary_cut_distance: Mapped[float | None] = mapped_column(Float)
+
+
+class ContentLine(Base):
+    """Eine Textzeile mit Zeitmarke. Quelle und Sicherheit stehen dabei, damit nichts als Fakt gilt,
+    was nur geraten wurde: `aligned` ist gegen vorhandenen eigenen Text ausgerichtet, `asr` ist
+    maschinell erkannt und darf unterhalb der Schwelle nie als Zitat verwendet werden.
+    """
+    __tablename__ = "content_lines"
+    asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id", ondelete="CASCADE"), primary_key=True)
+    idx: Mapped[int] = mapped_column(Integer, primary_key=True)
+    start_seconds: Mapped[float] = mapped_column(Float)
+    end_seconds: Mapped[float] = mapped_column(Float)
+    text: Mapped[str] = mapped_column(String(1000))
+    confidence: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(16), default="asr")
+
+
+class ContentCandidate(Base):
+    """Ein konkret produzierbarer Kandidat: exakte Start-/Endzeit plus die belegten Eigenschaften.
+
+    Es gibt bewusst mehrere je Video, und sie muessen sich messbar unterscheiden. Nach der
+    Veroeffentlichung haelt `published_video_id` die Verbindung zum neuen eigenen Asset; dessen
+    Impressions, Views, Trafficquellen und Retention kommen ueber den normalen Sync und werden damit
+    diesem Kandidaten, seinem Hook und seinem Packaging zugeordnet.
+    """
+    __tablename__ = "content_candidates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id", ondelete="CASCADE"), index=True)
+    video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    start_seconds: Mapped[float] = mapped_column(Float)
+    end_seconds: Mapped[float] = mapped_column(Float)
+    properties: Mapped[dict] = mapped_column(JSON, default=dict)
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
+    hook: Mapped[str | None] = mapped_column(String(1000))
+    hook_source: Mapped[str | None] = mapped_column(String(16))
+    render_path: Mapped[str | None] = mapped_column(String(1024))
+    status: Mapped[str] = mapped_column(String(32), default="open")
+    created_day: Mapped[date] = mapped_column(Date)
+    published_video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id", ondelete="SET NULL"))
+    published_day: Mapped[date | None] = mapped_column(Date)
+    __table_args__ = (UniqueConstraint("asset_id", "start_seconds", "end_seconds", name="uq_candidate_window"),)
