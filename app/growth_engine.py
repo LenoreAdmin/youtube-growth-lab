@@ -676,10 +676,18 @@ def reach_options(state, f, external, channel=None):
     return options
 
 
-def strong_segment(session, video, minimum=0.35):
-    """Der staerkste zusammenhaengende Abschnitt eines eigenen Videos – aus der gemessenen Retentionskurve.
+MIN_CURVE_POINTS = 20       # Unter dieser Auflösung laesst sich kein Startpunkt benennen.
+SEGMENT_MARGIN = 1.15       # Der Abschnitt muss sich deutlich vom eigenen Mittel der Kurve abheben.
+REVIEW_REQUIRED = "Kandidat muss redaktionell gesichtet werden"
 
-    Ohne Kurve gibt es kein Ergebnis und damit keine Empfehlung: geraten wird hier nichts.
+
+def strong_segment(session, video, minimum=0.35):
+    """Kandidatenmaterial aus der gemessenen Retentionskurve – ausdruecklich kein fertiger Short.
+
+    Ein zusammenhaengender Bereich mit hoher durchschnittlicher Retention sagt, wo das Publikum bleibt.
+    Er ist damit Material. Ein geeigneter Startpunkt laesst sich nur benennen, wenn die Kurve genug
+    Auflösung hat und sich der Bereich deutlich vom eigenen Mittel abhebt. Sonst lautet die Aussage
+    „Kandidat muss redaktionell gesichtet werden“ – es wird kein Hook erfunden.
     """
     from .models import VideoRetention
     stored = session.get(VideoRetention, video.id)
@@ -687,6 +695,8 @@ def strong_segment(session, video, minimum=0.35):
                   key=lambda r: r.get("at") or 0)
     if len(rows) < 5 or not video.duration_seconds:
         return None
+    duration = video.duration_seconds
+    mean = sum(r["ratio"] for r in rows)/len(rows)
     best, window = None, max(2, len(rows)//5)        # etwa ein Fuenftel des Videos als Fenster
     for start in range(0, len(rows)-window+1):
         chunk = rows[start:start+window]
@@ -695,12 +705,23 @@ def strong_segment(session, video, minimum=0.35):
             best = {"ratio": round(score, 3), "from": chunk[0]["at"], "to": chunk[-1]["at"]}
     if best is None or best["ratio"] < minimum:
         return None
-    duration = video.duration_seconds
-    return {"from_seconds": int(best["from"]*duration), "to_seconds": int(best["to"]*duration),
-            "audience_ratio": best["ratio"],
-            "evidence": (f"Gemessene Retentionskurve: zwischen Sekunde {int(best['from']*duration)} und "
-                         f"{int(best['to']*duration)} sind im Schnitt {round(best['ratio']*100)} % des Publikums "
-                         "noch dabei – der staerkste Abschnitt dieses Videos.")}
+    base = {"audience_ratio": best["ratio"], "curve_points": len(rows),
+            "from_seconds": int(best["from"]*duration), "to_seconds": int(best["to"]*duration)}
+    distinct = best["ratio"] >= mean*SEGMENT_MARGIN
+    if len(rows) < MIN_CURVE_POINTS or not distinct:
+        # Material ja, Startpunkt nein: die Kurve traegt die Aussage nicht.
+        return {**base, "review_required": True, "start_seconds": None,
+                "evidence": (f"Gemessene Retentionskurve mit {len(rows)} Punkten: der Bereich um Sekunde "
+                             f"{base['from_seconds']}–{base['to_seconds']} haelt im Schnitt "
+                             f"{round(best['ratio']*100)} % des Publikums"
+                             + (", hebt sich aber nicht deutlich vom Mittel der Kurve ab"
+                                if not distinct else ", die Auflösung reicht fuer keinen Startpunkt")
+                             + f". {REVIEW_REQUIRED}.")}
+    return {**base, "review_required": False, "start_seconds": base["from_seconds"],
+            "evidence": (f"Gemessene Retentionskurve ({len(rows)} Punkte): ab Sekunde {base['from_seconds']} bis "
+                         f"{base['to_seconds']} bleiben im Schnitt {round(best['ratio']*100)} % des Publikums, "
+                         f"deutlich ueber dem Mittel der Kurve ({round(mean*100)} %). Als Startpunkt geeignet; "
+                         "der Schnitt selbst ist vor der Veroeffentlichung redaktionell zu pruefen.")}
 
 
 def strong_hypothesis(external, action):
@@ -1005,8 +1026,14 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
         "probe_missing_evidence": "Impressions im Nachher-Fenster ≥ +15 % gegenüber Vorher und messbar über null; damit ist belegt, "
                                   "dass Auslieferung über Playlist/Endscreen erzeugbar ist. Bleiben sie bei ~0, ist das ebenfalls ein "
                                   "verwertbares Ergebnis: der Engpass liegt in der Verteilung, nicht im Paket.",
+        "produce_for_opportunity": ("Das veroeffentlichte neue Video erhaelt eigene Impressions und Views. Bewertet "
+                                    "wird es als eigenes Asset anhand seiner eigenen Impressions, Views, Retention "
+                                    "und Trafficquellen – nicht am Quellvideo."),
     }.get(action, f"{target} im Nachher-Fenster ≥ +15 % gegenüber Vorher-Fenster und über der typischen Wochenschwankung des Kanals; ohne Werbetraffic.")
-    stop = ("Nicht anwendbar – keine Änderung." if action in ("protect_no_change", "observe") else
+    stop = ("Nicht anwendbar – am Quellvideo wird nichts veraendert. Erhaelt das neue Video keine eigene "
+            "Auslieferung, war die Chance nicht tragfaehig; zurueckzunehmen ist nichts."
+            if action == "produce_for_opportunity" else
+            "Nicht anwendbar – keine Änderung." if action in ("protect_no_change", "observe") else
             "Playlist-Einordnung oder Endscreen zurücknehmen, wenn Views oder Watchtime ≥ 15 % unter dem Vorher-Fenster liegen; "
             "als negativ protokollieren. Titel und Thumbnail bleiben ohnehin unverändert."
             if action in ("distribute_playlist_context", "probe_missing_evidence") else
@@ -1033,7 +1060,9 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
             "one_lever_note": "Genau ein veränderlicher Hebel. Weitere Änderungen wären eigene Experimente – "
                               "sonst ist das Ergebnis keiner Ursache zuzuordnen.",
             "missing_evidence": missing, "route": known_route(f),
-            "baseline": baseline_snapshot(f),
+            "baseline": ({"note": ("Keine Vorher-Baseline am Quellvideo: der neue Inhalt ist ein eigenes Asset "
+                                   "und wird an seinen eigenen Zahlen bewertet.")}
+                         if action == "produce_for_opportunity" else baseline_snapshot(f)),
             "executed_automatically": False,
             "do_not_change": DO_NOT_CHANGE[action]+[NO_MANIPULATION], "objective": OBJECTIVES[action],
             "experiment_template": template, "linked_decision_ids": [e["decision_id"] for e in experiments],
@@ -1204,6 +1233,8 @@ def locked_resources(session):
     locked = {}
     titles = {}
     for row in session.scalars(select(GrowthAction).where(GrowthAction.status == RUNNING)):
+        if row.action == "produce_for_opportunity":
+            continue        # Neuer Inhalt veraendert das Quellvideo nicht und sperrt es deshalb nicht.
         info = {"action_id": row.id, "video_id": row.video_id, "until": str(row.evaluate_after),
                 "role": "gemessenes Video"}
         locked[row.video_id] = info
@@ -1337,7 +1368,8 @@ def run(session, now, contexts, base, budget=None):
                                       or sum(row.views for row in history.daily.values())),
                    "segment": strong_segment(session, video)}
         running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING,
-                                                            GrowthAction.version == VERSION)
+                                                            GrowthAction.version == VERSION,
+                                                            GrowthAction.action != "produce_for_opportunity")
                                  .order_by(GrowthAction.started_day.desc()))
         proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == PROPOSED,
                                                              GrowthAction.version == VERSION)
@@ -1406,7 +1438,7 @@ def run(session, now, contexts, base, budget=None):
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": details.get("held_since"), "momentum": momentum,
             "lifetime_views": channel.get("lifetime_views"), "material": channel.get("segment"),
-            "brief": (brief_for(action, video, external, channel) if action in REACH_LEVERS else None),
+            "brief": (brief_for(session, action, video, external, channel) if action in REACH_LEVERS else None),
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
                          "audience": external.get("audience"), "demand_source": external.get("demand_source"),
                          "evidence_level": external.get("evidence_level"), "actionable": bool(external.get("actionable")),
@@ -1535,6 +1567,15 @@ def content_recommendation(session, video, state, f, regime, base, board, rev, m
                              external, channel=channel, title=video.title)
     if not details.get("steps"):
         return None             # Ohne belegtes Material gibt es keine Schritte und damit keine Empfehlung.
+    # Eine offene oder laufende Empfehlung je Video genuegt: sonst entstuende jeden Tag eine weitere
+    # Produktionsaufgabe fuer dasselbe Quellmaterial.
+    open_already = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
+                                                             GrowthAction.version == VERSION,
+                                                             GrowthAction.action == action,
+                                                             GrowthAction.status.in_([PROPOSED, RUNNING]),
+                                                             GrowthAction.created_day < today))
+    if open_already is not None:
+        return None
     proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
                                                          GrowthAction.created_day == today,
                                                          GrowthAction.version == VERSION,
@@ -1557,31 +1598,63 @@ def content_recommendation(session, video, state, f, regime, base, board, rev, m
             "choices": details.get("choices"), "do_not_change": details["do_not_change"],
             "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": None, "action_id": proposed.id, "action_status": proposed.status,
-            "started_day": None, "brief": brief_for(action, video, external, channel)}
+            "started_day": None, "brief": brief_for(session, action, video, external, channel)}
 
 
-def brief_for(action, video, external, channel):
+def shared_context(session, video, external):
+    """Der belegte gemeinsame Themenkontext zwischen unserem Video und der Nachbarschaft.
+
+    Der Name eines Nachbarvideos ist Audience-Evidenz, kein Packaging-Thema. Fuer das Packaging zaehlt nur,
+    was unser eigener Inhalt und diese Nachbarschaft nachweislich teilen. Gibt es das nicht, wird keine
+    Packaging-Behauptung aufgestellt.
+    """
+    from . import audience as aud
+    label = (external or {}).get("audience") or (external or {}).get("key") or ""
+    try:
+        profile = aud.music_profile(session, video)
+    except Exception:
+        return []
+    words = set(aud._tokens(label))
+    shared = sorted((profile["genres"] | profile["moods"] | profile["places"] | profile["topics"]
+                     | profile.get("specific", set())) & words)
+    return [t for t in shared if t not in aud.UMBRELLA_GENRES]
+
+
+def brief_for(session, action, video, external, channel):
     """Der produktionsfaehige Teil der Maßnahme – nur aus belegten Angaben, nichts erfunden."""
     external, channel = external or {}, channel or {}
     audience = external.get("audience") or external.get("key")
     segment = channel.get("segment")
+    context = shared_context(session, video, external)
+    packaging = (f"Belegter gemeinsamer Themenkontext: {', '.join(context)}" if context else
+                 "Kein belastbarer gemeinsamer Themenkontext ableitbar – keine Packaging-Vorgabe. Titel und "
+                 "Thumbnail aus dem eigenen Inhalt entwickeln.")
     if action == "repackage_for_reach":
         return {"audience": audience, "format": "Bestehendes Video, neues Packaging",
                 "material": f"„{video.title}“ selbst ({int(channel.get('lifetime_views') or 0)} Views Gesamtleistung)",
                 "hook": None,
                 "concept": ("Titel, Thumbnail und die ersten Beschreibungszeilen auf denselben Themenkontext "
                             "ausrichten, in dem dieses Video bereits ausgeliefert wird."),
-                "packaging": f"Themenkontext: {audience}",
+                "audience_evidence": f"Nachbarschaft: {audience} (Evidenz, kein Packaging-Thema)",
+                "packaging": packaging,
                 "why": ("Ein Paket, das den Themenkontext klar erkennbar macht, verbessert die Zuschauerreaktion "
                         "auf vorhandene und neu entstehende Impressions und kann damit weitere Auslieferung "
                         "beguenstigen.")}
     if action == "produce_for_opportunity" and segment:
-        return {"audience": audience, "format": "Short (bis 60 Sekunden)",
-                "material": (f"Sekunde {segment['from_seconds']}–{segment['to_seconds']} aus „{video.title}“"),
-                "hook": segment["evidence"],
-                "concept": ("Den staerksten Abschnitt als eigenstaendigen kurzen Inhalt veroeffentlichen, ohne "
-                            "Vorlauf und ohne Intro."),
-                "packaging": f"Themenkontext: {audience}",
+        review = segment.get("review_required")
+        return {"audience": None, "format": "Short (bis 60 Sekunden)",
+                "material": (f"Kandidatenmaterial aus „{video.title}“: Sekunde {segment['from_seconds']}–"
+                             f"{segment['to_seconds']}"
+                             + ("" if review else f", geeigneter Startpunkt Sekunde {segment['start_seconds']}")),
+                "hook": (None if review else
+                         f"Einstieg bei Sekunde {segment['start_seconds']} – dort bleibt das Publikum messbar "
+                         "am stabilsten. Kein Vorlauf, kein Intro."),
+                "review": REVIEW_REQUIRED if review else "Schnitt vor der Veroeffentlichung redaktionell pruefen",
+                "evidence": segment["evidence"],
+                "concept": ("Diesen Abschnitt als eigenstaendigen kurzen Inhalt veroeffentlichen. Das bestehende "
+                            "Video bleibt unveraendert."),
+                "audience_evidence": f"Nachbarschaft: {audience} (Evidenz, kein Packaging-Thema)",
+                "packaging": packaging,
                 "why": ("Ein neuer kurzer Inhalt erhaelt eigene Auslieferung im Shorts-Feed und in Browse und haengt "
                         "nicht an der Impressions-Basis der bestehenden Videos.")}
     return None

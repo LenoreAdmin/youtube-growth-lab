@@ -177,17 +177,29 @@ def test_the_two_reach_levers_carry_a_production_brief_and_their_factors():
     external = {"audience": "Nachbarcluster", "key": "nachbarschaft", "evidence_level": "own_analytics",
                 "actionable": True, "context_usable": True, "score": 61.1, "gap": "suggested_opportunity"}
     channel = {"lifetime_views": 21081, "segment": None}
-    pack = ge.brief_for("repackage_for_reach", video, external, channel)
-    assert pack["format"].startswith("Bestehendes Video") and "21081" in pack["material"]
-    assert "Zuschauerreaktion auf vorhandene und neu entstehende Impressions" in pack["why"]
-    assert "testet" not in pack["why"], "keine Behauptung ueber YouTubes Testverhalten"
-    segment = {"from_seconds": 42, "to_seconds": 70, "audience_ratio": 0.61,
-               "evidence": "Gemessene Retentionskurve: zwischen Sekunde 42 und 70 sind im Schnitt 61 % dabei"}
-    short = ge.brief_for("produce_for_opportunity", video, external, {**channel, "segment": segment})
-    assert short["format"].startswith("Short") and "Sekunde 42" in short["material"]
-    assert "Retentionskurve" in short["hook"] and "Shorts-Feed" in short["why"]
-    # Ohne gemessenes Material gibt es keinen Brief und damit keine Empfehlung.
-    assert ge.brief_for("produce_for_opportunity", video, external, channel) is None
+    from app.db import Session as DbSession
+    with DbSession() as session:
+        pack = ge.brief_for(session, "repackage_for_reach", video, external, channel)
+        assert pack["format"].startswith("Bestehendes Video") and "21081" in pack["material"]
+        assert "Zuschauerreaktion auf vorhandene und neu entstehende Impressions" in pack["why"]
+        assert "testet" not in pack["why"], "keine Behauptung ueber YouTubes Testverhalten"
+        # Der Name des Nachbarvideos ist Evidenz, kein Packaging-Thema.
+        assert "Evidenz, kein Packaging-Thema" in pack["audience_evidence"]
+        assert "Nachbarcluster" not in pack["packaging"]
+        # Geeigneter Startpunkt: wird benannt, der Schnitt bleibt redaktionell zu pruefen.
+        ready = {"from_seconds": 42, "to_seconds": 70, "start_seconds": 42, "audience_ratio": 0.61,
+                 "curve_points": 100, "review_required": False, "evidence": "Gemessene Retentionskurve (100 Punkte)"}
+        short = ge.brief_for(session, "produce_for_opportunity", video, external, {**channel, "segment": ready})
+        assert short["format"].startswith("Short") and "Sekunde 42" in short["material"]
+        assert "Einstieg bei Sekunde 42" in short["hook"] and "Shorts-Feed" in short["why"]
+        assert short["audience"] is None, "kein Nachbarname als Audience-Vorgabe"
+        # Reicht die Kurve nicht, wird kein Hook erfunden.
+        unclear = {**ready, "review_required": True, "start_seconds": None}
+        vague = ge.brief_for(session, "produce_for_opportunity", video, external, {**channel, "segment": unclear})
+        assert vague["hook"] is None and vague["review"] == ge.REVIEW_REQUIRED
+        assert "Kandidatenmaterial" in vague["material"] and "Startpunkt" not in vague["material"]
+        # Ohne gemessenes Material gibt es keinen Brief und damit keine Empfehlung.
+        assert ge.brief_for(session, "produce_for_opportunity", video, external, channel) is None
     # Die Reihenfolge nennt ihre Faktoren.
     row = queue_row("a", "Trainstories", "needs_distribution", "repackage_for_reach", 70, priority=1,
                     external=external, lifetime_views=21081, material=None,

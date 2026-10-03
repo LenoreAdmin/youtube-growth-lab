@@ -237,11 +237,37 @@ def test_a_locked_video_still_yields_a_content_recommendation(monkeypatch, sessi
     content = next((q for q in plan["queue"] if q["action"] == "produce_for_opportunity"), None)
     assert content is not None, f"keine Produktionsempfehlung: {[(r['video_id'], r['action']) for r in plan['ranking']]}"
     assert content["video_id"] == "a" and content["brief"]["format"].startswith("Short")
-    assert "Sekunde" in content["brief"]["material"] and content["brief"]["hook"]
+    # Sechs Kurvenpunkte sind Material, aber kein Startpunkt: kein erfundener Hook.
+    assert "Kandidatenmaterial" in content["brief"]["material"] and content["brief"]["hook"] is None
+    assert content["brief"]["review"] == ge.REVIEW_REQUIRED
+    assert content["brief"]["audience"] is None and "Evidenz" in content["brief"]["audience_evidence"]
+    # Keine Baseline des Quellvideos und kein Zuruecknehmen.
+    assert "Keine Vorher-Baseline" in (content["baseline"] or {}).get("note", "")
+    assert "zurueckzunehmen ist nichts" in content["stop_criterion"]
+    assert "eigenes Asset" in content["success_criterion"]
     # Das laufende Experiment bleibt unangetastet und sichtbar.
     running = session.scalar(select(GrowthAction).where(GrowthAction.status == "running"))
     assert running.action == "probe_missing_evidence" and running.evaluate_after == TODAY+timedelta(days=12)
     assert any(r["video_id"] == "a" and r["action"] == "probe_missing_evidence" for r in plan["ranking"])
+    # Mit einer hoch aufgeloesten, deutlich abgesetzten Kurve wird ein Startpunkt benannt.
+    session.query(VideoRetention).delete()
+    dense = [{"at": i/100, "ratio": (.85 if 40 <= i <= 60 else .25)} for i in range(101)]
+    session.add(VideoRetention(video_id="a", window_start=TODAY-timedelta(days=89),
+                               window_end=TODAY-timedelta(days=LAG), fetched_day=TODAY, rows=dense))
+    session.commit()
+    ge.run(session, NOW+timedelta(minutes=30), contexts, base)
+    session.expire_all()
+    dense_plan = session.scalar(select(Plan).order_by(Plan.id.desc())).plan
+    sharp = next(q for q in dense_plan["queue"] if q["action"] == "produce_for_opportunity")
+    assert sharp["brief"]["hook"] and "Einstieg bei Sekunde" in sharp["brief"]["hook"]
+    assert "Startpunkt" in sharp["brief"]["material"]
+    # Das Quellvideo bleibt fuer andere Chancen frei: eine gestartete Empfehlung sperrt es nicht.
+    content_row = session.scalar(select(GrowthAction).where(GrowthAction.action == "produce_for_opportunity"))
+    content_row.status, content_row.started_day, content_row.started_at = "running", TODAY, NOW
+    session.commit()
+    locked = ge.locked_resources(session)
+    assert all(info["action_id"] != content_row.id for info in locked.values()),         "neuer Inhalt veraendert das Quellvideo nicht und sperrt es nicht"
+
     # Ohne gemessene Kurve entsteht keine Empfehlung – nichts wird erfunden.
     session.query(VideoRetention).delete()
     session.commit()
