@@ -289,6 +289,20 @@ def _collect(client, budget=None):
                 except Exception as exc:
                     s.rollback()
                     issues.append(f"{video.id}/analytics: {type(exc).__name__}")
+        # Die Retentionskurve je Video: eigene Analytics, keine Data-API-Quota, idempotent je Analytics-Tag.
+        # Sie haengt bewusst nicht am taeglichen Discovery-Lauf, sonst fehlt das Material, wenn der an einem
+        # Tag schon gelaufen ist.
+        with steps.step("retention"), Session() as s:
+            try:
+                from .discovery import collect_retention
+                collect_retention(s, client, list(s.scalars(select(Video).where(Video.active.is_(True)))),
+                                  utcnow(), budget, {})
+                s.commit()
+            except SyncBudgetExceeded:
+                raise
+            except Exception as exc:
+                s.rollback()
+                issues.append(f"retention: {type(exc).__name__}")
         if settings.enable_reach:
             with steps.step("reach"), Session() as s:
                 try:

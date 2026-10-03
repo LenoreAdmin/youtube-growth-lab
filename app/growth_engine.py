@@ -1390,7 +1390,7 @@ def run(session, now, contexts, base, budget=None):
             momentum={**(momentum or {}), "paid": profile}, created_at=now)
         session.execute(statement.on_conflict_do_update(index_elements=["video_id", "day", "version"],
             set_={k: getattr(statement.excluded, k) for k in ("state", "action", "opportunity", "viewer", "subscriber", "revival", "momentum", "created_at")}))
-        ranking.append({"video_id": video.id, "title": video.title, "state": state, "regime": regime["regime"], "breakout": regime["regime"] in PROTECT_REGIMES,
+        row = {"video_id": video.id, "title": video.title, "state": state, "regime": regime["regime"], "breakout": regime["regime"] in PROTECT_REGIMES,
             "paid_status": paid, "paid_label": PAID_LABELS.get(paid, paid), "paid": profile,
             "action": action, "opportunity_score": board["opportunity"]["score"], "viewer_score": board["viewer"]["score"],
             "subscriber_score": board["subscriber"]["score"], "revival": rev["candidate"], "revival_signals": rev["signals"],
@@ -1410,7 +1410,25 @@ def run(session, now, contexts, base, budget=None):
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
                          "audience": external.get("audience"), "demand_source": external.get("demand_source"),
                          "evidence_level": external.get("evidence_level"), "actionable": bool(external.get("actionable")),
-                         "subscriber_fit": (external.get("scores") or {}).get("subscriber_fit_score")} if external else None})
+                         "subscriber_fit": (external.get("scores") or {}).get("subscriber_fit_score")} if external else None}
+        ranking.append(row)
+        # Ein laufendes Experiment haelt sein Video – aber nicht die Frage, ob eine belegte Audience-Chance
+        # neuen Inhalt rechtfertigt. Eine Produktionsempfehlung veraendert das gesperrte Video nicht; es ist
+        # nur Quellmaterial. Jede Maßnahme, die das Video selbst anfassen wuerde, bleibt gesperrt.
+        options = reach_options(state, f, external, channel)
+        content = next((o for o in options if o["action"] == "produce_for_opportunity"), None)
+        # Nachvollziehbar, ob und warum eine Produktionsempfehlung entstanden ist.
+        log.info("growth content video=%r chance=%s/%s usable=%s material=%s locked=%s -> %s",
+                 video.title, (external or {}).get("evidence_level"), (external or {}).get("score"),
+                 bool((external or {}).get("context_usable")), bool(channel.get("segment")), running is not None,
+                 "Empfehlung moeglich" if content else "keine Empfehlung")
+        if running is not None and content is not None:
+            if True:
+                extra = content_recommendation(session, video, state, f, regime, base, board, rev, momentum, conf,
+                                               content["notes"], c.get("experiments", []), external, channel,
+                                               today, now, row)
+                if extra is not None:
+                    ranking.append(extra)
     ranking.sort(key=lambda r: (r["opportunity_score"] is None, -(r["opportunity_score"] or 0), -(r["viewer_score"] or 0)))
     # Paid history and current paid state must remain auditable even where scores exist.
     for r in ranking:
@@ -1503,6 +1521,43 @@ def queue_entry(row, rank, today):
                                   "und weitere Experimente für dieses Video gesperrt."},
             "note": "Vorschlag – noch nicht gestartet. Das System hat nichts auf YouTube geändert und kann es nicht "
                     "(Read-only-Zugriff); es zählt erst als laufend, wenn du die Durchführung bestätigst."}
+
+
+def content_recommendation(session, video, state, f, regime, base, board, rev, momentum, conf, notes,
+                           experiments, external, channel, today, now, base_row):
+    """Eine Produktionsempfehlung als eigene Zeile – auch wenn das Quellvideo gerade gesperrt ist.
+
+    Sie veraendert das gesperrte Video nicht. Die laufende Maßnahme behaelt ihre eigene Zeile und bleibt
+    unberuehrt; diese hier ist ein zusaetzlicher Vorschlag mit eigenem Datensatz fuer heute.
+    """
+    action = "produce_for_opportunity"
+    details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, experiments,
+                             external, channel=channel, title=video.title)
+    if not details.get("steps"):
+        return None             # Ohne belegtes Material gibt es keine Schritte und damit keine Empfehlung.
+    proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
+                                                         GrowthAction.created_day == today,
+                                                         GrowthAction.version == VERSION,
+                                                         GrowthAction.action == action))
+    if proposed is None:
+        proposed = GrowthAction(video_id=video.id, created_day=today, created_at=now, version=VERSION,
+                                state=state, action=action, status=PROPOSED, lever_class="content")
+        session.add(proposed)
+    if proposed.status == PROPOSED:
+        proposed.state, proposed.target_metric, proposed.window_days = state, details["target_metric"], details["window_days"]
+        proposed.evaluate_after = today+timedelta(days=details["window_days"]+lag_days())
+        proposed.payload, proposed.baseline = details, details.get("baseline") or {}
+        session.flush()
+    return {**base_row, "action": action, "reason": details["reason"], "notes": details.get("notes", []),
+            "window_days": details["window_days"], "target_metric": details["target_metric"],
+            "success_criterion": details["success_criterion"], "objective": details["objective"],
+            "stop_criterion": details["stop_criterion"], "steps": details.get("steps"),
+            "baseline": details.get("baseline"), "primary_lever": details.get("primary_lever"),
+            "deferred_levers": details.get("deferred_levers") or [], "requires": details.get("requires"),
+            "choices": details.get("choices"), "do_not_change": details["do_not_change"],
+            "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
+            "held_since": None, "action_id": proposed.id, "action_status": proposed.status,
+            "started_day": None, "brief": brief_for(action, video, external, channel)}
 
 
 def brief_for(action, video, external, channel):

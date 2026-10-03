@@ -195,3 +195,57 @@ def test_a_resource_held_by_a_running_experiment_is_never_a_source(monkeypatch, 
     session.commit()
     assert ge.locked_resources(session) == {}
     assert [c["video_id"] for c in ge.source_candidates(contexts, "c", ge.locked_resources(session))] == ["a", "b"]
+
+
+def test_a_locked_video_still_yields_a_content_recommendation(monkeypatch, session):
+    """Ein laufendes Experiment haelt sein Video – nicht die Frage, ob neuer Inhalt gerechtfertigt ist."""
+    from app.models import DiscoveryOpportunity, VideoRetention, GrowthPlan as Plan
+    from app import history as hist, regimes as reg
+    from test_actionable_growth import CONF
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=6, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)
+    session.get(Video, "a").duration_seconds = 214
+    # Laufendes Experiment auf "a" – bleibt unberuehrt.
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=3), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence",
+                             target_metric="impressions_7d", window_days=14,
+                             evaluate_after=TODAY+timedelta(days=12), status="running",
+                             started_day=TODAY-timedelta(days=3), started_at=NOW, lever_class="internal_link",
+                             payload=details_for("probe_missing_evidence", starved(), ["laeuft"])))
+    # Belegte Chance und gemessene Retentionskurve als Material.
+    session.add(DiscoveryOpportunity(day=TODAY, kind="suggested", key="nachbarschaft", video_id="a",
+                                     gap="suggested_opportunity", scores={"external_audience_score": 70.0},
+                                     components={}, evidence={"evidence_level": "own_analytics", "actionable": True,
+                                                              "context_usable": True, "title": "Nachbarcluster"},
+                                     status="open"))
+    session.add(VideoRetention(video_id="a", window_start=TODAY-timedelta(days=89), window_end=TODAY-timedelta(days=LAG),
+                               fetched_day=TODAY,
+                               rows=[{"at": 0.0, "ratio": .9}, {"at": .2, "ratio": .5}, {"at": .4, "ratio": .8},
+                                     {"at": .6, "ratio": .82}, {"at": .8, "ratio": .3}, {"at": 1.0, "ratio": .2}]))
+    session.commit()
+    rows, _ = hist.build(hist.load(session), 168, LAG)
+    base = reg.baselines(rows)
+    histories = {h.video.id: h for h in hist.load(session)}
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": hist.features_at(histories[v], TODAY),
+                 "regime": reg.classify(hist.features_at(histories[v], TODAY), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}} for v in ("a", "b")]
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(Plan).order_by(Plan.id.desc())).plan
+    content = next((q for q in plan["queue"] if q["action"] == "produce_for_opportunity"), None)
+    assert content is not None, f"keine Produktionsempfehlung: {[(r['video_id'], r['action']) for r in plan['ranking']]}"
+    assert content["video_id"] == "a" and content["brief"]["format"].startswith("Short")
+    assert "Sekunde" in content["brief"]["material"] and content["brief"]["hook"]
+    # Das laufende Experiment bleibt unangetastet und sichtbar.
+    running = session.scalar(select(GrowthAction).where(GrowthAction.status == "running"))
+    assert running.action == "probe_missing_evidence" and running.evaluate_after == TODAY+timedelta(days=12)
+    assert any(r["video_id"] == "a" and r["action"] == "probe_missing_evidence" for r in plan["ranking"])
+    # Ohne gemessene Kurve entsteht keine Empfehlung – nichts wird erfunden.
+    session.query(VideoRetention).delete()
+    session.commit()
+    ge.run(session, NOW+timedelta(hours=1), contexts, base)
+    session.expire_all()
+    later = session.scalar(select(Plan).order_by(Plan.id.desc())).plan
+    assert not [q for q in later["queue"] if q["action"] == "produce_for_opportunity"]
