@@ -1474,12 +1474,15 @@ def run(session, now, contexts, base, budget=None):
     session.commit()
     for entry in (plan.get("queue") or [])[:QUEUE_LIMIT]:
         external = entry.get("opportunity") or {}
+        brief = entry.get("brief") or {}
         log.info("growth action rank=%s video=%r action=%s lever=%r metric=%s window=%s chance=%s/%s score=%s "
-                 "audience=%r evidence=%s why=%r",
+                 "evidence=%s material=%r start=%r review=%r packaging=%r audience_evidence=%r why=%r",
                  entry.get("rank"), entry.get("title"), entry.get("action"), entry.get("primary_lever"),
                  entry.get("target_metric"), entry.get("window_days"), external.get("kind"), external.get("gap"),
-                 external.get("score"), entry.get("audience"), (entry.get("evidence") or {}).get("level"),
-                 (entry.get("why") or "")[:200])
+                 external.get("score"), (entry.get("evidence") or {}).get("level"),
+                 (brief.get("material") or "")[:160], (brief.get("hook") or "")[:120],
+                 (brief.get("review") or "")[:80], (brief.get("packaging") or "")[:140],
+                 (brief.get("audience_evidence") or "")[:90], (entry.get("why") or "")[:140])
     log.info("growth plan day=%s queue=%s running=%s evaluated=%s note=%r", today, len(plan.get("queue") or []),
              len(plan.get("running_experiments") or []), evaluated, (plan.get("queue_note") or "")[:160])
     # Je Video nachvollziehbar, warum daraus heute eine Maßnahme wird oder nicht. Eine leere Queue ohne
