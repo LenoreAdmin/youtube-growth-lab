@@ -19,7 +19,7 @@ from googleapiclient.errors import HttpError
 from .db import Session
 from .models import (Video, TrafficDaily, AudiencePool, ChannelPlaylist, DiscoveryRun, DiscoveryQuota, DiscoveryQuery,
                      DiscoveryItem, DiscoveryChannel, DiscoverySignal, DiscoveryOpportunity, LearningDataset,
-                     VideoProfile, utcnow)
+                     VideoProfile, VideoRetention, utcnow)
 from .backfill import upsert, classify as classify_error
 from .budget import Budget, SyncBudgetExceeded
 from .jobs import acquire, release
@@ -278,6 +278,34 @@ def collect_signals(session, client, videos, now, budget, stats):
                     set_={"views": statement.excluded.views, "watch_minutes": statement.excluded.watch_minutes}))
                 stats["signals"] += 1
             session.commit()
+
+
+def collect_retention(session, client, videos, now, budget, stats):
+    """Die Retentionskurve je eigenem Video – eigene Analytics, keine Data-API-Quota, einmal am Tag."""
+    if not hasattr(client, "retention_curve"):
+        return
+    end = analytics_end(now)
+    start = end-timedelta(days=SIGNAL_WINDOW_DAYS-1)
+    today = pacific_day(now)
+    for video in videos:
+        if budget:
+            budget.check()
+        stored = session.get(VideoRetention, video.id)
+        if stored is not None and stored.window_end == end:
+            continue
+        try:
+            rows = client.retention_curve(video.id, start, end)
+        except Exception:
+            continue        # Fehlt die Kurve, wird nichts behauptet – dann gibt es keine Shorts-Empfehlung.
+        if not rows:
+            continue
+        statement = upsert(session, VideoRetention).values(video_id=video.id, rows=rows[:200],
+                                                           window_start=start, window_end=end, fetched_day=today)
+        session.execute(statement.on_conflict_do_update(index_elements=["video_id"], set_={
+            "rows": statement.excluded.rows, "window_start": statement.excluded.window_start,
+            "window_end": statement.excluded.window_end, "fetched_day": statement.excluded.fetched_day}))
+        stats["retention"] = stats.get("retention", 0)+1
+    session.commit()
 
 
 def collect_embeds(session, client, videos, now, budget, stats):
@@ -731,6 +759,13 @@ def _run(client, now, budget, force):
             except Exception as exc:
                 s.rollback()
                 issues.append(f"embeds: {type(exc).__name__}")
+            try:
+                collect_retention(s, client, videos, now, budget, stats)
+            except (SyncBudgetExceeded, QuotaExhausted, Throttled):
+                raise
+            except Exception as exc:
+                s.rollback()
+                issues.append(f"retention: {type(exc).__name__}")
             tags = own_tags(s, client, quota, videos, budget, now)
             try:
                 collect_playlists(s, client, quota, now, budget, stats)

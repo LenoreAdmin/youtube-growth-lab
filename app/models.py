@@ -581,3 +581,17 @@ class VideoProfile(Base):
     channel_keywords: Mapped[str | None] = mapped_column(String(1000))
     channel_topics: Mapped[list] = mapped_column(JSON, default=list)
     fetched_day: Mapped[date] = mapped_column(Date)
+
+
+class VideoRetention(Base):
+    """Retentionskurve eines eigenen Videos: an welcher Stelle wie viel Publikum noch zuschaut.
+
+    Gespeichert als Liste von Punkten (relative Position im Video, Anteil des Publikums). Daraus leitet
+    die Engine ab, welcher Abschnitt eines bestehenden Videos als eigener kurzer Inhalt tragen koennte.
+    """
+    __tablename__ = "video_retention"
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True)
+    rows: Mapped[list] = mapped_column(JSON, default=list)
+    window_start: Mapped[date] = mapped_column(Date)
+    window_end: Mapped[date] = mapped_column(Date)
+    fetched_day: Mapped[date] = mapped_column(Date)

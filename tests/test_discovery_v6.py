@@ -201,11 +201,15 @@ def test_external_opportunity_steers_v5_action_but_never_overrides_protection():
     strong = {"score": 72, "kind": "search", "key": "train journey music", "gap": "existing_video_opportunity",
               "demand_source": "own_analytics", "evidence_level": "own_analytics", "actionable": True, "audience": "train journey music",
               "context_usable": True, "context_reason": "Eigene Analytics belegen das Thema."}
-    action, notes = ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong)
-    assert action == "target_search_opportunity" and "own_analytics" in notes[0]
+    from test_actionable_growth import CHANNEL as OWN
+    # Belegte Chance plus Katalogvideo mit Leistung: das vollstaendige Packaging, kein Textmikrotest.
+    action, notes = ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong, OWN)
+    assert action == "repackage_for_reach" and "own_analytics" in notes[0]
+    # Ohne jede bekannte Verteilung und ohne Material entsteht keine Aufgabe.
+    assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong)[0] == "observe"
     # Proxy-only Chance (keine unabhaengige Evidenz) loest niemals eine aktive Massnahme aus.
     assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, {**strong, "actionable": False, "evidence_level": "weak_proxy"})[0] == "observe"
-    assert ge.choose_action("needs_discovery", f, {"signals": []}, base, [], {}, {**strong, "gap": "suggested_opportunity", "kind": "suggested"})[0] == "target_suggested_cluster"
+    assert ge.choose_action("needs_discovery", f, {"signals": []}, base, [], {}, {**strong, "gap": "suggested_opportunity", "kind": "suggested"})[0] == "observe", "Textmikrotest ist keine Aufgabe mehr"
     assert ge.choose_action("needs_packaging_test", f, {"signals": []}, base, [], {}, {**strong, "gap": "packaging_opportunity"})[0] == "packaging_for_audience"
     from test_actionable_growth import CHANNEL
     assert ge.choose_action("revival_candidate", f, {"signals": ["x", "y"]}, base, [], {}, strong, CHANNEL)[0] == "revive_existing_video"

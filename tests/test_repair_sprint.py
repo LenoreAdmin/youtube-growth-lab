@@ -248,7 +248,7 @@ def test_observe_does_not_block_a_later_actionable_opportunity(monkeypatch, sess
     session.expire_all()
     actions = [(r.created_day, r.action, r.status) for r in session.scalars(select(GrowthAction).order_by(GrowthAction.id))]
     # Am Folgetag – nicht erst nach 10 Tagen Sperre.
-    assert actions[-1][1] == "target_suggested_cluster" and actions[-1][0] == TODAY+timedelta(days=1)
+    assert actions[-1][1] == "repackage_for_reach" and actions[-1][0] == TODAY+timedelta(days=1)
     assert actions[0][2] == "superseded"
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.day.desc())).plan
     assert plan["active_status"] == "active" and plan["priority_video_id"] == "a"

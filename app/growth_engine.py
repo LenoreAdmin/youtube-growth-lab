@@ -11,7 +11,7 @@ from datetime import date, timedelta
 import logging
 from math import tanh
 from sqlalchemy import select
-from .models import (GrowthAssessment, GrowthScore, GrowthAction, GrowthPlan, AnalyticsForecast, ChannelPlaylist,
+from .models import (GrowthAssessment, GrowthScore, GrowthAction, GrowthPlan, AnalyticsForecast, ChannelPlaylist, Snapshot,
                      Decision, DiscoveryRun, Video, utcnow)
 from .backfill import upsert
 from .history import pacific_day, lag_days, features_at, paid_profile, PAID_WINDOW_DAYS
@@ -26,7 +26,8 @@ STATES = ["protect_momentum", "scale_opportunity", "needs_packaging_test", "need
           "needs_distribution", "revival_candidate", "observe", "paid_cooldown", "paid_excluded", "insufficient_data"]
 PAID_LABELS = {"organic": "Aktuell organisch", "organic_with_paid_history": "Aktuell organisch – historisch Werbung vorhanden",
                "paid_cooldown": "Paid-Cooldown", "paid_excluded": "Aktuell Paid beeinflusst"}
-ACTIONS = ["protect_no_change", "test_title", "test_thumbnail", "test_title_thumbnail", "investigate_retention",
+ACTIONS = ["repackage_for_reach", "produce_for_opportunity",
+           "protect_no_change", "test_title", "test_thumbnail", "test_title_thumbnail", "investigate_retention",
            "improve_discovery", "cross_promote", "create_followup_content", "observe",
            "target_search_opportunity", "target_suggested_cluster", "packaging_for_audience", "revive_existing_video",
            "distribute_playlist_context", "probe_missing_evidence",
@@ -54,10 +55,12 @@ OBJECTIVES = {"protect_no_change": "Discovery", "test_title": "Viewer", "test_th
               "investigate_retention": "Watchtime", "improve_discovery": "Discovery", "cross_promote": "Discovery",
               "create_followup_content": "Subscriber", "observe": "Watchtime", "target_search_opportunity": "Viewer",
               "target_suggested_cluster": "Discovery", "packaging_for_audience": "Viewer", "revive_existing_video": "Viewer",
+              "repackage_for_reach": "Discovery", "produce_for_opportunity": "Discovery",
               "distribute_playlist_context": "Discovery", "probe_missing_evidence": "Discovery",
               "link_from_own_video": "Discovery", "place_in_existing_playlist": "Discovery",
               "create_playlist_context": "Discovery"}
-WINDOWS = {"protect_no_change": 7, "test_title": 14, "test_thumbnail": 14, "test_title_thumbnail": 14, "investigate_retention": 14,
+WINDOWS = {"repackage_for_reach": 28, "produce_for_opportunity": 30,
+           "protect_no_change": 7, "test_title": 14, "test_thumbnail": 14, "test_title_thumbnail": 14, "investigate_retention": 14,
            "improve_discovery": 14, "cross_promote": 14, "create_followup_content": 30, "observe": 7,
            "target_search_opportunity": 28, "target_suggested_cluster": 28, "packaging_for_audience": 14, "revive_existing_video": 28,
            "distribute_playlist_context": 14, "probe_missing_evidence": 14,
@@ -66,6 +69,7 @@ TARGETS = {"protect_no_change": "views_7d", "test_title": "views_7d", "test_thum
            "investigate_retention": "watch_minutes_7d", "improve_discovery": "discovery_views_7d", "cross_promote": "views_7d",
            "create_followup_content": "subscribers_7d", "observe": "views_7d", "target_search_opportunity": "discovery_views_7d",
            "target_suggested_cluster": "discovery_views_7d", "packaging_for_audience": "ctr_or_views", "revive_existing_video": "views_7d",
+           "repackage_for_reach": "impressions_7d", "produce_for_opportunity": "views_7d",
            "distribute_playlist_context": "discovery_views_7d", "probe_missing_evidence": "impressions_7d",
            "link_from_own_video": "discovery_views_7d", "place_in_existing_playlist": "discovery_views_7d",
            "create_playlist_context": "discovery_views_7d"}
@@ -76,6 +80,8 @@ DO_NOT_CHANGE = {"protect_no_change": ["Titel", "Thumbnail", "Beschreibung/Tags"
                  "cross_promote": ["Titel und Thumbnail des beworbenen Videos"], "create_followup_content": ["Bestehendes Video"],
                  "observe": ["Alles – zuerst messen"], "target_search_opportunity": ["Thumbnail", "Videoinhalt"],
                  "target_suggested_cluster": ["Titel", "Thumbnail", "Videoinhalt"], "packaging_for_audience": ["Videoinhalt", "Sichtbarkeit"],
+                 "repackage_for_reach": ["Videoinhalt", "Endscreens", "Playlist-Zuordnung"],
+                 "produce_for_opportunity": ["Bestehende Videos bleiben unveraendert"],
                  "revive_existing_video": ["Videoinhalt", "Sichtbarkeit"],
                  # Distribution-Experimente fassen das Paket ausdrücklich nicht an: sonst misst man zwei Dinge gleichzeitig.
                  "distribute_playlist_context": ["Titel", "Thumbnail", "Beschreibung", "Videoinhalt", "Sichtbarkeit"],
@@ -96,6 +102,9 @@ LEVERS = {"protect_no_change": "keiner – bewusst keine Änderung", "observe": 
           "cross_promote": "interne Verlinkung aus dem stärkeren eigenen Video",
           "create_followup_content": "neues Video", "target_search_opportunity": "Wortlaut in Beschreibung und Kapiteln",
           "target_suggested_cluster": "Wortlaut der Beschreibung dieses Videos",
+          "repackage_for_reach": "Packaging dieses Videos: Titel, Thumbnail und die ersten Beschreibungszeilen "
+                                 "als eine zusammenhaengende Aenderung",
+          "produce_for_opportunity": "neuer kurzer Inhalt aus vorhandenem eigenen Material",
           "packaging_for_audience": "genau eine Packaging-Dimension",
           "revive_existing_video": "interne Verlinkung und Playlist-Platzierung",
           "distribute_playlist_context": "interne Verlinkung: bestehende Playlist/eigenes Video → dieses Video",
@@ -121,13 +130,23 @@ DEFERRED_LEVERS = {"distribute_playlist_context": ["Beschreibungstext auf ein be
 # Die beeinflussbaren Eigenschaften des eigenen Assets, die auf algorithmische Auslieferung zielen.
 # Interne Wegeleitung (Endscreen, Playlist, Verlinkung) ist ausdruecklich KEIN Growth-Mechanismus und
 # niemals ein Ersatz, nur damit ein Experiment existiert.
-GROWTH_LEVERS = ("test_title", "test_thumbnail", "test_title_thumbnail", "packaging_for_audience",
-                 "target_search_opportunity", "target_suggested_cluster", "improve_discovery",
-                 "revive_existing_video", "investigate_retention")
+# Die beiden Maßnahmen mit realistischer Wirkung auf zusaetzliche Auslieferung. Alles andere ist
+# entweder ein Mikrotest ohne Wirkungsgroesse oder interne Wegeleitung.
+REACH_LEVERS = ("repackage_for_reach", "produce_for_opportunity")
+GROWTH_LEVERS = REACH_LEVERS+("test_title", "test_thumbnail", "test_title_thumbnail", "packaging_for_audience",
+                              "revive_existing_video")
+# Mikromaßnahmen am Text allein: bleiben im Code fuer laufende Faelle, erscheinen aber nicht mehr als
+# neue Aufgabe. Der Suchintent wandert in das Repackaging-Buendel, wo er Wirkung haben kann.
+MICRO_LEVERS = ("target_search_opportunity", "target_suggested_cluster", "improve_discovery",
+                "investigate_retention", "cross_promote")
 ROUTING_LEVERS = ("link_from_own_video", "place_in_existing_playlist", "create_playlist_context",
                   "probe_missing_evidence", "cross_promote")
 # Welche YouTube-Discovery-Flaeche eine Maßnahme beeinflussen soll – gehoert in jeden Vorschlag.
 DISCOVERY_SURFACES = {
+    "repackage_for_reach": "Browse/Home und Suggested: Zuschauerreaktion auf vorhandene und neu entstehende "
+                           "Impressions",
+    "produce_for_opportunity": "Shorts-Feed und Browse: eigene Auslieferung eines neuen Inhalts, unabhaengig "
+                               "von der Impressions-Basis der alten Videos",
     "test_title": "Browse/Home und Suggested: Klickentscheidung bei bestehender Auslieferung",
     "test_thumbnail": "Browse/Home und Suggested: Klickentscheidung bei bestehender Auslieferung",
     "test_title_thumbnail": "Browse/Home und Suggested: Klickentscheidung bei bestehender Auslieferung",
@@ -617,6 +636,73 @@ def recent_results(session, limit=6):
     return out
 
 
+def reach_options(state, f, external, channel=None):
+    """Welche wirksamen Maßnahmen stehen fuer dieses Video gerade zur Verfuegung – in welcher Ordnung?
+
+    Zwei Kandidaten, beide mit realer Wirkungsmoeglichkeit auf zusaetzliche Auslieferung:
+
+    repackage_for_reach    Das Packaging eines Katalogvideos als eine zusammenhaengende Aenderung. Ein
+                           besseres Paket verbessert die Zuschauerreaktion auf vorhandene und neu
+                           entstehende Impressions und begueinstigt damit weitere Auslieferung. Dass
+                           YouTube daraufhin neu testet, wird nicht behauptet.
+    produce_for_opportunity Ein neuer kurzer Inhalt aus belegtem eigenen Material – eigene Auslieferung,
+                           unabhaengig von der Impressions-Basis der alten Videos.
+    """
+    channel = channel or {}
+    if state in ("protect_momentum", "paid_excluded", "paid_cooldown", "insufficient_data", "revival_candidate"):
+        return []
+    # Ohne belegten Themenkontext gibt es nichts, worauf ein neuer Titel oder ein Brief ausgerichtet waere:
+    # eine unbelegte Chance darf keinen Wortlaut vorgeben (V6-Regel, hier unveraendert).
+    attested = (bool((external or {}).get("actionable"))
+                and (external or {}).get("evidence_level") in STRONG_EVIDENCE
+                and bool((external or {}).get("context_usable")))
+    audience = (external or {}).get("audience") or (external or {}).get("key")
+    options = []
+    lifetime = channel.get("lifetime_views") or 0
+    if attested and lifetime > 0:
+        options.append({"action": "repackage_for_reach", "notes": [
+            f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und ein "
+            f"Katalogvideo mit {int(lifetime)} Views Gesamtleistung: das Paket ist der staerkste verfuegbare "
+            "Hebel an diesem Asset.",
+            "Ein besseres Paket verbessert die Zuschauerreaktion auf vorhandene und neu entstehende "
+            "Impressions und kann damit weitere Auslieferung beguenstigen."]})
+    segment = channel.get("segment")
+    if attested and segment:
+        options.append({"action": "produce_for_opportunity", "notes": [
+            f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und "
+            f"verwendbares eigenes Material: {segment['evidence']}",
+            "Ein neuer kurzer Inhalt erhaelt eigene Auslieferung und haengt nicht an der Impressions-Basis "
+            "der bestehenden Videos."]})
+    return options
+
+
+def strong_segment(session, video, minimum=0.35):
+    """Der staerkste zusammenhaengende Abschnitt eines eigenen Videos – aus der gemessenen Retentionskurve.
+
+    Ohne Kurve gibt es kein Ergebnis und damit keine Empfehlung: geraten wird hier nichts.
+    """
+    from .models import VideoRetention
+    stored = session.get(VideoRetention, video.id)
+    rows = sorted((r for r in (stored.rows if stored else []) if r.get("ratio") is not None),
+                  key=lambda r: r.get("at") or 0)
+    if len(rows) < 5 or not video.duration_seconds:
+        return None
+    best, window = None, max(2, len(rows)//5)        # etwa ein Fuenftel des Videos als Fenster
+    for start in range(0, len(rows)-window+1):
+        chunk = rows[start:start+window]
+        score = sum(r["ratio"] for r in chunk)/len(chunk)
+        if best is None or score > best["ratio"]:
+            best = {"ratio": round(score, 3), "from": chunk[0]["at"], "to": chunk[-1]["at"]}
+    if best is None or best["ratio"] < minimum:
+        return None
+    duration = video.duration_seconds
+    return {"from_seconds": int(best["from"]*duration), "to_seconds": int(best["to"]*duration),
+            "audience_ratio": best["ratio"],
+            "evidence": (f"Gemessene Retentionskurve: zwischen Sekunde {int(best['from']*duration)} und "
+                         f"{int(best['to']*duration)} sind im Schnitt {round(best['ratio']*100)} % des Publikums "
+                         "noch dabei – der staerkste Abschnitt dieses Videos.")}
+
+
 def strong_hypothesis(external, action):
     """Traegt diese Maßnahme eine datenbelegte Hypothese auf zusaetzliche algorithmische Auslieferung?
 
@@ -638,12 +724,19 @@ def choose_action(state, f, rev, base, experiments, record, external=None, chann
         ref = med.get(key, {})
         return ref.get("median") is not None and ref.get("n", 0) >= 30 and f is not None and f.get(key) is not None and f[key] < ref["median"]
     notes = []
+    reach = reach_options(state, f, external, channel)
     if state == "protect_momentum":
         action = "protect_no_change"
     elif running:
         action, notes = "observe", [f"Experiment #{running[0]['decision_id']} läuft – erst messen, keine weitere Änderung stapeln."]
+    elif reach:
+        # Wirkung vor Messbarkeit: das vollstaendige Packaging eines Katalogvideos oder ein neuer kurzer
+        # Inhalt aus vorhandenem Material. Mikromaßnahmen am Text allein entstehen nicht mehr neu.
+        action, notes = reach[0]["action"], reach[0]["notes"]
     elif (external and external.get("actionable") and (external.get("score") or 0) >= EXTERNAL_MIN_SCORE
-            and external.get("context_usable") and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS):
+            and external.get("context_usable") and state in EXTERNAL_STATES and external.get("gap") in GAP_ACTIONS
+            # Ein Revival ist ein Hebel am ganzen Asset und bleibt erlaubt; Mikroaenderungen am Text nicht.
+            and (state == "revival_candidate" or GAP_ACTIONS[external["gap"]] not in MICRO_LEVERS)):
         action = "revive_existing_video" if state == "revival_candidate" and external["gap"] != "packaging_opportunity" else GAP_ACTIONS[external["gap"]]
         notes = [f"Externe Chance ({external['kind']}: {external['key']}, Score {external['score']}, Evidenz: "
                  f"{external.get('evidence_level')}) lenkt die Aktion."]
@@ -807,6 +900,23 @@ def experiment_steps(action, title, f, external, channel):
             "Kapitelnamen aufnehmen, ohne Clickbait.",
             "Titel, Thumbnail und Playlist-Platzierung bleiben in diesem Fenster unverändert – das sind eigene Experimente.",
             hold],
+        "repackage_for_reach": [
+            f"Titel von „{title}“ neu fassen: der Themenkontext {topic} muss im Titel vorkommen, in der Sprache "
+            "der Zielgruppe, ohne Clickbait.",
+            "Thumbnail ersetzen: ein Motiv, das denselben Themenkontext sofort erkennbar macht und sich von den "
+            "Nachbarvideos unterscheidet.",
+            f"Erste zwei Beschreibungszeilen auf denselben Kontext und den belegten Suchintent ausrichten.",
+            "Diese drei Teile gehoeren zu einer Maßnahme und werden gemeinsam umgesetzt. Danach am Video nichts "
+            "weiter aendern: kein Endscreen, keine Playlist-Zuordnung, kein Schnitt.",
+            hold],
+        "produce_for_opportunity": ([
+            f"Kurzen Inhalt (Short, bis 60 Sekunden) aus „{title}“ schneiden: {(channel or {}).get('segment', {}).get('evidence', '')}",
+            "Hook in den ersten zwei Sekunden: genau die Stelle, an der das Publikum im Original am stabilsten "
+            "bleibt – ohne Vorlauf, ohne Intro.",
+            f"Packaging des neuen Inhalts auf den Themenkontext {topic} ausrichten; das bestehende Video bleibt "
+            "unveraendert.",
+            "Als eigenes Video veroeffentlichen. Es wird danach wie jedes Video gemessen.",
+            hold] if (channel or {}).get("segment") else None),
         "target_suggested_cluster": [
             f"Nur den Wortlaut: Themenkontext {topic} in den ersten zwei Beschreibungszeilen von „{title}“ "
             "aufnehmen, in der Sprache der Zielgruppe und ohne Clickbait."+surface,
@@ -865,6 +975,14 @@ def action_details(action, state, f, regime, base, scoreboard, rev, momentum, co
         "create_followup_content": "Muster funktioniert: verwandtes Folgevideo als vorregistriertes Experiment.",
         "observe": "Keine belastbare Änderung ableitbar oder Messung läuft: beobachten und Daten sammeln.",
         "target_search_opportunity": f"Reale/proxy Suchnachfrage „{(external or {}).get('key', '')}“ passt zum Video: Titel-/Beschreibungswortlaut auf diese Suchintention ausrichten (ohne Clickbait), Kapitel und Playlist-Kontext ergänzen.",
+        "repackage_for_reach": (f"Das Video hat bereits Publikum gefunden und steht in der Naehe von "
+                                f"„{(external or {}).get('audience', '')}“. Ein Paket, das diesen Themenkontext "
+                                "klar erkennbar macht, verbessert die Zuschauerreaktion auf vorhandene und neu "
+                                "entstehende Impressions und kann damit weitere Auslieferung beguenstigen."),
+        "produce_for_opportunity": (f"Fuer die belegte Audience „{(external or {}).get('audience', '')}“ fehlt ein "
+                                    "passender eigener Inhalt. Ein kurzer Inhalt aus dem staerksten Abschnitt eines "
+                                    "vorhandenen Videos erhaelt eigene Auslieferung im Shorts-Feed und in Browse, "
+                                    "unabhaengig von der Impressions-Basis der alten Videos."),
         "target_suggested_cluster": f"YouTube liefert uns bereits neben „{(external or {}).get('audience', '')}“ aus. Trägt die Beschreibung dieses Videos denselben Themenkontext in der Sprache dieser Zuschauer, wird die Zuordnung eindeutiger und die Empfehlung neben diesen Videos wahrscheinlicher – zusätzliche Auslieferung dort, wo das passende Publikum nachweislich schon ist.",
         "packaging_for_audience": f"Das Video passt zu „{(external or {}).get('key', '')}“, aber Titel/Thumbnail sprechen diese Audience nicht an: Packaging für diese Zielgruppe testen (eine Dimension).",
         "revive_existing_video": f"Altes Video mit Revival-Signalen und externer Chance „{(external or {}).get('key', '')}“: gezielt für diese Audience reaktivieren (Playlist, Endscreens, Community-Post, ggf. Titel).",
@@ -963,6 +1081,17 @@ def evaluate_actions(session, now, by_id, base):
         start = row.started_day or row.created_day
         after_end = start+timedelta(days=row.window_days)
         if after_end > known_end:
+            continue
+        if row.action == "produce_for_opportunity":
+            # Der neue Inhalt ist ein eigenes Video und wird nach dem Upload wie jedes Video gemessen.
+            # Eine Vorher/Nachher-Rechnung am Quellvideo waere eine falsche Zuordnung.
+            row.status, row.outcome, row.evaluated_at = EVALUATED, "inconclusive", now
+            row.evaluation = {"reason": ("Produktionsempfehlung: der neue Inhalt wird als eigenes Video gemessen, "
+                                         "nicht am Quellvideo."),
+                              "note": "Keine Vorher/Nachher-Aussage am bestehenden Asset.",
+                              "hypothesis": {"lever": row.action,
+                                             "surface": (row.payload or {}).get("discovery_surface")}}
+            evaluated += 1
             continue
         history = by_id.get(row.video_id)
         if history is None:
@@ -1200,7 +1329,13 @@ def run(session, now, contexts, base, budget=None):
         held = [{"title": by_title.get(vid) or vid, **info} for vid, info in locked.items() if vid != video.id]
         channel = {"delivery_leader": delivery_leader(contexts, video.id, locked), "playlists": playlists,
                    "source_candidates": candidates, "source": unique_source(candidates),
-                   "locked_sources": held}
+                   "locked_sources": held,
+                   # Reale Faktoren fuer die Wirkungsabschaetzung: was das Video insgesamt geleistet hat,
+                   # und welcher Abschnitt daraus als eigener kurzer Inhalt belegt traegt.
+                   "lifetime_views": (session.scalar(select(Snapshot.views).where(Snapshot.video_id == video.id)
+                                                     .order_by(Snapshot.observed_at.desc()).limit(1))
+                                      or sum(row.views for row in history.daily.values())),
+                   "segment": strong_segment(session, video)}
         running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING,
                                                             GrowthAction.version == VERSION)
                                  .order_by(GrowthAction.started_day.desc()))
@@ -1270,6 +1405,8 @@ def run(session, now, contexts, base, budget=None):
             "started_day": str(current.started_day) if current and current.started_day else None,
             "do_not_change": details["do_not_change"], "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": details.get("held_since"), "momentum": momentum,
+            "lifetime_views": channel.get("lifetime_views"), "material": channel.get("segment"),
+            "brief": (brief_for(action, video, external, channel) if action in REACH_LEVERS else None),
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
                          "audience": external.get("audience"), "demand_source": external.get("demand_source"),
                          "evidence_level": external.get("evidence_level"), "actionable": bool(external.get("actionable")),
@@ -1354,6 +1491,7 @@ def queue_entry(row, rank, today):
             "context_reason": ext.get("context_reason") if ext else None,
             "discovery_surface": DISCOVERY_SURFACES.get(row["action"], "algorithmische YouTube-Flächen"),
             "reliability": row.get("reliability"), "reliability_note": row.get("reliability_note"),
+            "reach_factors": reach_outlook(row)["factors"], "brief": row.get("brief"),
             "expected_signal": f"{row['target_metric']} steigt messbar über die Wochenschwankung des Kanals",
             "target_metric": row["target_metric"], "window_days": row["window_days"],
             "measure_from": str(today), "evaluate_after": row["next_evaluation"],
@@ -1367,17 +1505,72 @@ def queue_entry(row, rank, today):
                     "(Read-only-Zugriff); es zählt erst als laufend, wenn du die Durchführung bestätigst."}
 
 
+def brief_for(action, video, external, channel):
+    """Der produktionsfaehige Teil der Maßnahme – nur aus belegten Angaben, nichts erfunden."""
+    external, channel = external or {}, channel or {}
+    audience = external.get("audience") or external.get("key")
+    segment = channel.get("segment")
+    if action == "repackage_for_reach":
+        return {"audience": audience, "format": "Bestehendes Video, neues Packaging",
+                "material": f"„{video.title}“ selbst ({int(channel.get('lifetime_views') or 0)} Views Gesamtleistung)",
+                "hook": None,
+                "concept": ("Titel, Thumbnail und die ersten Beschreibungszeilen auf denselben Themenkontext "
+                            "ausrichten, in dem dieses Video bereits ausgeliefert wird."),
+                "packaging": f"Themenkontext: {audience}",
+                "why": ("Ein Paket, das den Themenkontext klar erkennbar macht, verbessert die Zuschauerreaktion "
+                        "auf vorhandene und neu entstehende Impressions und kann damit weitere Auslieferung "
+                        "beguenstigen.")}
+    if action == "produce_for_opportunity" and segment:
+        return {"audience": audience, "format": "Short (bis 60 Sekunden)",
+                "material": (f"Sekunde {segment['from_seconds']}–{segment['to_seconds']} aus „{video.title}“"),
+                "hook": segment["evidence"],
+                "concept": ("Den staerksten Abschnitt als eigenstaendigen kurzen Inhalt veroeffentlichen, ohne "
+                            "Vorlauf und ohne Intro."),
+                "packaging": f"Themenkontext: {audience}",
+                "why": ("Ein neuer kurzer Inhalt erhaelt eigene Auslieferung im Shorts-Feed und in Browse und haengt "
+                        "nicht an der Impressions-Basis der bestehenden Videos.")}
+    return None
+
+
+def reach_outlook(row):
+    """Aussicht auf zusaetzliche Reichweite – aus mehreren realen Faktoren, bewusst ohne Prognosezahl.
+
+    Es gibt hier keinen erfundenen Erwartungswert. Stattdessen eine nachvollziehbare Ordnung aus Faktoren,
+    die alle aus echten Daten kommen, und die mit dem Vorschlag mitgeliefert werden:
+
+    Hebelstaerke      Packaging oder neuer Inhalt wirken auf Auslieferung; interne Wegeleitung nicht.
+    Aktuelle Lage     Gibt es ueberhaupt Impressions, auf die eine Verbesserung wirken kann?
+    Historie          Hat dieses Video schon einmal Publikum gefunden?
+    Chance            Wie stark ist die belegte Audience-/Search-Chance?
+    Material          Liegt verwendbares eigenes Material vor (gemessener Abschnitt)?
+
+    Keiner der Faktoren allein entscheidet; die Reihenfolge ist ihre gemeinsame Ordnung.
+    """
+    external = row.get("external") or {}
+    baseline = row.get("baseline") or {}
+    factors = {
+        "lever": ("Reichweiten-Hebel" if row["action"] in REACH_LEVERS else
+                  "Hebel am eigenen Asset" if row["action"] in GROWTH_LEVERS else "interne Wegeleitung"),
+        "current_impressions_7d": baseline.get("impressions_7d"),
+        "current_views_7d": baseline.get("views_7d"),
+        "lifetime_views": row.get("lifetime_views"),
+        "chance": external.get("evidence_level"),
+        "material": bool(row.get("material")),
+    }
+    lever_rank = 2 if row["action"] in REACH_LEVERS else 1 if row["action"] in GROWTH_LEVERS else 0
+    history_rank = 2 if (row.get("lifetime_views") or 0) >= 10000 else 1 if (row.get("lifetime_views") or 0) > 0 else 0
+    current_rank = 1 if (baseline.get("impressions_7d") or 0) >= MIN_MEASURABLE_IMPRESSIONS_7D else 0
+    chance_rank = EVIDENCE_LEVEL_RANK.get(external.get("evidence_level"), 0)
+    material_rank = 1 if row.get("material") else 0
+    order = (-lever_rank, -chance_rank, -history_rank, -material_rank, -current_rank,
+             -(row.get("active_priority_score") or 0))
+    return {"order": order, "factors": factors}
+
+
 def experiment_queue(ranking, today):
     """A short daily queue: at most one experiment per video, winners protected, running tests untouched."""
     queue, running, not_testable, rank = [], [], [], 0
-    # Reihenfolge ausschliesslich nach Reichweiten-Aussicht: echter Growth-Hebel am eigenen Asset zuerst,
-    # dann die Staerke der Evidenz, dann das geschaetzte Zusatzpotenzial. Nicht nach Messbarkeit.
-    def growth_order(r):
-        external = r.get("external") or {}
-        return (0 if r["action"] in GROWTH_LEVERS else 1,
-                -EVIDENCE_LEVEL_RANK.get(external.get("evidence_level"), 0),
-                -(r["active_priority_score"] or 0), -(r["opportunity_score"] or 0))
-    for row in sorted((r for r in ranking if r["active_eligible"]), key=growth_order):
+    for row in sorted((r for r in ranking if r["active_eligible"]), key=lambda r: reach_outlook(r)["order"]):
         if row.get("action_status") == RUNNING:
             # Vom Menschen bestätigt gestartet und in Messung: sichtbar halten, nicht erneut anstoßen.
             running.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
@@ -1386,12 +1579,12 @@ def experiment_queue(ranking, today):
                             "evaluate_after": row["next_evaluation"], "target_metric": row["target_metric"],
                             "note": "Läuft seit deiner Bestätigung – bis zur Auswertung nichts weiter an diesem Video ändern."})
             continue
-        if row["action"] in EVIDENCE_ONLY:
+        if row["action"] in EVIDENCE_ONLY+MICRO_LEVERS:
             # Sicherheitsnetz: falls ein anderer Pfad so etwas waehlt, bleibt es intern.
             not_testable.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
                                  "state": row["state"], "baseline": row.get("baseline"),
-                                 "reason": ("Datenerzeugung ist keine Reichweiten-Maßnahme und erscheint nicht in "
-                                            "JETZT TUN.")})
+                                 "reason": ("Keine Reichweiten-Maßnahme: Datenerzeugung und Mikroänderungen am "
+                                            "Text allein erscheinen nicht in JETZT TUN.")})
             continue
         ok, why = measurable(row.get("baseline"), row.get("target_metric"), row.get("action"))
         row["reliability"] = RELIABLE if ok else INDICATIVE
@@ -1464,7 +1657,16 @@ def daily_plan(ranking, today, record, results=None):
                 "objective": None, "do_not_change": sorted({d for r in ranking for d in r["do_not_change"]}), "success_metric": None,
                 "success_criterion": None, "window_days": None, "next_evaluation": None,
                 "confidence": min((r["confidence"] for r in ranking), key=lambda c: {"insufficient_data": 0, "low": 1, "moderate": 2}.get(c, 0)),
-                "internal_signals": None, "external_signals": {"available": False, "note": "Keine externe Chance lenkt derzeit eine aktive Maßnahme."},
+                # Keine Maßnahme ist eine Entscheidung – die Signale bleiben trotzdem sichtbar, sonst
+                # verliert die Ansicht genau die Information, aus der die naechste Chance entsteht.
+                "internal_signals": ({"state": ranking[0]["state"], "regime": ranking[0]["regime"],
+                                      "breakout": ranking[0]["breakout"],
+                                      "opportunity_score": ranking[0]["opportunity_score"],
+                                      "paid_status": ranking[0]["paid_status"]} if ranking else None),
+                "external_signals": ({**(ranking[0].get("external") or {}), "available": bool(ranking[0].get("external")),
+                                      "note": "Signal vorhanden, aber derzeit keine Maßnahme daraus."}
+                                     if ranking and ranking[0].get("external") else
+                                     {"available": False, "note": "Keine externe Chance lenkt derzeit eine aktive Maßnahme."}),
                 "combined_decision": NO_ACTIVE_ACTION+"; "+("Schutz aktiv für: "+", ".join(p["title"] for p in protected)+"." if protected else "beobachten und Daten sammeln.")}
     objective = top["objective"]
     if subscriber and subscriber["video_id"] == top["video_id"] and top["action"] == "cross_promote" \

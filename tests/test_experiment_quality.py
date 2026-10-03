@@ -63,7 +63,7 @@ def test_a_proven_context_may_guide_the_choice_of_an_existing_playlist():
               "demand_source": "own_traffic_plus_public_proxy", "context_usable": True,
               "context_reason": "3 Nachbarvideos aus 2 Kanälen teilen 2 Begriffe"}
     # Bei belegtem Thema lenkt die Chance die Aktion – hier den Wortlaut-Test.
-    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, proven, CHANNEL)[0] == "target_suggested_cluster"
+    assert ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, proven, CHANNEL)[0] == "repackage_for_reach"
     # Ein belegtes Thema darf die Auswahl einer real existierenden Playlist leiten – hier existiert keine,
     # also wird auch keine genannt; die belegte Quelle ist das Video.
     d = details_for("link_from_own_video", f, [], proven)
@@ -117,7 +117,7 @@ def test_a_low_baseline_limits_the_certainty_not_the_growth_measure():
               "kind": "suggested", "key": "nachbarschaft"}
     rows = [queue_row("a", "Trainstories", "needs_distribution", "link_from_own_video", 70, priority=1,
                       baseline={"views_7d": 18, "impressions_7d": 42, "ctr_7d": .08}),
-            queue_row("b", "Shine On", "needs_distribution", "target_suggested_cluster", 60, priority=2,
+            queue_row("b", "Shine On", "needs_distribution", "repackage_for_reach", 60, priority=2,
                       baseline={"views_7d": 1, "impressions_7d": 5, "ctr_7d": .06}, external=strong),
             queue_row("c", "11AM Album - Teaser", "needs_distribution", "link_from_own_video", 80, priority=3,
                       baseline={"views_7d": 0, "impressions_7d": 1, "ctr_7d": None})]
@@ -139,11 +139,11 @@ def test_every_growth_action_names_its_discovery_surface_and_certainty():
     assert "Suggested" in ge.DISCOVERY_SURFACES["target_suggested_cluster"]
     assert "Suche" in ge.DISCOVERY_SURFACES["target_search_opportunity"]
     assert "Browse" in ge.DISCOVERY_SURFACES["packaging_for_audience"]
-    row = queue_row("a", "Trainstories", "needs_distribution", "target_suggested_cluster", 70, priority=1,
+    row = queue_row("a", "Trainstories", "needs_distribution", "repackage_for_reach", 70, priority=1,
                     external={"actionable": True, "evidence_level": "own_analytics", "score": 61.1,
                               "gap": "suggested_opportunity", "kind": "suggested", "key": "nachbarschaft"})
     entry = ge.daily_plan([row], TODAY, {})["queue"][0]
-    assert entry["discovery_surface"].startswith("Suggested/Related")
+    assert entry["discovery_surface"].startswith("Browse/Home und Suggested")
     assert entry["reliability"] in (ge.RELIABLE, ge.INDICATIVE)
     js = Path("app/static/app.js").read_text(encoding="utf-8")
     assert "Algorithmische Fläche" in js and "Aussagekraft" in js
@@ -167,3 +167,33 @@ def test_the_suggested_cluster_measure_touches_exactly_one_existing_asset():
     mechanism = details_for("target_suggested_cluster", f, [], external, title="Sealand - Shine On",
                            channel=channel)["reason"]
     assert "Beschreibung dieses Videos" in mechanism and "Endscreens" not in mechanism
+
+
+def test_the_two_reach_levers_carry_a_production_brief_and_their_factors():
+    """JETZT TUN muss produktionsfaehig sein: Format, Material, Hook, Konzept, Packaging, Wirkung."""
+    from types import SimpleNamespace
+    from pathlib import Path
+    video = SimpleNamespace(id="a", title="Sealand - Trainstories", duration_seconds=214)
+    external = {"audience": "Nachbarcluster", "key": "nachbarschaft", "evidence_level": "own_analytics",
+                "actionable": True, "context_usable": True, "score": 61.1, "gap": "suggested_opportunity"}
+    channel = {"lifetime_views": 21081, "segment": None}
+    pack = ge.brief_for("repackage_for_reach", video, external, channel)
+    assert pack["format"].startswith("Bestehendes Video") and "21081" in pack["material"]
+    assert "Zuschauerreaktion auf vorhandene und neu entstehende Impressions" in pack["why"]
+    assert "testet" not in pack["why"], "keine Behauptung ueber YouTubes Testverhalten"
+    segment = {"from_seconds": 42, "to_seconds": 70, "audience_ratio": 0.61,
+               "evidence": "Gemessene Retentionskurve: zwischen Sekunde 42 und 70 sind im Schnitt 61 % dabei"}
+    short = ge.brief_for("produce_for_opportunity", video, external, {**channel, "segment": segment})
+    assert short["format"].startswith("Short") and "Sekunde 42" in short["material"]
+    assert "Retentionskurve" in short["hook"] and "Shorts-Feed" in short["why"]
+    # Ohne gemessenes Material gibt es keinen Brief und damit keine Empfehlung.
+    assert ge.brief_for("produce_for_opportunity", video, external, channel) is None
+    # Die Reihenfolge nennt ihre Faktoren.
+    row = queue_row("a", "Trainstories", "needs_distribution", "repackage_for_reach", 70, priority=1,
+                    external=external, lifetime_views=21081, material=None,
+                    baseline={"views_7d": 1, "impressions_7d": 5, "ctr_7d": .02})
+    factors = ge.reach_outlook(row)["factors"]
+    assert factors["lever"] == "Reichweiten-Hebel" and factors["chance"] == "own_analytics"
+    assert factors["lifetime_views"] == 21081 and factors["current_impressions_7d"] == 5
+    js = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert "Produktion:" in js and "Faktoren der Reihenfolge" in js

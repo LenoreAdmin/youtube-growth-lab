@@ -26,7 +26,9 @@ SOURCE = {"video_id": "b", "title": "Shine On", "impressions_7d": 900, "views_7d
 # Belegte Ressourcenlage: genau ein deutlich bestausgeliefertes eigenes Video, Inventar geprueft, keine Playlist.
 CHANNEL = {"delivery_leader": SOURCE, "source_candidates": [SOURCE], "source": SOURCE,
            "playlists": {"state": "none", "items": [], "checked_day": str(TODAY),
-                         "note": "Inventar geprueft: der Kanal hat keine Playlist."}}
+                         "note": "Inventar geprueft: der Kanal hat keine Playlist."},
+           # Reale Faktoren der Wirkungsabschaetzung: Gesamtleistung des Videos und verwendbares Material.
+           "lifetime_views": 21081, "segment": None}
 
 
 def details_for(action, f, notes, external=None, title="Trainstories", channel=None):
@@ -168,8 +170,8 @@ def test_without_a_hypothesis_there_is_no_task_at_all():
               "gap": "suggested_opportunity", "kind": "suggested", "key": "nachbarschaft",
               "audience": "Nachbarcluster"}
     action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, strong, CHANNEL)
-    assert action == "target_suggested_cluster" and action in ge.GROWTH_LEVERS
-    assert ge.DISCOVERY_SURFACES[action].startswith("Suggested/Related")
+    assert action == "repackage_for_reach" and action in ge.REACH_LEVERS
+    assert ge.DISCOVERY_SURFACES[action].startswith("Browse/Home und Suggested")
 
 
 def test_multi_signal_proxy_may_steer_the_action_but_a_single_proxy_may_not():
@@ -179,7 +181,7 @@ def test_multi_signal_proxy_may_steer_the_action_but_a_single_proxy_may_not():
               "audience": "train journey music", "families": ["own_traffic_mix", "search_probe"], "uncertainty": "mittel"}
     strong["context_usable"] = True
     action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, strong, CHANNEL)
-    assert action == "target_search_opportunity" and "multi_signal_proxy" in notes[0]
+    assert action == "repackage_for_reach" and "multi_signal_proxy" in notes[0]
     # Dieselbe Chance ohne belegtes Thema: kein Wortlaut-Experiment, sondern der interne Verteilungstest.
     hypothesis = {**strong, "context_usable": False, "context_reason": "Nur 1 gemeinsames Stichwort", "key": "shine"}
     action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, hypothesis, CHANNEL)
@@ -207,7 +209,7 @@ def queue_row(video_id, title, state, action, score, **changes):
 
 def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone():
     rows = [queue_row("a", "Trainstories", "needs_distribution", "distribute_playlist_context", 70),
-            queue_row("b", "Shine On", "needs_distribution", "target_suggested_cluster", 60),
+            queue_row("b", "Shine On", "needs_distribution", "repackage_for_reach", 60),
             queue_row("c", "Dritter", "protect_momentum", "protect_no_change", 95),
             queue_row("d", "Vierter", "needs_discovery", "improve_discovery", 55, action_status="running",
                       started_day=str(TODAY-timedelta(days=3)), held_since=str(TODAY-timedelta(days=3))),

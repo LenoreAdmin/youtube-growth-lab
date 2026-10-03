@@ -219,6 +219,20 @@ class YouTube:
             rows.extend(result.get("items", []))
         return rows
 
+    def retention_curve(self, video, start, end):
+        """Wie viel Publikum an welcher Stelle des Videos noch dabei ist – eigene Analytics, keine Quota.
+
+        Ohne diese Kurve koennte das System nicht sagen, welche Sekunden eines vorhandenen Videos stark
+        sind; eine Shorts-Empfehlung waere geraten.
+        """
+        request = self.analytics.reports().query(ids="channel==MINE", startDate=str(start), endDate=str(end),
+            metrics="audienceWatchRatio", dimensions="elapsedVideoTimeRatio", filters=f"video=={video}")
+        result = self.execute(request)
+        headers = [h["name"] for h in result.get("columnHeaders", [])]
+        rows = [dict(zip(headers, row)) for row in result.get("rows", [])]
+        return [{"at": float(r.get("elapsedVideoTimeRatio") or 0), "ratio": float(r.get("audienceWatchRatio") or 0)}
+                for r in rows]
+
     def embedded_locations(self, video, start, end, max_results=25):
         """Fremde Seiten, auf denen unser Video eingebettet abgespielt wurde – eigene Analytics, keine Quota."""
         request = self.analytics.reports().query(ids="channel==MINE", startDate=str(start), endDate=str(end),
