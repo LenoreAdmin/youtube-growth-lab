@@ -174,3 +174,24 @@ def test_the_card_renders_the_button_and_the_running_block(monkeypatch, session,
     assert "start-experiment" in source and "/start" in source
     # Der Klick-Handler haengt an der Liste, damit auch neu gerenderte Buttons funktionieren.
     assert 'addEventListener("click"' in source and "closest(\".start-experiment\")" in source
+
+
+def test_the_publish_button_is_wired_to_the_container_that_renders_it():
+    """Der Production-Bug: der Listener hing an einer anderen Sektion als die Karten.
+
+    Der Klick tat sichtbar nichts, weil `#queueList` die Karten rendert, der Handler aber an
+    `#trafficQueue` registriert war. Hier wird genau diese Verdrahtung geprueft, nicht die Funktion.
+    """
+    source = Path("app/static/app.js").read_text(encoding="utf-8")
+    # Welcher Container rendert den Button? Die naechste innerHTML-Zuweisung darueber.
+    markup = source.index("publish-short")
+    before = source[:markup]
+    container = before[before.rindex('$("'):].split('"')[1]
+    assert '.innerHTML=' in before[before.rindex('$("'):], before[-200:]
+    assert container == "queueList"
+    listeners = [line for line in source.splitlines()
+                 if 'addEventListener("click"' in line and 'closest(".publish-short")' in line]
+    assert len(listeners) == 1, listeners
+    assert f'$("{container}").addEventListener' in listeners[0], listeners[0]
+    # Und der Start-Button bleibt am selben Container erreichbar.
+    assert 'closest(".start-experiment")' in listeners[0]

@@ -327,8 +327,8 @@ async function publishShort(button){
   await load();
  }finally{button.disabled=false;button.textContent=label}
 }
-$("trafficQueue").addEventListener("click",e=>{const p=e.target.closest(".publish-short");if(p){guarded(()=>publishShort(p))}else{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))}});
-$("queueList").addEventListener("click",e=>{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))});
+$("trafficQueue").addEventListener("click",e=>{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))});
+$("queueList").addEventListener("click",e=>{const s=e.target.closest(".publish-short");if(s){guarded(()=>publishShort(s))}else{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))}});
 async function load(){
  state=await api("/api/dashboard");$("login").hidden=true;$("workspace").hidden=false;$("token").value="";
  $("connection").textContent=state.channels.map(c=>c.title).join(" · ")||"Wartet auf erste Synchronisierung";

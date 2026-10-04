@@ -1861,6 +1861,8 @@ def publish_action(session, action_id, raw, now=None):
     if row.status == PROPOSED:
         start_action(session, action_id, now)
     session.flush()
+    log.info("content publish action=%s source=%s short=%s candidate=%s linked=%s status=%s",
+             row.id, row.video_id, video_id, candidate_id, linked, row.status)
     return {"id": row.id, "video_id": row.video_id, "published_video_id": video_id,
             "candidate_id": candidate_id, "linked": linked, "status": row.status,
             "started_day": row.started_day, "evaluate_after": row.evaluate_after,
