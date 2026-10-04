@@ -389,3 +389,102 @@ def vocabulary(session, video):
             continue
         words |= {t for t in _tokens(row.text or "") if t not in HELPER_WORDS}
     return words
+
+
+# ---------------------------------------------------------------- Uploadfertige Maßnahme
+TITLE_MAX = 100          # YouTube-Grenze fuer Titel.
+EXCERPT = "Short"        # Sachlicher Zusatz, der den Ausschnitt vom ganzen Video unterscheidet.
+
+
+def selected(candidates):
+    """Genau ein Kandidat: der vorderste, der als fertig geschnittene Datei vorliegt.
+
+    Die Reihenfolge entsteht bereits aus Messung, Retention, Chance und Gelerntem. Hier kommt nur die
+    Ausfuehrbarkeit hinzu: ohne Datei gibt es nichts zu veroeffentlichen, und ein Vorschlag, der eine
+    nicht existierende Datei nennt, ist keine Maßnahme.
+    """
+    for candidate in candidates or []:
+        if candidate.get("render_path"):
+            return candidate
+    return None
+
+
+def youtube_title(video, candidate):
+    """Ein konkreter Titel, ausschliesslich aus belegtem eigenen Material.
+
+    Grundlage ist der eigene Videotitel – unsere eigene Angabe, keine Behauptung. Ein gesungener Satz
+    kommt nur davor, wenn er gegen den eigenen Songtext ausgerichtet ist. Eine maschinell erkannte
+    Zeile taucht im Titel nie auf; sie koennte verhoert sein.
+    """
+    base = " ".join((video.title or "").split())
+    if candidate.get("hook") and candidate.get("hook_source") == "aligned":
+        title = f"„{candidate['hook'].strip()}“ – {base}"
+    else:
+        title = f"{base} – {EXCERPT}"
+    return title[:TITLE_MAX]
+
+
+def youtube_description(video, candidate, context=None):
+    """Eine Beschreibung nur aus belegten Angaben – oder None, wenn es nichts Belegtes zu sagen gibt.
+
+    Belegt ist: dass dieser Ausschnitt aus unserem eigenen Video stammt, und dessen Adresse. Ein
+    Themenkontext kommt nur dazu, wenn er nachweislich geteilt wird. Der Name eines Nachbarvideos
+    gehoert nicht hierher.
+    """
+    lines = [f"Ausschnitt aus „{' '.join((video.title or '').split())}“",
+             f"Ganzes Video: https://youtu.be/{video.id}"]
+    if context:
+        lines.append(" · ".join(context))
+    if candidate.get("hook") and candidate.get("hook_source") == "aligned":
+        lines.insert(0, candidate["hook"].strip())
+    return "\n".join(lines)
+
+
+def upload_package(video, candidates, context=None):
+    """Die fertige Maßnahme: welche Datei, welcher Titel, welche Beschreibung.
+
+    Fehlt die geschnittene Datei, gibt es kein Paket – dann ist die Maßnahme nicht ausfuehrbar und das
+    wird gesagt, statt eine Datei zu nennen, die es nicht gibt.
+    """
+    candidate = selected(candidates)
+    if candidate is None:
+        return None
+    return {"candidate_id": candidate.get("candidate_id"), "file": candidate["render_path"],
+            "title": youtube_title(video, candidate),
+            "description": youtube_description(video, candidate, context),
+            "start_seconds": candidate["start_seconds"], "end_seconds": candidate["end_seconds"],
+            "duration_seconds": candidate["duration_seconds"],
+            "source_video_id": video.id}
+
+
+def attach_pending(session, today=None):
+    """Nachgetragene Video-IDs verbinden, sobald der Sync das neue Video kennt.
+
+    Der Kanalinhaber traegt die ID direkt nach dem Upload ein; unser eigenes Video erscheint aber erst
+    mit dem naechsten stuendlichen Sync in der Datenbank. Bis dahin liegt die ID in der Maßnahme und
+    wird hier eingehaengt – danach erfasst die Engine die Auslieferung des Shorts wie bei jedem Video.
+    """
+    from .models import GrowthAction, Video
+    today = today or date.today()
+    linked = []
+    rows = session.scalars(select(GrowthAction).where(GrowthAction.action == "produce_for_opportunity"))
+    for row in rows:
+        payload = row.payload or {}
+        pending = payload.get("pending_video_id")
+        candidate_id = ((payload.get("brief") or {}).get("upload") or {}).get("candidate_id")
+        if not pending or not candidate_id:
+            continue
+        if session.get(Video, pending) is None:
+            continue                    # Noch nicht synchronisiert – beim naechsten Lauf erneut versuchen.
+        # Das gemerkte Datum liegt als Zeichenkette in der Nutzlast; die Spalte will ein Datum.
+        day = payload.get("pending_day")
+        try:
+            day = date.fromisoformat(day) if isinstance(day, str) else (day or today)
+        except ValueError:
+            day = today
+        if attach_published(session, candidate_id, pending, day) is None:
+            continue
+        row.payload = {**payload, "pending_video_id": None, "published_video_id": pending}
+        session.flush()
+        linked.append((candidate_id, pending))
+    return linked

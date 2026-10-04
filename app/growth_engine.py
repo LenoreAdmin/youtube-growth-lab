@@ -42,7 +42,7 @@ LOW_IMPRESSIONS_7D = 300  # Absolute delivery floor used only until the channel 
 SCARCE_SHARE = 0.5        # Below half the channel median of impressions, delivery is the bottleneck.
 MIN_ROUTE_VIEWS = 10      # Below this the 7-day traffic mix is noise and names no route.
 WEAK_SOURCE_VIEWS_7D = 20 # A source below this can barely pass on traffic – say so before anyone spends effort.
-QUEUE_LIMIT = 3           # A short daily queue: never ten simultaneous changes on one channel.
+QUEUE_LIMIT = 1           # JETZT TUN zeigt genau die aktuell staerkste ausfuehrbare Reichweitenaktion.
 ROUTE_LABELS = {"traffic_search": "YouTube-Suche", "traffic_suggested": "Empfehlungen neben anderen Videos",
                 "traffic_browse": "Kanalseite, Playlists, Startseite, Endscreens", "traffic_external": "externe Links"}
 GAP_ACTIONS = {"existing_video_opportunity": "target_search_opportunity", "search_opportunity": "target_search_opportunity",
@@ -679,13 +679,15 @@ def reach_options(state, f, external, channel=None):
     if attested and (segment or found):
         # Mit analysierter Originaldatei stehen mehrere messbar unterschiedliche Kandidaten zur Wahl;
         # ohne sie bleibt es beim retentionsbasierten Kandidatenmaterial.
-        if found:
-            primary = found["primary"]
-            notes = [f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und "
-                     f"{len(found['candidates'])} messbar unterschiedliche Kandidaten aus der eigenen Originaldatei.",
-                     f"Vorne in der Ordnung: Sekunde {primary['start_seconds']:.1f}–{primary['end_seconds']:.1f}. "
-                     + "; ".join(primary["evidence"][:3]),
-                     found["learning"]["note"]]
+        if found and found.get("upload"):
+            package = found["upload"]
+            notes = [f"Der Short ist fertig geschnitten und kann sofort veroeffentlicht werden "
+                     f"({package['duration_seconds']:.0f} s aus dem eigenen Material).",
+                     f"Belegte Audience-Chance: {audience} (Evidenz: {(external or {}).get('evidence_level')})."]
+        elif found:
+            # Kandidaten ja, fertige Datei nein: dann ist nichts zu veroeffentlichen und die Maßnahme
+            # waere keine Handlung, sondern eine Aufgabe. Sie entfaellt.
+            return options
         else:
             notes = [f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und "
                      f"verwendbares eigenes Material: {segment['evidence']}"]
@@ -759,39 +761,30 @@ def content_material(session, video, external, today):
     if not found:
         return None
     stored = ci.store(session, video, found["candidates"], today)
-    return {**found, "candidates": stored, "primary": stored[0], "alternatives": stored[1:]}
+    # Das Paket ist die Maßnahme: welche fertige Datei, welcher Titel, welche Beschreibung. Ohne
+    # geschnittene Datei gibt es kein Paket und damit keine ausfuehrbare Maßnahme.
+    package = ci.upload_package(video, stored, shared_context(session, video, external))
+    return {**found, "candidates": stored, "primary": stored[0], "alternatives": stored[1:],
+            "upload": package}
 
 
 def content_steps(title, channel, topic, hold):
     """Ausfuehrbare Schritte fuer genau einen Kandidaten – mit exakter Zeit, nicht mit einer Kategorie."""
     channel = channel or {}
     found = channel.get("content")
+    if found and found.get("upload"):
+        package = found["upload"]
+        # Genau die Handlung, die youtube.readonly dem System verwehrt – fertig vorbereitet.
+        steps = [f"Diese Datei als YouTube-Short hochladen: {package['file']}",
+                 f"Titel einsetzen: {package['title']}"]
+        if package.get("description"):
+            steps.append("Beschreibung einsetzen:\n"+package["description"])
+        steps.append("Danach die Video-ID oder den Link des neuen Shorts unten eintragen – das System erfasst "
+                     "die Auslieferung ab dann selbst.")
+        steps.append("Am bestehenden Video nichts aendern.")
+        return steps
     if found:
-        primary = found["primary"]
-        rendered = primary.get("render_path")
-        others = ", ".join(f"Sekunde {c['start_seconds']:.1f}–{c['end_seconds']:.1f}"
-                           for c in found["alternatives"]) or "keine weiteren"
-        return [
-            (f"Kandidat {primary['rank']} aus „{title}“ schneiden: Sekunde {primary['start_seconds']:.1f} bis "
-             f"{primary['end_seconds']:.1f} ({primary['duration_seconds']:.1f} s)."
-             + (f" Bereits gerendert: {rendered}" if rendered else
-                " Rendern lokal mit `python -m app.cli content --render <Zielverzeichnis>`.")),
-            ((f"Hook ist die an dieser Stelle gesungene Zeile, gegen den eigenen Songtext ausgerichtet: "
-              f"„{primary['hook']}“."
-              if primary.get("hook_source") == "aligned" else
-              f"Hook waere die maschinell erkannte Zeile „{primary['hook']}“ (Sicherheit "
-              f"{primary.get('hook_confidence')}). Nicht gegen eigenen Songtext geprueft: vor der "
-              "Verwendung gegenlesen oder den Songtext als .txt neben die Datei legen.")
-             if primary.get("hook") else
-             "Kein zitierfaehiger eigener Wortlaut belegt – der Einstieg ist der gemessene Startpunkt, "
-             "ohne erfundenen Hook."),
-            f"Packaging des neuen Inhalts auf den Themenkontext {topic} ausrichten; das bestehende Video bleibt "
-            "unveraendert.",
-            f"Freigeben und als eigenes Video veroeffentlichen. Alternativen bleiben erhalten: {others}.",
-            ("Nach dem Upload einmal verbinden: `python -m app.cli published --candidate "
-             f"{primary.get('candidate_id')} --video-id <neue Video-ID>`. Erst dadurch werden Impressions, "
-             "Views, Trafficquellen und Retention des Shorts diesem Kandidaten zugeordnet."),
-            hold]
+        return None             # Kandidaten ohne fertige Datei sind keine ausfuehrbare Maßnahme.
     segment = channel.get("segment")
     if not segment:
         return None
@@ -1402,6 +1395,14 @@ def run(session, now, contexts, base, budget=None):
     today = pacific_day(now)
     by_id = {c["history"].video.id: c["history"] for c in contexts}
     playlists = playlist_inventory(session, today)
+    try:
+        # Der Kanalinhaber traegt die ID direkt nach dem Upload ein; das Video erscheint erst mit dem
+        # naechsten Sync. Sobald es da ist, wird es seinem Kandidaten zugeordnet und gemessen.
+        from . import content as _ci
+        for candidate_id, published in _ci.attach_pending(session, today):
+            log.info("content published candidate=%s video=%s", candidate_id, published)
+    except Exception as exc:
+        log.warning("content attach_pending failed=%s", type(exc).__name__)
     evaluated = evaluate_actions(session, now, by_id, base)
     session.flush()
     record = track_record(session)
@@ -1634,6 +1635,12 @@ def queue_entry(row, rank, today):
             "measure_from": str(today), "evaluate_after": row["next_evaluation"],
             "success_criterion": row["success_criterion"], "stop_criterion": row.get("stop_criterion"),
             "do_not_change": row["do_not_change"], "executed_automatically": False,
+            "publish": ({"required": True, "label": "Veröffentlicht – Video-ID oder Link eintragen",
+                         "endpoint": f"/api/growth/actions/{row.get('action_id')}/published",
+                         "field": "video",
+                         "effect": ("Danach misst das System die Auslieferung des neuen Shorts selbst und "
+                                    "entscheidet daraus die nächste Maßnahme.")}
+                        if row["action"] == "produce_for_opportunity" and row.get("action_id") else None),
             "confirm": {"required": True, "label": "Als durchgeführt markieren – Experiment starten",
                         "endpoint": f"/api/growth/actions/{row.get('action_id')}/start" if row.get("action_id") else None,
                         "effect": "Erst danach werden Baseline eingefroren, Startzeitpunkt gesetzt, das Messfenster gestartet "
@@ -1735,43 +1742,18 @@ def brief_for(session, action, video, external, channel):
                         "auf vorhandene und neu entstehende Impressions und kann damit weitere Auslieferung "
                         "beguenstigen.")}
     found = channel.get("content")
-    if action == "produce_for_opportunity" and found:
-        primary = found["primary"]
-        listed = [{"rank": c["rank"], "candidate_id": c.get("candidate_id"),
-                   "start_seconds": c["start_seconds"], "end_seconds": c["end_seconds"],
-                   "duration_seconds": c["duration_seconds"],
-                   "window": f"Sekunde {c['start_seconds']:.1f}–{c['end_seconds']:.1f}",
-                   "hook": c.get("hook"), "hook_source": c.get("hook_source"),
-                   "properties": {k: v for k, v in (c["properties"] or {}).items() if v is not None},
-                   "evidence": c["evidence"], "render_path": c.get("render_path")}
-                  for c in found["candidates"]]
-        return {"audience": None, "format": "Short (bis 60 Sekunden)",
-                "material": (f"Eigene Originaldatei zu „{video.title}“: {len(listed)} messbar unterschiedliche "
-                             f"Kandidaten, jeder mit exakter Start- und Endzeit"),
-                "candidates": listed,
-                "hook": ((f"„{primary['hook']}“ – die an Sekunde {primary['start_seconds']:.1f} gesungene "
-                          "Zeile, gegen den eigenen Songtext ausgerichtet"
-                          if primary.get("hook_source") == "aligned" else
-                          f"„{primary['hook']}“ – an Sekunde {primary['start_seconds']:.1f} maschinell erkannt "
-                          f"(Sicherheit {primary.get('hook_confidence')}), nicht gegen eigenen Songtext "
-                          "geprueft – vor der Verwendung gegenlesen")
-                         if primary.get("hook") else
-                         f"Einstieg bei Sekunde {primary['start_seconds']:.1f}; kein zitierfaehiger eigener "
-                         "Wortlaut belegt, deshalb kein Textzitat."),
-                "review": ("Freigabe vor dem Upload bleibt menschlich; Start, Ende und Reihenfolge liegen "
-                           "gemessen fest."),
-                "evidence": " | ".join(primary["evidence"]),
-                "learning": found["learning"]["note"],
-                "concept": (f"Kandidat {primary['rank']} (Sekunde {primary['start_seconds']:.1f}–"
-                            f"{primary['end_seconds']:.1f}) als eigenstaendigen kurzen Inhalt veroeffentlichen. "
-                            "Das bestehende Video bleibt unveraendert; die weiteren Kandidaten bleiben als "
-                            "Alternativen erhalten."),
-                "audience_evidence": f"Nachbarschaft: {audience} (Evidenz, kein Packaging-Thema)",
-                "packaging": packaging,
-                "why": ("Ein neuer kurzer Inhalt erhaelt eigene Auslieferung im Shorts-Feed und in Browse und haengt "
-                        "nicht an der Impressions-Basis der bestehenden Videos. Nach der Veroeffentlichung werden "
-                        "seine eigenen Impressions, Views, Trafficquellen und Retention diesem Kandidaten "
-                        "zugeordnet und wirken auf die kuenftige Auswahl.")}
+    if action == "produce_for_opportunity" and found and found.get("upload"):
+        package = found["upload"]
+        return {"audience": None, "format": "YouTube Short",
+                "action": "Diesen Short veroeffentlichen",
+                "upload": package,
+                "material": (f"Fertig geschnitten aus „{video.title}“: Sekunde "
+                             f"{package['start_seconds']:.0f}–{package['end_seconds']:.0f} "
+                             f"({package['duration_seconds']:.0f} s). Vom System ausgewaehlt."),
+                "why": ("Ein neues eigenes Video erhaelt eigene Auslieferung im Shorts-Feed und in Browse und "
+                        "haengt nicht an der Impressions-Basis der bestehenden Videos."),
+                "after": ("Nach dem Upload die Video-ID oder den Link hier eintragen. Danach erfasst das System "
+                          "die Auslieferung des Shorts automatisch und entscheidet daraus die naechste Maßnahme.")}
     if action == "produce_for_opportunity" and segment:
         review = segment.get("review_required")
         return {"audience": None, "format": "Short (bis 60 Sekunden)",
@@ -1829,6 +1811,65 @@ def reach_outlook(row):
     return {"order": order, "factors": factors}
 
 
+ID_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def youtube_id(raw):
+    """Die Video-ID aus einem Link oder einer rohen ID. Geraten wird nichts.
+
+    Akzeptiert wird, was YouTube selbst vergibt: elf Zeichen aus dem bekannten Alphabet, entweder
+    direkt eingegeben oder als letztes verwertbares Teil eines Links.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    for separator in ("?", "&", "#", "/", "="):
+        text = text.replace(separator, " ")
+    for part in reversed(text.split()):
+        if len(part) == 11 and all(character in ID_CHARACTERS for character in part):
+            return part
+    return None
+
+
+def publish_action(session, action_id, raw, now=None):
+    """Der Kanalinhaber hat den Short veroeffentlicht und traegt die ID ein.
+
+    Damit ist die Maßnahme ausgefuehrt: das Messfenster startet, und der neue Short wird seinem
+    Kandidaten zugeordnet. Existiert das Video in unserer Datenbank noch nicht – der Sync laeuft
+    stuendlich –, bleibt die ID in der Maßnahme und wird beim naechsten Lauf eingehaengt.
+    """
+    from . import content as ci
+    now = now or utcnow()
+    today = pacific_day(now)
+    row = session.get(GrowthAction, action_id)
+    if row is None:
+        raise LookupError(f"Maßnahme {action_id} existiert nicht.")
+    if row.action != "produce_for_opportunity":
+        raise ValueError("Nur eine Veroeffentlichung kann so eingetragen werden.")
+    video_id = youtube_id(raw)
+    if video_id is None:
+        raise ValueError("Keine YouTube-Video-ID erkennbar. Link oder ID einsetzen.")
+    payload = row.payload or {}
+    candidate_id = ((payload.get("brief") or {}).get("upload") or {}).get("candidate_id")
+    row.payload = {**payload, "pending_video_id": video_id, "pending_day": str(today)}
+    session.flush()
+    linked = False
+    if candidate_id and session.get(Video, video_id) is not None:
+        linked = ci.attach_published(session, candidate_id, video_id, today) is not None
+        if linked:
+            row.payload = {**row.payload, "pending_video_id": None, "published_video_id": video_id}
+    if row.status == PROPOSED:
+        start_action(session, action_id, now)
+    session.flush()
+    return {"id": row.id, "video_id": row.video_id, "published_video_id": video_id,
+            "candidate_id": candidate_id, "linked": linked, "status": row.status,
+            "started_day": row.started_day, "evaluate_after": row.evaluate_after,
+            "note": ("Veroeffentlichung erfasst. Die Auslieferung des neuen Shorts wird ab jetzt "
+                     "automatisch gemessen." if linked else
+                     "Veroeffentlichung erfasst. Der stuendliche Sync holt das neue Video; danach wird "
+                     "seine Auslieferung automatisch gemessen.")}
+
+
 def experiment_queue(ranking, today):
     """A short daily queue: at most one experiment per video, winners protected, running tests untouched."""
     queue, running, not_testable, rank = [], [], [], 0
@@ -1841,12 +1882,14 @@ def experiment_queue(ranking, today):
                             "evaluate_after": row["next_evaluation"], "target_metric": row["target_metric"],
                             "note": "Läuft seit deiner Bestätigung – bis zur Auswertung nichts weiter an diesem Video ändern."})
             continue
-        if row["action"] in EVIDENCE_ONLY+MICRO_LEVERS:
-            # Sicherheitsnetz: falls ein anderer Pfad so etwas waehlt, bleibt es intern.
+        if row["action"] not in GROWTH_LEVERS:
+            # Harte Produktgrenze: Analyse, Beobachtung, Datenerzeugung, interne Wegeleitung und
+            # Mikroaenderungen am Text sind keine Reichweitenaktionen. Sie bleiben intern und
+            # erscheinen nie als Aufgabe.
             not_testable.append({"video_id": row["video_id"], "title": row["title"], "action": row["action"],
                                  "state": row["state"], "baseline": row.get("baseline"),
-                                 "reason": ("Keine Reichweiten-Maßnahme: Datenerzeugung und Mikroänderungen am "
-                                            "Text allein erscheinen nicht in JETZT TUN.")})
+                                 "reason": ("Keine Reichweitenaktion – bleibt intern und wird dir nicht "
+                                            "als Aufgabe gegeben.")})
             continue
         ok, why = measurable(row.get("baseline"), row.get("target_metric"), row.get("action"))
         row["reliability"] = RELIABLE if ok else INDICATIVE
@@ -1897,7 +1940,8 @@ def daily_plan(ranking, today, record, results=None):
             "not_testable": not_testable,
             "now_do": queue[0] if queue else None,
             "queue_note": ("Ausführbare Experimente für heute – von dir auszuführen, das System ändert nichts auf YouTube. "
-                           f"Höchstens {QUEUE_LIMIT} gleichzeitig und nie zwei am selben Video."
+                           "Genau die aktuell staerkste ausfuehrbare Reichweitenaktion. Alles Weitere "
+                           "entscheidet das System intern und meldet sich erst, wenn es wieder etwas zu tun gibt."
                            if queue else "Heute keine datenbegründete Reichweiten-Maßnahme: geschützte oder laufende "
                                         "Videos, oder für kein Video liegt eine belegte Audience-/Placement-Chance vor."),
             "momentum_top": {"video_id": momentum_top["video_id"], "title": momentum_top["title"], "state": momentum_top["state"],

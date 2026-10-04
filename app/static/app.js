@@ -42,7 +42,6 @@ function renderHealth(h){
 const STATE_LABELS={protect_momentum:"Momentum schützen",scale_opportunity:"Chance skalieren",needs_packaging_test:"Packaging testen",needs_retention_analysis:"Retention analysieren",needs_discovery:"Discovery verbessern",needs_distribution:"Verteilung fehlt – Distribution zuerst",revival_candidate:"Revival-Kandidat",observe:"Beobachten",paid_cooldown:"Paid-Cooldown",paid_excluded:"Aktuell Paid beeinflusst",insufficient_data:"Zu wenig Daten"};
 const PAID_LABELS={organic:"Aktuell organisch",organic_with_paid_history:"Aktuell organisch · historisch Werbung",paid_cooldown:"Paid-Cooldown",paid_excluded:"Aktuell Paid beeinflusst"};
 function paidCell(r){const p=r.paid||{};const s=r.paid_status||"organic";const extra=s==="paid_cooldown"||s==="paid_excluded"?` · noch ${p.days_until_clean??"?"} saubere Tage (${p.clean_days??0}/${p.required_clean_days||32})`:"";return `<span class="${s==="paid_excluded"?"down":s==="organic"?"up":""}">${esc(PAID_LABELS[s]||s)}</span><small>${esc(r.paid_note||"")}${esc(extra)}</small>`}
-const CONTENT_LABELS={energy_rel:"Energie",repetition_strength:"Wiederholung",vocal_presence:"Gesangsanteil",novelty:"Grenzschärfe",visual_cut_density:"Schnitte/s",retention_rel:"Retention"};
 const ACTION_LABELS={protect_no_change:"Nichts ändern – Momentum schützen",test_title:"Titel testen",test_thumbnail:"Thumbnail testen",test_title_thumbnail:"Titel + Thumbnail testen",investigate_retention:"Retention untersuchen",improve_discovery:"Discovery verbessern",cross_promote:"Quer bewerben",create_followup_content:"Folgevideo planen",observe:"Beobachten",target_search_opportunity:"Suchintention gezielt bedienen",target_suggested_cluster:"Suggested-Cluster ansteuern",packaging_for_audience:"Packaging für Ziel-Audience",revive_existing_video:"Bestehendes Video reaktivieren",distribute_playlist_context:"Verteilung über Playlist/Endscreen erhöhen",probe_missing_evidence:"Fehlende Evidenz risikoarm beschaffen",link_from_own_video:"Aus eigenem Video verlinken (Endscreen/Infokarte)",place_in_existing_playlist:"In bestehende Playlist aufnehmen",create_playlist_context:"Thematische Playlist anlegen"};
 const OUTCOME_LABELS={positive:"positiv",negative:"negativ",neutral:"neutral",inconclusive:"unklar"};
 const stateClass=s=>s==="protect_momentum"||s==="scale_opportunity"||s==="revival_candidate"?"up":s==="paid_excluded"?"down":"";
@@ -102,32 +101,22 @@ function renderQueue(p){
  $("queueMeta").textContent=p?`Plan vom ${p.day||"—"} · höchstens ${p.queue_limit||3} gleichzeitig`:"";
  $("queueNote").textContent=(p&&p.queue_note)||"";
  $("queueList").innerHTML=q.map(e=>{
-  const ev=e.evidence||{},b=e.baseline||{};
-  return `<article class="queue-item"><h3>#${e.rank} ${esc(e.title)} — ${esc(ACTION_LABELS[e.action]||e.action)}</h3>
-  <p><strong>Ziel:</strong> ${esc(e.objective||"—")}${e.audience?" · <strong>Audience/Kontext:</strong> "+esc(e.audience):""}</p>
-  ${e.brief?`<p><strong>Produktion:</strong> ${esc(e.brief.format||"")}${e.brief.material?` · Material: ${esc(e.brief.material)}`:""}${e.brief.hook?`<br><small>Einstieg: ${esc(e.brief.hook)}</small>`:""}${e.brief.review?`<br><small>${esc(e.brief.review)}</small>`:""}${e.brief.evidence?`<br><small>${esc(e.brief.evidence)}</small>`:""}${e.brief.audience_evidence?`<br><small>${esc(e.brief.audience_evidence)}</small>`:""}${e.brief.concept?`<br><small>Konzept: ${esc(e.brief.concept)}</small>`:""}${e.brief.packaging?`<br><small>Packaging: ${esc(e.brief.packaging)}</small>`:""}${e.brief.why?`<br><small>${esc(e.brief.why)}</small>`:""}</p>`:""}
-  ${(e.brief&&e.brief.candidates||[]).length?`<p><strong>Kandidaten aus eigenem Material (gemessen, nicht benannt):</strong></p><ol class="candidates">${e.brief.candidates.map(c=>`<li><strong>${esc(c.window||"")}</strong> · ${num(c.duration_seconds,1)} s${c.hook?`<br><small>Hook (${esc(c.hook_source||"")}): „${esc(c.hook)}“</small>`:`<br><small>kein zitierfähiger eigener Wortlaut belegt</small>`}<br><small>${Object.entries(c.properties||{}).map(([k,v])=>esc((CONTENT_LABELS[k]||k))+" "+num(v,2)).join(" · ")}</small><br><small>${(c.evidence||[]).map(esc).join(" | ")}</small>${c.render_path?`<br><small>gerendert: ${esc(c.render_path)}</small>`:""}</li>`).join("")}</ol>${e.brief.learning?`<p class="muted"><small>Lernstand: ${esc(e.brief.learning)}</small></p>`:""}`:""}
-  ${e.reach_factors?`<p><small><strong>Faktoren der Reihenfolge:</strong> ${esc(e.reach_factors.lever||"")}${e.reach_factors.chance?` · Chance ${esc(e.reach_factors.chance)}`:""}${e.reach_factors.lifetime_views?` · ${num(e.reach_factors.lifetime_views)} Views Gesamtleistung`:""}${e.reach_factors.current_impressions_7d!=null?` · ${num(e.reach_factors.current_impressions_7d)} Impressions/Woche`:""}${e.reach_factors.material?" · Material vorhanden":""}</small></p>`:""}
-  <p><strong>Algorithmische Fläche:</strong> ${esc(e.discovery_surface||"—")}${e.reliability?` · <strong>Aussagekraft:</strong> ${esc(e.reliability)}${e.reliability_note?` <small>${esc(e.reliability_note)}</small>`:""}`:""}</p>
-  <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
-  <p><strong>Evidenz:</strong> ${esc(EVIDENCE_LABELS[ev.level]||"keine externe Chance")}${ev.demand_source?" · "+esc(evidenceText(ev)):""}${ev.uncertainty?" · Unsicherheit "+esc(ev.uncertainty):""}${ev.confidence?" · Confidence "+esc(ev.confidence):""}</p>
-  ${(ev.family_labels||[]).length?`<ul class="muted">${ev.family_labels.map(f=>"<li>"+esc(f)+"</li>").join("")}</ul>`:""}
-  ${ev.own_route?`<p class="muted">Belegte eigene Route: ${esc(ev.own_route.label)} (${num((ev.own_route.share||0)*100,0)} % von ${num(ev.own_route.views_7d)} Views)</p>`:""}
-  ${(ev.missing||[]).length?`<p><strong>Fehlende Evidenz:</strong> ${ev.missing.map(esc).join("; ")}</p>`:""}
+  // JETZT TUN zeigt genau die Handlung. Messwerte, Kandidaten, Scores und Evidenz bleiben intern.
+  const u=(e.brief&&e.brief.upload)||null;
+  return `<article class="queue-item"><h3>${esc((e.brief&&e.brief.action)||ACTION_LABELS[e.action]||e.action)}</h3>
+  <p><strong>${esc(e.title)}</strong>${e.brief&&e.brief.material?` · <small>${esc(e.brief.material)}</small>`:""}</p>
+  ${u?`<p><strong>Datei:</strong> <code>${esc(u.file)}</code></p>
+  <p><strong>Titel:</strong> ${esc(u.title)}</p>
+  ${u.description?`<p><strong>Beschreibung:</strong></p><pre class="packaging">${esc(u.description)}</pre>`:""}`:""}
   <ol>${(e.steps||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>
-  <p><strong>Baseline:</strong> ${num(b.views_7d)} Views/7 T · ${b.impressions_7d==null?"Impressions unbekannt":num(b.impressions_7d)+" Impressions"} · CTR ${b.ctr_7d==null?"—":num(b.ctr_7d*100,1)+" %"} <small>${esc(b.note||"")}</small></p>
-  <p><strong>Erwartetes Signal:</strong> ${esc(e.expected_signal||"")} · <strong>Messfenster:</strong> ${e.window_days} Tage (ab ${esc(e.measure_from)}, Auswertung ${esc(e.evaluate_after)})</p>
-  <p><strong>Erfolg:</strong> ${esc(e.success_criterion||"")}</p>
-  <p><strong>Abbruch:</strong> ${esc(e.stop_criterion||"")}</p>
-  <p><strong>Primärer Hebel:</strong> ${esc(e.primary_lever||"—")} <small>${esc(e.one_lever_note||"")}</small></p>
-  ${e.requires?`<p><strong>Benötigte Ressource:</strong> ${esc(e.requires.kind==="source_video"?"eigenes Quellvideo":e.requires.kind==="playlist"?"bestehende Playlist":"keine")}${e.requires.verified?" · belegt":" · nicht belegt"}${(e.requires.named||[]).length?": "+e.requires.named.map(esc).join(", "):""}${e.requires.evidence?" <small>"+esc(e.requires.evidence)+"</small>":""}</p>`:""}
-  ${e.choices?`<p class="notice"><strong>Deine Auswahl nötig:</strong> ${esc(e.choices.question)}<ul>${(e.choices.options||[]).map(o=>`<li>${esc(o.title||o.id)} — ${esc(o.evidence||(o.item_count!=null?o.item_count+" Videos":""))}</li>`).join("")}</ul>Das System wählt hier bewusst nicht für dich.</p>`:""}
-  ${(e.deferred_levers||[]).length?`<p class="muted">Bewusst nicht in diesem Experiment (eigene Experimente): ${e.deferred_levers.map(esc).join("; ")}</p>`:""}
-  <p><strong>Externer Kontext:</strong> ${esc(e.context_status||"kein externer Kontext")}${e.context_reason?" <small>"+esc(e.context_reason)+"</small>":""}</p>
+  <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
+  ${e.brief&&e.brief.after?`<p class="muted">${esc(e.brief.after)}</p>`:""}
   <p><strong>Nicht verändern:</strong> ${(e.do_not_change||[]).map(esc).join(", ")}</p>
   <p class="notice">${esc(e.note||"")}</p>
-  ${e.action_id?`<button class="secondary start-experiment" data-action-id="${e.action_id}" title="Maßnahme #${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren – Experiment starten")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>`:""}
-  </article>`}).join("")||"<p class='muted'>Kein Vorschlag: geschützte oder laufende Videos, oder die Evidenz reicht nicht für ein konkretes Experiment.</p>";
+  ${e.publish?`<div class="publish"><input type="text" class="published-video" data-action-id="${e.action_id}" placeholder="Video-ID oder Link des veröffentlichten Shorts" autocomplete="off">
+  <button class="secondary publish-short" data-action-id="${e.action_id}">${esc(e.publish.label)}</button><small>${esc(e.publish.effect||"")}</small></div>`
+  :e.action_id?`<button class="secondary start-experiment" data-action-id="${e.action_id}" title="Maßnahme #${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren – Experiment starten")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>`:""}
+  </article>`}).join("")||"<p class='muted'>Gerade keine ausführbare Reichweitenaktion. Das System sucht weiter und meldet sich, sobald es eine gibt.</p>";
  $("queueRunning").innerHTML=running.length?`<h3>Läuft – von dir als durchgeführt bestätigt (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
  $("queueNotTestable").innerHTML=((p&&p.not_testable)||[]).length?`<h3>Derzeit nicht sinnvoll testbar</h3><ul>${p.not_testable.map(x=>`<li>${esc(x.title)}: ${esc(x.reason)}</li>`).join("")}</ul>`:"";
  $("queueResults").innerHTML=results.length?`<h3>Ergebnisse abgeschlossener Experimente</h3><ul>${results.map(r=>`<li>${esc(r.created_day)} ${esc(ACTION_LABELS[r.action]||r.action)} (${esc(r.video_id)}): <strong>${esc(OUTCOME_LABELS[r.outcome]||r.outcome||"offen")}</strong>${r.metric?` · ${esc(r.metric)} ${num(r.before)} → ${num(r.after)}${r.relative_change==null?"":" ("+(r.relative_change>=0?"+":"")+num(r.relative_change*100,0)+" %)"}`:""}${r.reason?" · "+esc(r.reason):""}<small>${esc(r.note||"")}</small></li>`).join("")}</ul>`:"";
@@ -318,7 +307,27 @@ async function startExperiment(button){
   await load();
  }finally{button.disabled=false;button.textContent=label}
 }
-$("trafficQueue").addEventListener("click",e=>{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))});
+async function publishShort(button){
+ const id=button.dataset.actionId;
+ const field=button.closest(".publish").querySelector(".published-video");
+ const value=(field.value||"").trim();
+ if(!value){startNotice={failed:true,text:"Bitte die Video-ID oder den Link des veröffentlichten Shorts eintragen."};
+  renderQueue(state&&state.growth_v5?state.growth_v5.plan:null);return}
+ const label=button.textContent;button.disabled=true;button.textContent="Wird eingetragen…";
+ try{
+  let result;
+  try{
+   result=await api(`/api/growth/actions/${id}/published`,{video:value});
+  }catch(error){
+   startNotice={failed:true,text:`Eintragen fehlgeschlagen (Maßnahme #${id}): ${error.message}`};
+   renderQueue(state&&state.growth_v5?state.growth_v5.plan:null);
+   throw error;
+  }
+  startNotice={failed:false,text:`Veröffentlichung erfasst: ${result.published_video_id}. ${result.note||""}`};
+  await load();
+ }finally{button.disabled=false;button.textContent=label}
+}
+$("trafficQueue").addEventListener("click",e=>{const p=e.target.closest(".publish-short");if(p){guarded(()=>publishShort(p))}else{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))}});
 $("queueList").addEventListener("click",e=>{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))});
 async function load(){
  state=await api("/api/dashboard");$("login").hidden=true;$("workspace").hidden=false;$("token").value="";

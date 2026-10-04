@@ -46,7 +46,7 @@ def test_an_unproven_context_never_dictates_wording_or_playlist():
     assert all("Shine Jesus Shine" not in step for step in d["steps"]), "kein fremder Titel im Wortlaut"
     assert all("shine jesus shine" not in step.lower() for step in d["steps"])
     # Und im Plan ist der Status der Chance ausdruecklich als Hypothese ausgewiesen.
-    row = queue_row("b", "Shine On", "needs_distribution", action, 60, priority=1,
+    row = queue_row("b", "Shine On", "needs_distribution", "repackage_for_reach", 60, priority=1,
                     external={"context_usable": False, "context_reason": unproven["context_reason"],
                               "evidence_level": "multi_signal_proxy", "key": "shine jesus shine",
                               "audience": "Shine Jesus Shine (with lyrics)", "actionable": True, "score": 70,
@@ -115,19 +115,16 @@ def test_a_low_baseline_limits_the_certainty_not_the_growth_measure():
     assert ge.measurable({"views_7d": 5, "impressions_7d": 11})[0] is True
     strong = {"actionable": True, "evidence_level": "own_analytics", "score": 61.1, "gap": "suggested_opportunity",
               "kind": "suggested", "key": "nachbarschaft"}
-    rows = [queue_row("a", "Trainstories", "needs_distribution", "link_from_own_video", 70, priority=1,
-                      baseline={"views_7d": 18, "impressions_7d": 42, "ctr_7d": .08}),
-            queue_row("b", "Shine On", "needs_distribution", "repackage_for_reach", 60, priority=2,
+    rows = [queue_row("b", "Shine On", "needs_distribution", "repackage_for_reach", 60, priority=1,
                       baseline={"views_7d": 1, "impressions_7d": 5, "ctr_7d": .06}, external=strong),
-            queue_row("c", "11AM Album - Teaser", "needs_distribution", "link_from_own_video", 80, priority=3,
+            queue_row("c", "11AM Album - Teaser", "needs_distribution", "repackage_for_reach", 80, priority=2,
                       baseline={"views_7d": 0, "impressions_7d": 1, "ctr_7d": None})]
     plan = ge.daily_plan(rows, TODAY, {})
     ids = [q["video_id"] for q in plan["queue"]]
-    assert ids[0] == "b", "die belegte Reichweiten-Hypothese steht vorn"
-    assert "a" in ids and "c" not in ids, "ohne Hypothese und ohne messbare Basis keine Aufgabe"
-    shine = next(q for q in plan["queue"] if q["video_id"] == "b")
+    assert ids == ["b"], "die belegte Reichweiten-Hypothese ist die Aufgabe, trotz niedriger Basis"
+    shine = plan["queue"][0]
     assert shine["reliability"] == ge.INDICATIVE and "Keine messbare Ausgangsbasis" in shine["reliability_note"]
-    assert next(q for q in plan["queue"] if q["video_id"] == "a")["reliability"] == ge.RELIABLE
+    # Ohne belegte Hypothese und ohne messbare Basis entsteht keine Aufgabe.
     assert [x["video_id"] for x in plan["not_testable"]] == ["c"]
 
 
@@ -145,8 +142,11 @@ def test_every_growth_action_names_its_discovery_surface_and_certainty():
     entry = ge.daily_plan([row], TODAY, {})["queue"][0]
     assert entry["discovery_surface"].startswith("Browse/Home und Suggested")
     assert entry["reliability"] in (ge.RELIABLE, ge.INDICATIVE)
+    # Flaeche und Aussagekraft bleiben in der Schnittstelle, erscheinen aber nicht als Nutzerausgabe:
+    # JETZT TUN zeigt die Handlung, nicht die Messung.
     js = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert "Algorithmische Fläche" in js and "Aussagekraft" in js
+    assert "Algorithmische Fläche" not in js and "Aussagekraft" not in js
+    assert "Faktoren der Reihenfolge" not in js and "brief.candidates" not in js
 
 
 def test_the_suggested_cluster_measure_touches_exactly_one_existing_asset():
@@ -207,5 +207,7 @@ def test_the_two_reach_levers_carry_a_production_brief_and_their_factors():
     factors = ge.reach_outlook(row)["factors"]
     assert factors["lever"] == "Reichweiten-Hebel" and factors["chance"] == "own_analytics"
     assert factors["lifetime_views"] == 21081 and factors["current_impressions_7d"] == 5
+    # In JETZT TUN steht die ausfuehrbare Handlung: Datei, Titel, Beschreibung, Eintragen der Video-ID.
     js = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert "Produktion:" in js and "Faktoren der Reihenfolge" in js
+    for needed in ("u.file", "u.title", "u.description", "publish-short", "published-video"):
+        assert needed in js, needed

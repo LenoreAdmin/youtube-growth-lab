@@ -197,6 +197,24 @@ def start_growth_action(action_id: int, s=Depends(db)):
                              "note": "Messfenster gestartet. Das System hat nichts auf YouTube geändert."})
 
 
+class PublishedVideo(BaseModel):
+    """Die Video-ID oder der Link des gerade veroeffentlichten Shorts."""
+    video: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/growth/actions/{action_id}/published", dependencies=[Depends(authenticate)])
+def publish_growth_action(action_id: int, body: PublishedVideo, s=Depends(db)):
+    """Der Kanalinhaber hat den Short veroeffentlicht. Ab hier misst das System selbst."""
+    try:
+        result = growth_module.publish_action(s, action_id, body.video)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    s.commit()
+    return jsonable_encoder({**result, "executed_automatically": False})
+
+
 @app.get("/api/acquisition", dependencies=[Depends(authenticate)])
 def acquisition_overview(s=Depends(db)):
     return jsonable_encoder(acquisition_module.overview(s))

@@ -1,5 +1,7 @@
 """Lebenszyklus der Growth-Maßnahmen: proposed -> running -> evaluated.
 
+Traeger ist eine Reichweitenaktion, weil JETZT TUN ausschliesslich solche enthaelt.
+
 Der in Production gemeldete Fehler: gespeicherte Empfehlungen wurden als laufende Experimente
 behandelt und blockierten die JETZT-TUN-Queue, obwohl niemand sie ausgeführt hatte. Das System
 hat keine Schreibrechte auf YouTube; ohne Bestätigung des Menschen läuft also nichts.
@@ -13,7 +15,7 @@ from test_growth_v5 import BASE
 from test_actionable_growth import CONF, queue_row
 
 
-def action_row(session, video_id, action="distribute_playlist_context", created_day=None, **changes):
+def action_row(session, video_id, action="repackage_for_reach", created_day=None, **changes):
     """Eine gespeicherte Maßnahme, standardmaessig als Vorschlag – so wie das System sie erzeugt."""
     created_day = created_day or TODAY-timedelta(days=1)
     row = GrowthAction(**{**{"video_id": video_id, "created_day": created_day, "created_at": NOW-timedelta(days=1),
@@ -26,9 +28,20 @@ def action_row(session, video_id, action="distribute_playlist_context", created_
     return row
 
 
+def attested(session, video_id="a", score=70.0):
+    """Eine belegte Audience-Chance – ohne sie gibt es keine Reichweitenaktion und damit keine Aufgabe."""
+    from app.models import DiscoveryOpportunity
+    session.add(DiscoveryOpportunity(day=TODAY, kind="suggested", key=f"nachbarschaft-{video_id}",
+                                     video_id=video_id, gap="suggested_opportunity",
+                                     scores={"external_audience_score": score}, components={}, status="open",
+                                     evidence={"evidence_level": "own_analytics", "actionable": True,
+                                               "context_usable": True, "title": "Nachbarcluster"}))
+    session.commit()
+
+
 def test_a_proposal_does_not_block_the_queue(session):
     action_row(session, "a", created_day=TODAY-timedelta(days=1))
-    rows = [queue_row("a", "Trainstories", "needs_distribution", "distribute_playlist_context", 70, priority=1,
+    rows = [queue_row("a", "Trainstories", "needs_distribution", "repackage_for_reach", 70, priority=1,
                       action_status=ge.PROPOSED, started_day=None, held_since=None)]
     plan = ge.daily_plan(rows, TODAY, {})
     assert [q["video_id"] for q in plan["queue"]] == ["a"], "ein Vorschlag ist die Aufgabe, nicht die Blockade"
@@ -67,7 +80,7 @@ def test_a_running_experiment_blocks_a_second_one_for_the_same_video(monkeypatch
         assert "Nicht trennbar" in str(exc) and str(first.id) in str(exc)
     assert session.get(GrowthAction, second.id).status == ge.PROPOSED
     # Und der Plan bietet fuer dieses Video keine neue Aufgabe an, sondern zeigt das laufende Experiment.
-    rows = [queue_row("a", "Trainstories", "needs_distribution", "distribute_playlist_context", 70, priority=1,
+    rows = [queue_row("a", "Trainstories", "needs_distribution", "repackage_for_reach", 70, priority=1,
                       action_status=ge.RUNNING, started_day=str(TODAY))]
     plan = ge.daily_plan(rows, TODAY, {})
     assert plan["queue"] == [] and plan["running_experiments"][0]["video_id"] == "a"
@@ -85,7 +98,7 @@ def test_an_unconfirmed_action_is_never_scored_as_success_or_failure(monkeypatch
     assert session.get(GrowthAction, proposal.id).status == ge.PROPOSED
     assert session.get(GrowthAction, proposal.id).outcome is None
     assert ge.recent_results(session) == [], "ein nie gestarteter Vorschlag ist kein Ergebnis"
-    assert ge.track_record(session).get("distribute_playlist_context") is None
+    assert ge.track_record(session).get("repackage_for_reach") is None
     # Erst nach Bestaetigung und abgelaufenem Fenster wird gemessen.
     row = session.get(GrowthAction, proposal.id)
     row.status, row.started_day, row.started_at = ge.RUNNING, created, NOW-timedelta(days=30)
@@ -110,6 +123,7 @@ def test_old_unconfirmed_actions_are_not_presented_as_running(monkeypatch, sessi
     action_row(session, "a", action="improve_discovery", created_day=TODAY-timedelta(days=1),
                evaluate_after=TODAY+timedelta(days=17))
     session.commit()
+    attested(session, "a")
     rows, _ = history.build(history.load(session), 168, LAG)
     base = regimes.baselines(rows)
     histories = {h.video.id: h for h in history.load(session)}
@@ -159,6 +173,7 @@ def test_a_changed_decision_on_the_same_day_keeps_one_startable_proposal(monkeyp
     seed_history(session, "a", days=400, base=3, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)      # belegtes Quellvideo fuer die interne Verlinkung
     stale = action_row(session, "a", action="improve_discovery", created_day=TODAY)
+    attested(session, "a")
     histories = {h.video.id: h for h in history.load(session)}
     rows, _ = history.build(history.load(session), 168, LAG)
     base = regimes.baselines(rows)
@@ -184,6 +199,7 @@ def test_an_open_proposal_always_carries_the_current_steps(monkeypatch, session)
     seed_history(session, "a", days=400, base=3, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)      # belegtes Quellvideo fuer die interne Verlinkung
     stale = action_row(session, "a", created_day=TODAY, payload={"steps": ["Alter Schritt"], "baseline": {}})
+    attested(session, "a")
     rows, _ = history.build(history.load(session), 168, LAG)
     base = regimes.baselines(rows)
     histories = {h.video.id: h for h in history.load(session)}
@@ -195,7 +211,7 @@ def test_an_open_proposal_always_carries_the_current_steps(monkeypatch, session)
     session.expire_all()
     row = session.get(GrowthAction, stale.id)
     assert row.status == ge.PROPOSED and row.payload["steps"] != ["Alter Schritt"]
-    assert row.payload["primary_lever"] and "Beschreibung" in row.payload["do_not_change"]
+    assert row.payload["primary_lever"] and row.payload["do_not_change"]
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
     entry = next(q for q in plan["queue"] if q["video_id"] == "a")
     assert entry["steps"] == row.payload["steps"], "Queue und gespeicherte Maßnahme zeigen dasselbe"

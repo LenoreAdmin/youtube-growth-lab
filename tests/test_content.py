@@ -62,6 +62,17 @@ def seed_asset(session, video_id="a", asset_id="sha-a", duration=214.0, lines=()
     return session.get(Video, video_id)
 
 
+
+def seed_renders(session, video, folder=r"C:\Sealand\shorts"):
+    """Die fertig geschnittenen Dateien – ohne sie gibt es keine veroeffentlichbare Maßnahme."""
+    stored = ci.store(session, video, ci.candidates(session, video), TODAY)
+    for candidate in stored:
+        row = session.get(ContentCandidate, candidate["candidate_id"])
+        row.render_path = f"{folder}\short-{row.id}-{int(row.start_seconds)}s.mp4"
+    session.commit()
+    return stored
+
+
 def test_one_video_yields_several_measurably_different_candidates(session):
     """Das Erfolgskriterium: mehrere nachvollziehbar unterschiedliche, konkret produzierbare Kandidaten."""
     video = seed_asset(session)
@@ -275,24 +286,24 @@ def test_the_content_module_carries_no_media_dependency():
                            "subprocess", "imageio_ffmpeg"}, imported
 
 
-def test_produce_for_opportunity_combines_content_retention_and_audience(monkeypatch, session):
-    """Der Zielzustand im Zusammenspiel: Chance + Inhalt + Retention ergeben benannte Kandidaten.
+def test_produce_for_opportunity_delivers_one_publishable_short(monkeypatch, session):
+    """Der Abnahmetest: JETZT TUN enthaelt genau eine sofort ausfuehrbare Handlung.
 
-    Geprueft wird die tatsaechliche Ausgabe der Engine, nicht eine Zwischenfunktion: der Vorschlag in
-    der Queue muss mehrere Kandidaten mit exakten Zeiten tragen, den zitierten eigenen Wortlaut als
-    Hook und den Schritt, der den spaeteren Short mit seinem Kandidaten verbindet.
+    Datei, Titel, Beschreibung und die Anweisung „veroeffentlichen“ – keine Kandidatenliste, keine
+    Messwerte, keine Auswahl und keine Analyseaufgabe.
     """
     from app import growth_engine as ge, history as hist, regimes as reg
     from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
     from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
-    from test_growth_v5 import BASE
     from test_actionable_growth import CONF, details_for, starved
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)
-    seed_asset(session, lines=[dict(start_seconds=110.3, end_seconds=114.0, text="Shine on through the night",
-                                    confidence=0.94, source="aligned")],
-               curve=[{"at": round(i/40, 3), "ratio": 0.3+0.5*(i in range(20, 32))} for i in range(41)])
+    video = seed_asset(session, lines=[dict(start_seconds=110.3, end_seconds=114.0,
+                                            text="Shine on through the night",
+                                            confidence=0.94, source="aligned")],
+                       curve=[{"at": round(i/40, 3), "ratio": 0.3+0.5*(i in range(20, 32))} for i in range(41)])
+    seed_renders(session, video)
     session.add(GrowthAction(video_id="a", created_day=T-timedelta(days=3), created_at=NOW, version=ge.VERSION,
                              state="needs_distribution", action="probe_missing_evidence",
                              target_metric="impressions_7d", window_days=14,
@@ -315,28 +326,64 @@ def test_produce_for_opportunity_combines_content_retention_and_audience(monkeyp
     ge.run(session, NOW, contexts, base)
     session.expire_all()
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
-    entry = next((q for q in plan["queue"] if q["action"] == "produce_for_opportunity"), None)
-    assert entry is not None, [(r["video_id"], r["action"]) for r in plan["ranking"]]
+    assert len(plan["queue"]) == 1, "genau eine Aktion"
+    entry = plan["queue"][0]
+    assert entry["action"] == "produce_for_opportunity"
     brief = entry["brief"]
-    assert len(brief["candidates"]) >= 3, brief["candidates"]
-    for candidate in brief["candidates"]:
-        assert candidate["candidate_id"] and candidate["window"].startswith("Sekunde")
-        assert ci.SHORT_MIN <= candidate["duration_seconds"] <= ci.SHORT_MAX
-        assert candidate["properties"], candidate
-    # Der Hook ist ein Zitat aus dem eigenen Material, keine Formulierung des Systems.
-    assert "Shine on through the night" in brief["hook"]
-    # Keine semantische Benennung in der gesamten Ausgabe dieses Vorschlags.
-    printed = repr(entry).lower()
-    for word in FORBIDDEN:
-        assert word not in printed, word
-    # Der Lernstand wird mitgeliefert, statt Lernen zu behaupten.
-    assert str(ci.MIN_PUBLISHED_FOR_PRIORS) in brief["learning"]
-    # Und der Schritt, ohne den spaeter nichts zugeordnet werden kann.
+    assert brief["action"] == "Diesen Short veroeffentlichen"
+    upload = brief["upload"]
+    assert upload["file"].endswith(".mp4") and upload["title"]
+    assert ci.SHORT_MIN <= upload["duration_seconds"] <= ci.SHORT_MAX
+    # Die Handlung steht in den Schritten, mit Datei und Titel – nichts zum Auswaehlen.
     joined = " ".join(entry["steps"])
-    assert "app.cli published --candidate" in joined and "--render" in joined
-    assert entry["reach_factors"]["content_candidates"] == len(brief["candidates"])
-    # Das Quellvideo bleibt unangetastet: kein Baseline-Experiment daran.
-    assert "Keine Vorher-Baseline" in (entry["baseline"] or {}).get("note", "")
+    assert upload["file"] in joined and upload["title"] in joined
+    assert "Video-ID oder den Link" in joined
+    # Und das Eintragen der Video-ID ist angelegt.
+    assert entry["publish"]["endpoint"].endswith(f"/api/growth/actions/{entry['action_id']}/published")
+    assert entry["publish"]["field"] == "video"
+    # Kein Kandidatenangebot, keine Messwerte als Ausgabe.
+    assert "candidates" not in brief and "properties" not in repr(brief)
+    assert not any(word in repr(entry["steps"]).lower() for word in ("retention", "energie", "wiederholung"))
+
+
+def test_the_title_uses_our_own_words_and_never_a_machine_guess(session):
+    """Ein geratener Songtext darf nie im Titel stehen; ein ausgerichteter darf es."""
+    video = seed_asset(session, lines=[dict(start_seconds=30.4, end_seconds=34.0, text="Shine on tonight",
+                                            confidence=0.81, source="asr")])
+    guessed = next(c for c in ci.candidates(session, video) if c["start_seconds"] == 30.0)
+    title = ci.youtube_title(video, guessed)
+    assert "Shine on tonight" not in title
+    assert title == f"{video.title} – {ci.EXCERPT}"
+    session.query(ContentLine).delete()
+    session.add(ContentLine(asset_id="sha-a", idx=0, start_seconds=30.4, end_seconds=34.0,
+                            text="Shine on tonight", confidence=0.95, source="aligned"))
+    session.commit()
+    aligned = next(c for c in ci.candidates(session, video) if c["start_seconds"] == 30.0)
+    assert ci.youtube_title(video, aligned).startswith("„Shine on tonight“")
+    # Die Beschreibung nennt nur Belegtes: das eigene Video und seine Adresse.
+    description = ci.youtube_description(video, aligned)
+    assert f"https://youtu.be/{video.id}" in description and video.title in description
+
+
+def test_without_a_rendered_file_there_is_no_action(session):
+    """Eine Maßnahme, die eine nicht existierende Datei nennt, ist keine Maßnahme."""
+    from app import growth_engine as ge
+    video = seed_asset(session)
+    found = ge.content_material(session, video, {"score": 70}, TODAY)
+    assert found is not None and found["upload"] is None, "ohne Schnitt kein Paket"
+    external = {"audience": "Nachbarcluster", "evidence_level": "own_analytics", "actionable": True,
+                "context_usable": True, "score": 70}
+    assert ge.brief_for(session, "produce_for_opportunity", video, external,
+                        {"content": found, "lifetime_views": 1200}) is None
+    assert ge.content_steps(video.title, {"content": found}, "zum Thema", "halten") is None
+    options = ge.reach_options("needs_distribution", starved_features(), external,
+                               {"content": found, "lifetime_views": 1200, "segment": None})
+    assert all(o["action"] != "produce_for_opportunity" for o in options), "ohne Datei keine Produktion"
+
+
+def starved_features():
+    from test_actionable_growth import starved
+    return starved()
 
 
 def test_without_a_media_asset_nothing_about_content_is_claimed(monkeypatch, session):
@@ -372,40 +419,6 @@ def test_without_a_media_asset_nothing_about_content_is_claimed(monkeypatch, ses
     assert factors["content_candidates"] == 0 and factors["learning_basis"] is None
 
 
-def test_a_machine_guess_is_never_presented_as_a_fact(session):
-    """Oberhalb der Schwelle brauchbar, aber nicht „tatsaechlich gesungen“: die Quelle steht dabei.
-
-    Nur eine gegen den eigenen Songtext ausgerichtete Zeile ist ein Zitat. Eine maschinell erkannte
-    Zeile darf verwendet werden, aber nur mit ihrer Sicherheit und dem Hinweis, dass sie ungeprueft ist.
-    """
-    from app import growth_engine as ge
-    video = seed_asset(session, lines=[dict(start_seconds=30.4, end_seconds=34.0, text="Shine on tonight",
-                                            confidence=0.81, source="asr")])
-    external = {"audience": "Nachbarcluster", "evidence_level": "own_analytics", "actionable": True,
-                "context_usable": True, "score": 70}
-    found = ge.content_material(session, video, external, TODAY)
-    primary = next(c for c in found["candidates"] if c["start_seconds"] == 30.0)
-    found = {**found, "primary": primary, "alternatives": [c for c in found["candidates"] if c is not primary]}
-    brief = ge.brief_for(session, "produce_for_opportunity", video,
-                         external, {"content": found, "lifetime_views": 1200})
-    assert "maschinell erkannt" in brief["hook"] and "0.81" in brief["hook"]
-    assert "tatsaechlich" not in brief["hook"] and "ausgerichtet" not in brief["hook"]
-    steps = ge.content_steps(video.title, {"content": found}, "zum Thema", "halten")
-    assert any("gegenlesen" in s for s in steps)
-    # Gegen eigenen Text ausgerichtet lautet die Aussage anders – und ohne Vorbehalt.
-    session.query(ContentLine).delete()
-    session.add(ContentLine(asset_id="sha-a", idx=0, start_seconds=30.4, end_seconds=34.0,
-                            text="Shine on tonight", confidence=0.95, source="aligned"))
-    session.commit()
-    aligned = ge.content_material(session, video, external, TODAY)
-    primary = next(c for c in aligned["candidates"] if c["start_seconds"] == 30.0)
-    aligned = {**aligned, "primary": primary}
-    brief = ge.brief_for(session, "produce_for_opportunity", video,
-                         external, {"content": aligned, "lifetime_views": 1200})
-    assert "gegen den eigenen Songtext ausgerichtet" in brief["hook"]
-    assert "maschinell" not in brief["hook"]
-
-
 def test_the_source_baseline_is_not_used_to_judge_a_video_that_does_not_exist_yet(session):
     """Die leere Woche des Quellvideos ist kein Befund ueber einen noch nicht produzierten Short."""
     from app import growth_engine as ge
@@ -432,7 +445,9 @@ def test_an_open_recommendation_from_an_earlier_day_stays_executable(monkeypatch
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)
-    seed_asset(session, curve=[{"at": round(i/40, 3), "ratio": 0.3+0.5*(i in range(20, 32))} for i in range(41)])
+    video = seed_asset(session, curve=[{"at": round(i/40, 3), "ratio": 0.3+0.5*(i in range(20, 32))}
+                                       for i in range(41)])
+    seed_renders(session, video)
     # Ein laufendes Experiment haelt das Video, wie #8/#15 in Production.
     session.add(GrowthAction(video_id="a", created_day=T-timedelta(days=9), created_at=NOW, version=ge.VERSION,
                              state="needs_distribution", action="probe_missing_evidence",
@@ -471,6 +486,49 @@ def test_an_open_recommendation_from_an_earlier_day_stays_executable(monkeypatch
     assert len(list(session.scalars(select(GrowthAction)
                                     .where(GrowthAction.action == "produce_for_opportunity")))) == 1
     # Und mit den heute gemessenen Kandidaten statt der Nutzlast von gestern.
-    assert len(entry["brief"]["candidates"]) >= 3
+    assert entry["brief"]["upload"]["file"].endswith(".mp4")
     assert entry["why"] != "von gestern"
     assert session.get(GrowthAction, stale_id).payload["reason"] != "von gestern"
+
+
+def test_entering_the_published_video_closes_the_loop(session):
+    """Nach dem Upload traegt der Kanalinhaber die ID ein – danach misst das System selbst.
+
+    Mehr ist von ihm nicht zu tun: keine Auswahl, keine Analyse, kein Datensammeln. Das Eintragen
+    startet das Messfenster und verbindet den Short mit dem Kandidaten, aus dem er entstanden ist.
+    """
+    from app import growth_engine as ge
+    from app.models import GrowthAction
+    video = seed_asset(session)
+    stored = seed_renders(session, video)
+    candidate_id = stored[0]["candidate_id"]
+    action = GrowthAction(video_id="a", created_day=TODAY, created_at=utcnow(), version=ge.VERSION,
+                          state="needs_distribution", action="produce_for_opportunity",
+                          target_metric="views_7d", window_days=30, evaluate_after=TODAY+timedelta(days=33),
+                          status=ge.PROPOSED, lever_class="content",
+                          payload={"brief": {"upload": {"candidate_id": candidate_id}},
+                                   "baseline": {}, "steps": ["hochladen"]})
+    session.add(action)
+    session.commit()
+    # Aus einem Link wird die ID erkannt; aus Unsinn nicht.
+    assert ge.youtube_id("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert ge.youtube_id("https://youtu.be/dQw4w9WgXcQ?si=abc") == "dQw4w9WgXcQ"
+    assert ge.youtube_id("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert ge.youtube_id("kein link") is None
+    # Das neue Video ist noch nicht synchronisiert: die ID wartet in der Maßnahme.
+    result = ge.publish_action(session, action.id, "https://youtube.com/shorts/dQw4w9WgXcQ")
+    session.commit()
+    assert result["published_video_id"] == "dQw4w9WgXcQ" and result["linked"] is False
+    assert session.get(GrowthAction, action.id).status == ge.RUNNING, "das Messfenster laeuft"
+    assert session.get(ContentCandidate, candidate_id).published_video_id is None
+    # Sobald der Sync das Video kennt, haengt es sich selbst ein.
+    session.add(Video(id="dQw4w9WgXcQ", channel_id=video.channel_id, title="Sealand Short",
+                      published_at=utcnow(), duration_seconds=40))
+    session.commit()
+    assert ci.attach_pending(session, TODAY) == [(candidate_id, "dQw4w9WgXcQ")]
+    session.commit()
+    row = session.get(ContentCandidate, candidate_id)
+    assert row.published_video_id == "dQw4w9WgXcQ" and row.status == "published"
+    assert session.get(GrowthAction, action.id).payload["pending_video_id"] is None
+    # Ein zweiter Lauf verdoppelt nichts.
+    assert ci.attach_pending(session, TODAY) == []

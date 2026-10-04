@@ -118,7 +118,9 @@ def test_the_inventory_distinguishes_unknown_from_none(session):
     assert ge.playlist_inventory(session, TODAY)["state"] == "unknown"
 
 
-def test_the_plan_offers_the_named_link_experiment_end_to_end(monkeypatch, session):
+def test_internal_routing_names_its_source_but_never_becomes_a_user_task(monkeypatch, session):
+    """Wenn die Engine intern eine Verlinkung waehlt, nennt sie ein belegtes Quellvideo – aber JETZT TUN
+    enthaelt sie nicht: eine interne Wegeleitung erzeugt keine zusaetzliche Auslieferung."""
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=3, trend=0)       # Trainstories-artig: kaum Auslieferung
     seed_history(session, "b", days=400, base=120, seed=3)      # klar bestes eigenes Video
@@ -137,12 +139,15 @@ def test_the_plan_offers_the_named_link_experiment_end_to_end(monkeypatch, sessi
     ge.run(session, NOW, contexts, base)
     session.expire_all()
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
-    entry = next(q for q in plan["queue"] if q["video_id"] == "a")
-    assert entry["action"] in ("link_from_own_video", "probe_missing_evidence")
-    assert entry["requires"]["kind"] == "source_video" and entry["requires"]["verified"] is True
-    assert all("Playlist" not in s for s in entry["steps"]), "der Kanal hat keine Playlist"
-    assert any(session.get(Video, "b").title in s for s in entry["steps"])
-    stored = session.get(GrowthAction, entry["action_id"])
+    assert not any(q["video_id"] == "a" for q in plan["queue"]), "interne Wegeleitung ist keine Aufgabe"
+    assert any(x["video_id"] == "a" for x in plan["not_testable"])
+    row = next(r for r in plan["ranking"] if r["video_id"] == "a")
+    assert row["action"] in ("link_from_own_video", "probe_missing_evidence")
+    # Die Ressource bleibt belegt und benannt, falls die Maßnahme intern verwendet wird.
+    assert row["requires"]["kind"] == "source_video" and row["requires"]["verified"] is True
+    assert all("Playlist" not in s for s in row["steps"]), "der Kanal hat keine Playlist"
+    assert any(session.get(Video, "b").title in s for s in row["steps"])
+    stored = session.get(GrowthAction, row["action_id"])
     assert stored.status == ge.PROPOSED and stored.payload["requires"]["verified"] is True
 
 

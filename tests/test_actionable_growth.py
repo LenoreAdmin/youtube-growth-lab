@@ -221,16 +221,18 @@ def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone
                                                    "created_day": str(TODAY-timedelta(days=20)), "metric": "discovery_views",
                                                    "before": 5, "after": 20, "relative_change": 3.0}])
     queue = plan["queue"]
-    assert 0 < len(queue) <= ge.QUEUE_LIMIT == 3
+    # JETZT TUN zeigt genau eine Aktion: die aktuell staerkste ausfuehrbare.
+    assert len(queue) == ge.QUEUE_LIMIT == 1
     # Belegte Hypothesen zuerst; "b" beschafft nur Evidenz und rutscht dahinter, trotz hoeherem Score als "e".
     # Echter Growth-Hebel am eigenen Asset zuerst, dann die uebrigen nach Potenzial.
-    assert queue[0]["video_id"] == "b" and queue[0]["action"] in ge.GROWTH_LEVERS
-    assert [q["video_id"] for q in queue] == ["b", "a", "e"], "Reichweiten-Hebel vor interner Wegeleitung"
-    assert len({q["video_id"] for q in queue}) == len(queue)
-    assert all(q["video_id"] not in ("c", "d", "f") for q in queue), "geschuetzt, laufend oder passiv bleibt draussen"
-    assert plan["now_do"]["video_id"] == "b" and plan["now_do"]["rank"] == 1, "die Reichweiten-Maßnahme fuehrt"
-    assert queue[-1]["action"] == "distribute_playlist_context", "interne Wegeleitung steht hinten"
-    assert all(q["action"] not in ge.EVIDENCE_ONLY for q in queue), "Datenerzeugung ist keine Aufgabe"
+    assert [q["video_id"] for q in queue] == ["b"], "der Reichweiten-Hebel ist die Aufgabe"
+    assert queue[0]["action"] in ge.REACH_LEVERS
+    assert plan["now_do"]["video_id"] == "b" and plan["now_do"]["rank"] == 1
+    # Interne Wegeleitung, Datenerzeugung, Beobachtung, geschuetzte und laufende Videos: alles draussen.
+    assert all(q["video_id"] not in ("a", "c", "d", "e", "f") for q in queue)
+    assert all(q["action"] in ge.GROWTH_LEVERS for q in queue), "nur Reichweitenaktionen"
+    internal = {x["video_id"] for x in plan["not_testable"]}
+    assert {"a", "e"} <= internal, "interne Wegeleitung bleibt intern, statt Aufgabe zu werden"
     entry = queue[0]
     for key in ("steps", "baseline", "success_criterion", "stop_criterion", "window_days", "evaluate_after", "measure_from",
                 "expected_signal", "evidence", "do_not_change", "objective", "target_metric", "why"):
@@ -241,7 +243,7 @@ def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone
     assert plan["running_experiments"][0]["started_day"] == str(TODAY-timedelta(days=3))
     assert "nichts weiter an diesem Video" in plan["running_experiments"][0]["note"]
     assert plan["results"][0]["outcome"] == "positive"
-    assert "öchstens 3" in plan["queue_note"]
+    assert "staerkste ausfuehrbare Reichweitenaktion" in plan["queue_note"]
     # Geschuetztes Video bleibt sichtbar geschuetzt und taucht nicht als Aufgabe auf.
     assert [p["video_id"] for p in plan["protected"]] == ["c"]
 
@@ -328,12 +330,27 @@ def test_a_starved_video_produces_an_executable_experiment_in_the_plan(monkeypat
     ge.run(session, NOW, contexts, base)
     session.expire_all()
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
+    # Ohne belegte Chance gibt es fuer das ausgehungerte Video keine Reichweitenaktion – und dann
+    # auch keine Ersatzaufgabe zum Datensammeln oder internen Verlinken.
+    assert not any(q["video_id"] == "a" for q in plan["queue"])
+    assert any(x["video_id"] == "a" for x in plan["not_testable"])
+    # Mit belegter Chance entsteht eine ausfuehrbare Reichweitenaktion, trotz niedriger Basis.
+    from app.models import DiscoveryOpportunity
+    session.add(DiscoveryOpportunity(day=TODAY, kind="suggested", key="nachbarschaft", video_id="a",
+                                     gap="suggested_opportunity", scores={"external_audience_score": 70.0},
+                                     components={}, status="open",
+                                     evidence={"evidence_level": "own_analytics", "actionable": True,
+                                               "context_usable": True, "title": "Nachbarcluster"}))
+    session.commit()
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
     entry = next((q for q in plan["queue"] if q["video_id"] == "a"), None)
-    assert entry is not None, f"kein ausführbares Experiment: {[ (r['video_id'], r['state'], r['action']) for r in plan['ranking'] ]}"
-    assert entry["action"] in ("link_from_own_video", "probe_missing_evidence")
+    assert entry is not None, f"keine Reichweitenaktion: {[(r['video_id'], r['action']) for r in plan['ranking']]}"
+    assert entry["action"] in ge.REACH_LEVERS
     assert entry["steps"] and entry["executed_automatically"] is False
-    assert entry["baseline"]["impressions_7d"] == 42 and entry["window_days"] == 14
-    assert "Titel" in entry["do_not_change"] and "Thumbnail" in entry["do_not_change"]
+    assert entry["baseline"]["impressions_7d"] == 42 and entry["window_days"] > 0
+    assert entry["do_not_change"]
     stored = session.scalar(select(GrowthAction).where(GrowthAction.video_id == "a", GrowthAction.status == "proposed"))
     assert stored.action == entry["action"] and stored.payload["steps"] == entry["steps"]
     assert stored.state == "needs_distribution"
