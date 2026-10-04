@@ -416,3 +416,61 @@ def test_the_source_baseline_is_not_used_to_judge_a_video_that_does_not_exist_ye
     # Fuer eine Aenderung am Quellvideo gilt die Ausgangsbasis unveraendert.
     ok, why = ge.measurable({"views_7d": 0, "impressions_7d": 0}, "views_7d", "repackage_for_reach")
     assert ok is False and "nur „unklar“" in why
+
+
+def test_an_open_recommendation_from_an_earlier_day_stays_executable(monkeypatch, session):
+    """Der Production-Fehler: die Doppelungssperre liess den offenen Vorschlag aus dem Plan fallen.
+
+    Eine Empfehlung, die gestern entstanden und nie gestartet wurde, muss heute weiter im Plan stehen –
+    mit derselben Action-ID, damit ein spaeterer Start zuordenbar bleibt, und mit den heute gemessenen
+    Kandidaten. Sonst existiert die Maßnahme nur als Datenbankzeile und ist nicht ausfuehrbar.
+    """
+    from app import growth_engine as ge, history as hist, regimes as reg
+    from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
+    from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
+    from test_actionable_growth import CONF, details_for, starved
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=6, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)
+    seed_asset(session, curve=[{"at": round(i/40, 3), "ratio": 0.3+0.5*(i in range(20, 32))} for i in range(41)])
+    # Ein laufendes Experiment haelt das Video, wie #8/#15 in Production.
+    session.add(GrowthAction(video_id="a", created_day=T-timedelta(days=9), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence",
+                             target_metric="impressions_7d", window_days=14,
+                             evaluate_after=T+timedelta(days=5), status="running",
+                             started_day=T-timedelta(days=9), started_at=NOW, lever_class="internal_link",
+                             payload=details_for("probe_missing_evidence", starved(), ["laeuft"])))
+    # Und ein offener Produktionsvorschlag von gestern, nie gestartet.
+    stale = GrowthAction(video_id="a", created_day=T-timedelta(days=1), created_at=NOW, version=ge.VERSION,
+                         state="needs_distribution", action="produce_for_opportunity",
+                         target_metric="views_7d", window_days=30,
+                         evaluate_after=T+timedelta(days=29), status="proposed", lever_class="content",
+                         payload={"reason": "von gestern"})
+    session.add(stale)
+    session.add(DiscoveryOpportunity(day=T, kind="suggested", key="nachbarschaft", video_id="a",
+                                     gap="suggested_opportunity", scores={"external_audience_score": 70.0},
+                                     components={}, evidence={"evidence_level": "own_analytics", "actionable": True,
+                                                              "context_usable": True, "title": "Nachbarcluster"},
+                                     status="open"))
+    session.commit()
+    stale_id = stale.id
+    rows, _ = hist.build(hist.load(session), 168, LAG)
+    base = reg.baselines(rows)
+    histories = {h.video.id: h for h in hist.load(session)}
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": hist.features_at(histories[v], T),
+                 "regime": reg.classify(hist.features_at(histories[v], T), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}} for v in ("a", "b")]
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
+    entry = next((q for q in plan["queue"] if q["action"] == "produce_for_opportunity"), None)
+    assert entry is not None, f"Vorschlag aus dem Plan gefallen: {[(q['video_id'], q['action']) for q in plan['queue']]}"
+    # Dieselbe Zeile, fortgeschrieben – kein Duplikat.
+    assert entry["action_id"] == stale_id
+    assert len(list(session.scalars(select(GrowthAction)
+                                    .where(GrowthAction.action == "produce_for_opportunity")))) == 1
+    # Und mit den heute gemessenen Kandidaten statt der Nutzlast von gestern.
+    assert len(entry["brief"]["candidates"]) >= 3
+    assert entry["why"] != "von gestern"
+    assert session.get(GrowthAction, stale_id).payload["reason"] != "von gestern"

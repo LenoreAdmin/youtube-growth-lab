@@ -1661,9 +1661,13 @@ def content_recommendation(session, video, state, f, regime, base, board, rev, m
                                                              GrowthAction.action == action,
                                                              GrowthAction.status.in_([PROPOSED, RUNNING]),
                                                              GrowthAction.created_day < today))
-    if open_already is not None:
-        return None
-    proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
+    if open_already is not None and open_already.status == RUNNING:
+        return None             # Laeuft bereits bestaetigt – kein zweiter Vorschlag fuer dasselbe Material.
+    # Ein offener Vorschlag aus einem frueheren Tag wird fortgeschrieben, nicht verdoppelt und nicht
+    # verworfen: verworfen verschwaende er aus dem Plan und waere nicht mehr ausfuehrbar, verdoppelt
+    # entstuende jeden Tag eine weitere Produktionsaufgabe fuer dasselbe Quellmaterial. Dieselbe Zeile
+    # behaelt ihre id, damit ein spaeterer Start zuordenbar bleibt.
+    proposed = open_already or session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
                                                          GrowthAction.created_day == today,
                                                          GrowthAction.version == VERSION,
                                                          GrowthAction.action == action))
