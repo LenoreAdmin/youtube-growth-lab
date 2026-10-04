@@ -471,8 +471,13 @@ def attach_pending(session, today=None):
     for row in rows:
         payload = row.payload or {}
         pending = payload.get("pending_video_id")
-        candidate_id = ((payload.get("brief") or {}).get("upload") or {}).get("candidate_id")
-        if not pending or not candidate_id:
+        if not pending:
+            continue
+        # Die mitgefuehrte ID zuerst, dann der Brief, dann dieselbe Auswahl wie bei der Erzeugung.
+        candidate_id = (payload.get("pending_candidate_id")
+                        or ((payload.get("brief") or {}).get("upload") or {}).get("candidate_id")
+                        or candidate_for(session, row.video_id))
+        if not candidate_id:
             continue
         if session.get(Video, pending) is None:
             continue                    # Noch nicht synchronisiert – beim naechsten Lauf erneut versuchen.
@@ -488,3 +493,18 @@ def attach_pending(session, today=None):
         session.flush()
         linked.append((candidate_id, pending))
     return linked
+
+
+def candidate_for(session, video_id):
+    """Der Kandidat, den die Auswahl fuer dieses Video gewaehlt haette – als Rueckfalloption.
+
+    Wird gebraucht, wenn eine Maßnahme die Kandidaten-ID nicht mitfuehrt: dann bestimmt dieselbe
+    Auswahl wie bei der Erzeugung, welcher geschnittene Ausschnitt gemeint war. Geraten wird nichts,
+    es ist dieselbe Funktion.
+    """
+    from .models import Video
+    video = session.get(Video, video_id) if video_id else None
+    if video is None:
+        return None
+    chosen = selected(store(session, video, candidates(session, video, None, priors(session)), date.today()))
+    return chosen.get("candidate_id") if chosen else None

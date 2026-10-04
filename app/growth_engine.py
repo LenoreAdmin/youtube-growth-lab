@@ -1488,7 +1488,9 @@ def run(session, now, contexts, base, budget=None):
                 proposed.state, proposed.version = state, VERSION
                 proposed.target_metric, proposed.window_days = details["target_metric"], details["window_days"]
                 proposed.evaluate_after = today+timedelta(days=details["window_days"]+lag_days())
-                proposed.payload, proposed.baseline = details, details.get("baseline") or {}
+                with session.no_autoflush:
+                    stored = {**details, "brief": brief_for(session, action, video, external, channel)}
+                proposed.payload, proposed.baseline = stored, details.get("baseline") or {}
                 session.flush()
             current = proposed
         paid, profile = paid_state(f)
@@ -1682,10 +1684,13 @@ def content_recommendation(session, video, state, f, regime, base, board, rev, m
         proposed = GrowthAction(video_id=video.id, created_day=today, created_at=now, version=VERSION,
                                 state=state, action=action, status=PROPOSED, lever_class="content")
         session.add(proposed)
+    with session.no_autoflush:
+        brief = brief_for(session, action, video, external, channel)
     if proposed.status == PROPOSED:
         proposed.state, proposed.target_metric, proposed.window_days = state, details["target_metric"], details["window_days"]
         proposed.evaluate_after = today+timedelta(days=details["window_days"]+lag_days())
-        proposed.payload, proposed.baseline = details, details.get("baseline") or {}
+        proposed.payload = {**details, "brief": brief}
+        proposed.baseline = details.get("baseline") or {}
         session.flush()
     return {**base_row, "action": action, "reason": details["reason"], "notes": details.get("notes", []),
             "window_days": details["window_days"], "target_metric": details["target_metric"],
@@ -1696,7 +1701,7 @@ def content_recommendation(session, video, state, f, regime, base, board, rev, m
             "choices": details.get("choices"), "do_not_change": details["do_not_change"],
             "next_evaluation": str(today+timedelta(days=details["window_days"]+lag_days())),
             "held_since": None, "action_id": proposed.id, "action_status": proposed.status,
-            "started_day": None, "brief": brief_for(session, action, video, external, channel)}
+            "started_day": None, "brief": brief}
 
 
 def shared_context(session, video, external):
@@ -1850,8 +1855,10 @@ def publish_action(session, action_id, raw, now=None):
     if video_id is None:
         raise ValueError("Keine YouTube-Video-ID erkennbar. Link oder ID einsetzen.")
     payload = row.payload or {}
-    candidate_id = ((payload.get("brief") or {}).get("upload") or {}).get("candidate_id")
-    row.payload = {**payload, "pending_video_id": video_id, "pending_day": str(today)}
+    candidate_id = (((payload.get("brief") or {}).get("upload") or {}).get("candidate_id")
+                    or ci.candidate_for(session, row.video_id))
+    row.payload = {**payload, "pending_video_id": video_id, "pending_day": str(today),
+                   "pending_candidate_id": candidate_id}
     session.flush()
     linked = False
     if candidate_id and session.get(Video, video_id) is not None:

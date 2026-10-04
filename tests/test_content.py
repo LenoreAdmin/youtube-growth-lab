@@ -70,7 +70,8 @@ def seed_renders(session, video, folder=r"C:\Sealand\shorts"):
         row = session.get(ContentCandidate, candidate["candidate_id"])
         row.render_path = f"{folder}\short-{row.id}-{int(row.start_seconds)}s.mp4"
     session.commit()
-    return stored
+    # Erneut lesen, damit die Pfade in den zurueckgegebenen Eintraegen stehen.
+    return ci.store(session, video, ci.candidates(session, video), TODAY)
 
 
 def test_one_video_yields_several_measurably_different_candidates(session):
@@ -532,3 +533,83 @@ def test_entering_the_published_video_closes_the_loop(session):
     assert session.get(GrowthAction, action.id).payload["pending_video_id"] is None
     # Ein zweiter Lauf verdoppelt nichts.
     assert ci.attach_pending(session, TODAY) == []
+
+
+def test_the_stored_action_carries_the_candidate_so_the_link_can_be_made(monkeypatch, session):
+    """Der zweite Production-Bug: der Brief lag nur im Plan, nie in der gespeicherten Maßnahme.
+
+    Beim Eintragen der Video-ID fand sich deshalb keine Kandidaten-ID (`candidate=None`), der Short
+    wurde als laufend registriert, aber nie seinem Ausschnitt zugeordnet – der Lernpfad blieb leer.
+    """
+    from app import growth_engine as ge, history as hist, regimes as reg
+    from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
+    from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
+    from test_actionable_growth import CONF, details_for, starved
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=6, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)
+    video = seed_asset(session, curve=[{"at": round(i/40, 3), "ratio": 0.3+0.5*(i in range(20, 32))}
+                                       for i in range(41)])
+    seed_renders(session, video)
+    session.add(GrowthAction(video_id="a", created_day=T-timedelta(days=3), created_at=NOW, version=ge.VERSION,
+                             state="needs_distribution", action="probe_missing_evidence",
+                             target_metric="impressions_7d", window_days=14,
+                             evaluate_after=T+timedelta(days=12), status="running",
+                             started_day=T-timedelta(days=3), started_at=NOW, lever_class="internal_link",
+                             payload=details_for("probe_missing_evidence", starved(), ["laeuft"])))
+    session.add(DiscoveryOpportunity(day=T, kind="suggested", key="nachbarschaft", video_id="a",
+                                     gap="suggested_opportunity", scores={"external_audience_score": 70.0},
+                                     components={}, evidence={"evidence_level": "own_analytics", "actionable": True,
+                                                              "context_usable": True, "title": "Nachbarcluster"},
+                                     status="open"))
+    session.commit()
+    rows, _ = hist.build(hist.load(session), 168, LAG)
+    base = reg.baselines(rows)
+    histories = {h.video.id: h for h in hist.load(session)}
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": hist.features_at(histories[v], T),
+                 "regime": reg.classify(hist.features_at(histories[v], T), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}} for v in ("a", "b")]
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
+    entry = plan["queue"][0]
+    stored = session.get(GrowthAction, entry["action_id"])
+    # Die gespeicherte Maßnahme traegt den Brief und damit den Kandidaten.
+    candidate_id = stored.payload["brief"]["upload"]["candidate_id"]
+    assert candidate_id == entry["brief"]["upload"]["candidate_id"]
+    # Und das Eintragen verbindet tatsaechlich.
+    session.add(Video(id="jZq_Cko_BCw", channel_id=video.channel_id, title="Sealand Short",
+                      published_at=utcnow(), duration_seconds=56))
+    session.commit()
+    result = ge.publish_action(session, stored.id, "jZq_Cko_BCw")
+    session.commit()
+    assert result["candidate_id"] == candidate_id and result["linked"] is True
+    assert session.get(ContentCandidate, candidate_id).published_video_id == "jZq_Cko_BCw"
+
+
+def test_an_action_without_the_candidate_in_its_payload_is_still_linked(session):
+    """Die bereits laufende Production-Maßnahme hat keinen Brief in der Nutzlast – sie muss trotzdem
+    zugeordnet werden, ohne eine neue Maßnahme zu erzeugen."""
+    from app import growth_engine as ge
+    from app.models import GrowthAction
+    video = seed_asset(session)
+    stored = seed_renders(session, video)
+    expected = ci.selected(stored)["candidate_id"]
+    action = GrowthAction(video_id="a", created_day=TODAY, created_at=utcnow(), version=ge.VERSION,
+                          state="needs_distribution", action="produce_for_opportunity",
+                          target_metric="views_7d", window_days=30, evaluate_after=TODAY+timedelta(days=33),
+                          status=ge.RUNNING, started_day=TODAY, started_at=utcnow(), lever_class="content",
+                          payload={"baseline": {}, "steps": ["hochladen"]})     # kein brief
+    session.add(action)
+    session.commit()
+    assert ci.candidate_for(session, "a") == expected
+    result = ge.publish_action(session, action.id, "jZq_Cko_BCw")
+    session.commit()
+    assert result["candidate_id"] == expected
+    assert session.get(GrowthAction, action.id).payload["pending_candidate_id"] == expected
+    # Das Video ist noch nicht synchronisiert: der naechste Lauf haengt es ein.
+    session.add(Video(id="jZq_Cko_BCw", channel_id=video.channel_id, title="Sealand Short",
+                      published_at=utcnow(), duration_seconds=56))
+    session.commit()
+    assert ci.attach_pending(session, TODAY) == [(expected, "jZq_Cko_BCw")]
