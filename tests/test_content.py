@@ -215,8 +215,13 @@ def test_the_window_ends_on_a_measured_boundary_or_at_the_shorts_limit(session):
     for candidate in found.values():
         on_boundary = candidate["end_seconds"] in boundaries
         at_limit = abs(candidate["duration_seconds"]-ci.SHORT_MAX) < 0.01
-        assert on_boundary or at_limit, candidate
-        assert any("Abschnittsgrenze" in e or "Shorts-Grenze" in e for e in candidate["evidence"])
+        at_end = abs(candidate["end_seconds"]-video.duration_seconds) < 0.01
+        assert on_boundary or at_limit or at_end, candidate
+        # Der Grund fuer das Ende wird benannt und nicht verwechselt.
+        reason = next(e for e in candidate["evidence"] if e.startswith("Ende "))
+        assert reason == ("Ende auf einer gemessenen Abschnittsgrenze" if on_boundary else
+                          "Ende am Ende des Materials" if at_end else
+                          f"Ende bei {ci.SHORT_MAX:.0f} s Shorts-Grenze"), (reason, candidate)
 
 
 def test_retention_is_one_factor_and_its_absence_is_stated(session):
@@ -365,3 +370,49 @@ def test_without_a_media_asset_nothing_about_content_is_claimed(monkeypatch, ses
     factors = ge.reach_outlook({"action": "produce_for_opportunity", "brief": None, "baseline": {},
                                 "external": external, "lifetime_views": 1200})["factors"]
     assert factors["content_candidates"] == 0 and factors["learning_basis"] is None
+
+
+def test_a_machine_guess_is_never_presented_as_a_fact(session):
+    """Oberhalb der Schwelle brauchbar, aber nicht „tatsaechlich gesungen“: die Quelle steht dabei.
+
+    Nur eine gegen den eigenen Songtext ausgerichtete Zeile ist ein Zitat. Eine maschinell erkannte
+    Zeile darf verwendet werden, aber nur mit ihrer Sicherheit und dem Hinweis, dass sie ungeprueft ist.
+    """
+    from app import growth_engine as ge
+    video = seed_asset(session, lines=[dict(start_seconds=30.4, end_seconds=34.0, text="Shine on tonight",
+                                            confidence=0.81, source="asr")])
+    external = {"audience": "Nachbarcluster", "evidence_level": "own_analytics", "actionable": True,
+                "context_usable": True, "score": 70}
+    found = ge.content_material(session, video, external, TODAY)
+    primary = next(c for c in found["candidates"] if c["start_seconds"] == 30.0)
+    found = {**found, "primary": primary, "alternatives": [c for c in found["candidates"] if c is not primary]}
+    brief = ge.brief_for(session, "produce_for_opportunity", video,
+                         external, {"content": found, "lifetime_views": 1200})
+    assert "maschinell erkannt" in brief["hook"] and "0.81" in brief["hook"]
+    assert "tatsaechlich" not in brief["hook"] and "ausgerichtet" not in brief["hook"]
+    steps = ge.content_steps(video.title, {"content": found}, "zum Thema", "halten")
+    assert any("gegenlesen" in s for s in steps)
+    # Gegen eigenen Text ausgerichtet lautet die Aussage anders – und ohne Vorbehalt.
+    session.query(ContentLine).delete()
+    session.add(ContentLine(asset_id="sha-a", idx=0, start_seconds=30.4, end_seconds=34.0,
+                            text="Shine on tonight", confidence=0.95, source="aligned"))
+    session.commit()
+    aligned = ge.content_material(session, video, external, TODAY)
+    primary = next(c for c in aligned["candidates"] if c["start_seconds"] == 30.0)
+    aligned = {**aligned, "primary": primary}
+    brief = ge.brief_for(session, "produce_for_opportunity", video,
+                         external, {"content": aligned, "lifetime_views": 1200})
+    assert "gegen den eigenen Songtext ausgerichtet" in brief["hook"]
+    assert "maschinell" not in brief["hook"]
+
+
+def test_the_source_baseline_is_not_used_to_judge_a_video_that_does_not_exist_yet(session):
+    """Die leere Woche des Quellvideos ist kein Befund ueber einen noch nicht produzierten Short."""
+    from app import growth_engine as ge
+    ok, why = ge.measurable({"views_7d": 0, "impressions_7d": 0}, "views_7d", "produce_for_opportunity")
+    assert ok is False, "ohne eigene Zahlen bleibt die Aussage indikativ"
+    assert "existiert noch nicht" in why and "nicht" in why
+    assert "nur „unklar“" not in why, "die alte Begruendung galt dem Quellvideo"
+    # Fuer eine Aenderung am Quellvideo gilt die Ausgangsbasis unveraendert.
+    ok, why = ge.measurable({"views_7d": 0, "impressions_7d": 0}, "views_7d", "repackage_for_reach")
+    assert ok is False and "nur „unklar“" in why

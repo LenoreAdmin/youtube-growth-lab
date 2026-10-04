@@ -84,7 +84,10 @@ def _window_end(section, sections, duration):
                         if start+SHORT_MIN <= s.start_seconds <= latest)
     if section.end_seconds and start+SHORT_MIN <= section.end_seconds <= latest:
         boundaries.append(section.end_seconds)
-    return (max(boundaries) if boundaries else latest), bool(boundaries)
+    if boundaries:
+        return max(boundaries), "boundary"
+    # Ohne Grenze endet das Fenster entweder am Material oder an der Shorts-Grenze – nicht beliebig.
+    return latest, ("material" if latest >= duration-0.01 else "limit")
 
 
 def _hook(lines, start):
@@ -263,7 +266,7 @@ def candidates_for(session, asset, video=None, external=None, learned=None):
     built = []
     for section in sections:
         start = float(section.start_seconds or 0)
-        end, on_boundary = _window_end(section, sections, duration)
+        end, end_reason = _window_end(section, sections, duration)
         if end-start < SHORT_MIN:
             continue
         retention = retention_window(profile, start, end)
@@ -289,8 +292,9 @@ def candidates_for(session, asset, video=None, external=None, learned=None):
                             f"{retention['points']} gemessene Punkte")
         else:
             evidence.append("keine Retentionspunkte in diesem Fenster – Auswahl allein aus Materialeigenschaften")
-        evidence.append("Ende auf einer gemessenen Abschnittsgrenze" if on_boundary
-                        else f"Ende bei {SHORT_MAX:.0f} s Shorts-Grenze")
+        evidence.append({"boundary": "Ende auf einer gemessenen Abschnittsgrenze",
+                         "material": "Ende am Ende des Materials",
+                         "limit": f"Ende bei {SHORT_MAX:.0f} s Shorts-Grenze"}[end_reason])
         candidate = {"asset_id": asset.id, "video_id": (video.id if video else None),
                      "section": section.idx,
                      "start_seconds": round(start, 2), "end_seconds": round(end, 2),

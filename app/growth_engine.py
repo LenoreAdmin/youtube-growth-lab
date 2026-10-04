@@ -450,6 +450,14 @@ def measurable(baseline, target_metric=None, action=None):
     impressions = (baseline or {}).get("impressions_7d") or 0
     if views >= MIN_MEASURABLE_VIEWS_7D or impressions >= MIN_MEASURABLE_IMPRESSIONS_7D:
         return True, None
+    if action == "produce_for_opportunity":
+        # Bewertet wird ein neues eigenes Asset. Das Quellvideo liefert dafuer keine Ausgangsbasis, also
+        # ist seine leere Woche hier kein Befund. Die Aussage bleibt indikativ, bis der Short eigene
+        # Zahlen hat – aber aus dem richtigen Grund.
+        return False, ("Der neue Inhalt existiert noch nicht und hat keine eigene Ausgangsbasis; die "
+                       f"{views} Views und {impressions} Impressions des Quellvideos sind dafuer nicht "
+                       "maßgeblich. Bewertet wird der Short an seinen eigenen Impressions, Views, "
+                       "Trafficquellen und seiner Retention.")
     if action in COLD_START_ACTIONS:
         return True, (f"Cold Start: {views} Views und {impressions} Impressions sind der Befund, nicht die "
                       f"Voraussetzung. Diese Maßnahme soll Auslieferung erzeugen; als Wirkung zaehlt erst, wenn "
@@ -768,7 +776,12 @@ def content_steps(title, channel, topic, hold):
              f"{primary['end_seconds']:.1f} ({primary['duration_seconds']:.1f} s)."
              + (f" Bereits gerendert: {rendered}" if rendered else
                 " Rendern lokal mit `python -m app.cli content --render <Zielverzeichnis>`.")),
-            (f"Hook ist die an dieser Stelle gesungene Zeile: „{primary['hook']}“."
+            ((f"Hook ist die an dieser Stelle gesungene Zeile, gegen den eigenen Songtext ausgerichtet: "
+              f"„{primary['hook']}“."
+              if primary.get("hook_source") == "aligned" else
+              f"Hook waere die maschinell erkannte Zeile „{primary['hook']}“ (Sicherheit "
+              f"{primary.get('hook_confidence')}). Nicht gegen eigenen Songtext geprueft: vor der "
+              "Verwendung gegenlesen oder den Songtext als .txt neben die Datei legen.")
              if primary.get("hook") else
              "Kein zitierfaehiger eigener Wortlaut belegt – der Einstieg ist der gemessene Startpunkt, "
              "ohne erfundenen Hook."),
@@ -1508,6 +1521,8 @@ def run(session, now, contexts, base, budget=None):
             "external": {"score": external.get("score"), "kind": external.get("kind"), "key": external.get("key"), "gap": external.get("gap"),
                          "audience": external.get("audience"), "demand_source": external.get("demand_source"),
                          "evidence_level": external.get("evidence_level"), "actionable": bool(external.get("actionable")),
+                         "context_usable": bool(external.get("context_usable")),
+                         "context_reason": external.get("context_reason"),
                          "subscriber_fit": (external.get("scores") or {}).get("subscriber_fit_score")} if external else None}
         ranking.append(row)
         # Ein laufendes Experiment haelt sein Video – aber nicht die Frage, ob eine belegte Audience-Chance
@@ -1730,8 +1745,13 @@ def brief_for(session, action, video, external, channel):
                 "material": (f"Eigene Originaldatei zu „{video.title}“: {len(listed)} messbar unterschiedliche "
                              f"Kandidaten, jeder mit exakter Start- und Endzeit"),
                 "candidates": listed,
-                "hook": (f"„{primary['hook']}“ – die an Sekunde {primary['start_seconds']:.1f} tatsaechlich "
-                         f"gesungene Zeile ({primary['hook_source']})" if primary.get("hook") else
+                "hook": ((f"„{primary['hook']}“ – die an Sekunde {primary['start_seconds']:.1f} gesungene "
+                          "Zeile, gegen den eigenen Songtext ausgerichtet"
+                          if primary.get("hook_source") == "aligned" else
+                          f"„{primary['hook']}“ – an Sekunde {primary['start_seconds']:.1f} maschinell erkannt "
+                          f"(Sicherheit {primary.get('hook_confidence')}), nicht gegen eigenen Songtext "
+                          "geprueft – vor der Verwendung gegenlesen")
+                         if primary.get("hook") else
                          f"Einstieg bei Sekunde {primary['start_seconds']:.1f}; kein zitierfaehiger eigener "
                          "Wortlaut belegt, deshalb kein Textzitat."),
                 "review": ("Freigabe vor dem Upload bleibt menschlich; Start, Ende und Reihenfolge liegen "

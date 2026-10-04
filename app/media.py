@@ -248,16 +248,27 @@ def transcript(wav, lyrics=None):
         from faster_whisper import WhisperModel
     except Exception:
         return [], None
-    model = WhisperModel(os.environ.get("WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
-    segments, info = model.transcribe(wav, vad_filter=True, word_timestamps=False)
     rows = []
-    for segment in segments:
-        text = (segment.text or "").strip()
-        if not text:
-            continue
-        confidence = round(float(math.exp(segment.avg_logprob)), 3) if segment.avg_logprob is not None else None
-        rows.append({"start_seconds": round(float(segment.start), 3), "end_seconds": round(float(segment.end), 3),
-                     "text": text[:1000], "confidence": confidence, "source": "asr"})
+    try:
+        import librosa
+        model = WhisperModel(os.environ.get("WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
+        # Das Audio wird selbst dekodiert und als Array uebergeben. Sonst dekodiert faster-whisper
+        # ueber PyAV, dessen Aufrufsignatur sich zwischen Versionen aendert.
+        samples, _ = librosa.load(wav, sr=16000, mono=True)
+        segments, info = model.transcribe(samples, vad_filter=True, word_timestamps=False)
+        for segment in segments:
+            text = (segment.text or "").strip()
+            if not text:
+                continue
+            confidence = (round(float(math.exp(segment.avg_logprob)), 3)
+                          if segment.avg_logprob is not None else None)
+            rows.append({"start_seconds": round(float(segment.start), 3),
+                         "end_seconds": round(float(segment.end), 3),
+                         "text": text[:1000], "confidence": confidence, "source": "asr"})
+    except Exception as exc:
+        # Ein defektes optionales Werkzeug darf nur seine eigenen Messwerte kosten, nicht den Lauf.
+        log.warning("transcript unavailable: %s: %s", type(exc).__name__, str(exc)[:200])
+        return [], None
     if lyrics:
         rows = _align(rows, lyrics)
     return rows, {"language": getattr(info, "language", None)}
