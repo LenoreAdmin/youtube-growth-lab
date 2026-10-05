@@ -251,8 +251,12 @@ def test_a_running_measure_can_be_cancelled_so_it_does_not_hold_up_reach(session
         pass
 
 
-def test_after_cancelling_the_video_is_planned_again(monkeypatch, session):
-    """Nach dem Abbruch muss der naechste Lauf dieses Video unmittelbar neu planen koennen."""
+def test_a_measure_without_development_is_replaced_without_a_click(monkeypatch, session):
+    """Der Loop entscheidet selbst: eine Maßnahme ohne Entwicklung haelt ihr Video nicht fest.
+
+    Der Kanalinhaber klickt dafuer nichts. Die alte Zeile bleibt als `superseded` erhalten, mit dem
+    Befund und dem Vermerk, dass die Engine entschieden hat, und dasselbe Lauf plant das Video neu.
+    """
     from app.models import GrowthPlan
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
@@ -274,13 +278,13 @@ def test_after_cancelling_the_video_is_planned_again(monkeypatch, session):
                  "recommendation": {"confidence": CONF}} for v in ("a", "b")]
     ge.run(session, NOW, contexts, base)
     session.expire_all()
-    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
-    assert not any(q["video_id"] == "a" for q in plan["queue"]), "die laufende Messung haelt das Video"
-    # Abbrechen, dann neu planen – ohne Wartefrist.
-    ge.cancel_action(session, blocking.id, None, NOW)
-    session.commit()
-    ge.run(session, NOW, contexts, base)
-    session.expire_all()
+    # Ein einziger Lauf: die alte Messung wird ersetzt und das Video neu geplant.
+    stale = session.get(GrowthAction, blocking.id)
+    assert stale.status == ge.SUPERSEDED, "die alte Messung haelt das Video nicht mehr"
+    assert stale.evaluation["cancelled_by"] == "engine" and stale.evaluation["measured"] is False
+    assert stale.evaluation["replaced"] is True
+    assert stale.evaluation["progress"]["verdict"] == "weak"
+    assert "keine zusaetzliche Auslieferung" in stale.evaluation["note"]
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.day.desc(), GrowthPlan.id.desc())).plan
     entry = next((q for q in plan["queue"] if q["video_id"] == "a"), None)
     assert entry is not None, f"nicht neu geplant: {[(q['video_id'], q['action']) for q in plan['queue']]}"
@@ -288,3 +292,77 @@ def test_after_cancelling_the_video_is_planned_again(monkeypatch, session):
     package = entry["brief"]["packaging"]
     assert package["title"] and package["description"]
     assert any(package["title"] in step for step in entry["steps"])
+
+
+def test_the_executed_change_is_recognised_without_a_confirmation_click(monkeypatch, session):
+    """Nach der Umsetzung auf YouTube laeuft die Messung von selbst – der Loop braucht keinen Klick."""
+    from test_actionable_growth import seed_profile
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=6, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)
+    attested(session, "a")
+    rows, _ = history.build(history.load(session), 168, LAG)
+    base = regimes.baselines(rows)
+    histories = {h.video.id: h for h in history.load(session)}
+
+    def contexts():
+        return [{"video": session.get(Video, v), "history": histories[v],
+                 "features": history.features_at(histories[v], TODAY),
+                 "regime": regimes.classify(history.features_at(histories[v], TODAY), base),
+                 "forecasts": [], "experiments": [],
+                 "recommendation": {"confidence": CONF}} for v in ("a", "b")]
+
+    ge.run(session, NOW, contexts(), base)
+    session.expire_all()
+    proposed = session.scalar(select(GrowthAction).where(GrowthAction.video_id == "a",
+                                                         GrowthAction.action == "repackage_for_reach",
+                                                         GrowthAction.status == ge.PROPOSED))
+    assert proposed is not None, "es gibt eine vorbereitete Packaging-Aktion"
+    package = proposed.payload["brief"]["packaging"]
+    assert package["source_title"] == "a", "der heutige Titel wird mitgefuehrt"
+    # Der Kanalinhaber setzt den Titel auf YouTube um; der Sync liefert ihn beim naechsten Lauf.
+    video = session.get(Video, "a")
+    video.title = package["title"]
+    session.commit()
+    histories = {h.video.id: h for h in history.load(session)}
+    ge.run(session, NOW, contexts(), base)
+    session.expire_all()
+    started = session.get(GrowthAction, proposed.id)
+    assert started.status == ge.RUNNING, "das Messfenster laeuft ohne Bestaetigungsklick"
+    assert started.started_day == TODAY
+    assert started.payload["executed_as_proposed"] is True
+    assert started.payload["executed_title"] == package["title"]
+
+
+def test_a_measure_that_moves_something_is_kept(session):
+    """Gute Entwicklung wird geschuetzt: dann ersetzt der Loop die Maßnahme nicht."""
+    from types import SimpleNamespace
+    row = SimpleNamespace(started_day=TODAY-timedelta(days=12), created_day=TODAY-timedelta(days=12),
+                          window_days=28, target_metric="views_7d", action="repackage_for_reach")
+    strong = {"paid_views": 0, "observed_days": 9, "impressions": 900, "views": 240, "ctr": 0.05,
+              "watch_minutes": 300, "discovery_views": 180, "subscribers": 2}
+    weak = {**strong, "impressions": 10, "views": 2, "discovery_views": 1, "subscribers": 0}
+    history = SimpleNamespace(daily={}, traffic={}, reach={})
+    calls = {}
+
+    def fake_window(_history, start, end):
+        calls["n"] = calls.get("n", 0)+1
+        return weak if calls["n"] == 1 else strong
+
+    import app.growth_engine as engine
+    original = engine._window_metrics
+    engine._window_metrics = fake_window
+    try:
+        verdict = engine.progress_of(None, row, history, BASE, NOW)
+    finally:
+        engine._window_metrics = original
+    assert verdict["verdict"] == "holding", verdict
+    assert "bleibt" in verdict["note"]
+
+
+def test_without_enough_observed_days_there_is_no_interim_verdict(session):
+    from types import SimpleNamespace
+    row = SimpleNamespace(started_day=TODAY-timedelta(days=1), created_day=TODAY-timedelta(days=1),
+                          window_days=28, target_metric="views_7d", action="repackage_for_reach")
+    verdict = ge.progress_of(None, row, SimpleNamespace(daily={}, traffic={}, reach={}), BASE, NOW)
+    assert verdict["verdict"] == "too_early" and str(ge.MIN_SIGNAL_DAYS) in verdict["note"]

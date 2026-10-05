@@ -707,5 +707,8 @@ def packaging_for(session, video):
                      f"Auf das Hauptmotiv zuschneiden und die Belichtung anheben; in diesem Abschnitt liegen "
                      f"{frame['cuts']} Schnitte, also ein scharfes Einzelbild auswaehlen.")
     return {"subject": headline, "title": title[:PACKAGING_TITLE_MAX], "description": lines,
+            # Der Titel, der heute auf YouTube steht. Weicht er spaeter ab, wurde die Aenderung
+            # umgesetzt – das erkennt das System selbst, ohne Bestaetigung durch den Kanalinhaber.
+            "source_title": " ".join((video.title or "").split()),
             "thumbnail": thumbnail, "frame": frame,
             "evidence": f"eigener Tag „{subject['tag']}“ aus den Videoangaben des Kanals"}

@@ -1007,7 +1007,8 @@ def experiment_steps(action, title, f, external, channel):
     surface = f" Ansatzpunkt laut eigenen Daten: {route['label']}." if route else ""
     # Eine belegte Audience hilft bei der Auswahl der bestehenden Playlist; geschrieben wird dadurch nichts.
     fit = f" (passend zu „{audience}“)" if audience else ""
-    hold = "Während des Messfensters keine weitere Änderung an diesem Video – sonst misst du zwei Dinge gleichzeitig."
+    hold = ("Nur diese eine Änderung umsetzen, sonst ist die Wirkung nicht zuordenbar. Wie lange gemessen "
+            "wird, entscheidet das System anhand der Entwicklung – du musst dafür nichts weiter tun.")
     link = link_steps(title, channel, hold, f)      # None, wenn keine belegte Quelle existiert
     steps = {
         # Ein Hebel, und nur belegte Ressourcen: was nicht nachweislich existiert, kommt in keinem Schritt vor.
@@ -1240,6 +1241,75 @@ def evaluate_actions(session, now, by_id, base):
     return evaluated
 
 
+MIN_SIGNAL_DAYS = 4         # So viele beobachtete Tage braucht eine Zwischenaussage ueberhaupt.
+RETIRED = ("probe_missing_evidence", "create_playlist_context")
+
+
+def detect_execution(session, video, now=None):
+    """Hat der Kanalinhaber das vorgeschlagene Packaging umgesetzt? Dann laeuft die Messung von selbst.
+
+    Der Titel steht in jedem Sync neu zur Verfuegung. Weicht er von dem ab, der beim Vorschlag auf
+    YouTube stand, ist die Aenderung ausgefuehrt – und zwar genau die eine, die vorgeschlagen wurde.
+    Fuer diesen Zustandswechsel muss niemand klicken.
+    """
+    now = now or utcnow()
+    row = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
+                                                    GrowthAction.version == VERSION,
+                                                    GrowthAction.action == "repackage_for_reach",
+                                                    GrowthAction.status == PROPOSED)
+                         .order_by(GrowthAction.created_day.desc()))
+    if row is None:
+        return None
+    package = ((row.payload or {}).get("brief") or {}).get("packaging") or {}
+    before = package.get("source_title")
+    current = " ".join((video.title or "").split())
+    if not before or current == before:
+        return None                 # Unveraendert: es gibt nichts zu starten.
+    started = start_action(session, row.id, now)
+    started.payload = {**(row.payload or {}), "executed_title": current,
+                       "executed_as_proposed": current == package.get("title")}
+    session.flush()
+    log.info("growth executed action=%s video=%r title=%r as_proposed=%s",
+             started.id, video.title, current[:80], current == package.get("title"))
+    return started
+
+
+def progress_of(session, row, history, base, now):
+    """Behalten oder jetzt ersetzen? Entscheidet die Entwicklung seit dem Start, nicht der Kalender.
+
+    Ohne genug beobachtete Tage gibt es keine Aussage – dann laeuft die Maßnahme weiter. Danach gilt:
+    bewegt sie etwas, bleibt sie und wird geschuetzt. Entsteht Auslieferung, deren Richtung noch offen
+    ist, wird weiter beobachtet. Bewegt sie nichts, wird sie ersetzt, statt ein Fenster abzuwarten,
+    dessen Ergebnis niemand mehr braucht.
+    """
+    start = row.started_day or row.created_day
+    known_end = pacific_day(now)-timedelta(days=lag_days())
+    observed = (known_end-start).days
+    base_note = {"started_day": str(start), "observed_days": max(0, observed)}
+    if history is None:
+        return {**base_note, "verdict": "unknown", "note": "Keine Historie zu diesem Video."}
+    if observed < MIN_SIGNAL_DAYS:
+        return {**base_note, "verdict": "too_early",
+                "note": (f"{max(0, observed)} beobachtete Tage seit dem Start; unter {MIN_SIGNAL_DAYS} "
+                         "gibt es keine Zwischenaussage.")}
+    before = _window_metrics(history, start-timedelta(days=observed), start-timedelta(days=1))
+    after = _window_metrics(history, start+timedelta(days=1), known_end)
+    outcome, detail = _outcome(row, before, after, base)
+    found = {**base_note, "before": before, "after": after, "outcome": outcome, "detail": detail}
+    if outcome == "positive":
+        return {**found, "verdict": "holding",
+                "note": ("Die Maßnahme bewegt messbar etwas und bleibt; sie wird weiter beobachtet, "
+                         "statt sie durch eine neue zu ersetzen.")}
+    if (after.get("impressions") or 0) >= MIN_MEASURABLE_IMPRESSIONS_7D and outcome == "inconclusive":
+        return {**found, "verdict": "too_early",
+                "note": ("Es entsteht Auslieferung, die Richtung ist noch offen. Weiter beobachten, "
+                         "nicht ersetzen.")}
+    return {**found, "verdict": "weak",
+            "note": (f"Seit {max(0, observed)} beobachteten Tagen keine zusaetzliche Auslieferung "
+                     f"({after.get('impressions') or 0} Impressions, {after.get('views') or 0} Views). "
+                     "Die Maßnahme wird ersetzt, damit der naechste Hebel laufen kann.")}
+
+
 def _outcome(row, before, after, base):
     if before["paid_views"] > 0 or after["paid_views"] > 0:
         return "inconclusive", {"reason": "Werbetraffic im Vorher- oder Nachher-Fenster."}
@@ -1452,6 +1522,8 @@ def run(session, now, contexts, base, budget=None):
                 external = attested
         board = scores(f, regime, base, c.get("forecasts", []), momentum, peak, external)
         state = state_of(f, regime, base, rev)
+        # Datenerzeugung, Playlist-Anlage und Shorts gehoeren nicht in die Reichweiten-Steuerung.
+        # Sie bleiben im Code fuer laufende Faelle, werden aber nicht mehr gewaehlt.
         conf = c["recommendation"]["confidence"] if c.get("recommendation") else v4_confidence(base, None, {})
         # Nur ein vom Menschen bestätigt gestartetes Experiment hält ein Video. Ein Vorschlag ist nur ein
         # Vorschlag: das System kann auf YouTube nichts ausführen, also läuft ohne Bestätigung auch nichts.
@@ -1472,6 +1544,11 @@ def run(session, now, contexts, base, budget=None):
                    # Inhaltswissen aus der eigenen Originaldatei, soweit lokal analysiert. Ohne Datei
                    # bleibt das None und die Engine entscheidet wie bisher aus Retention und Chance.
                    "content": content_material(session, video, external, today)}
+        try:
+            # Erst pruefen, ob die vorgeschlagene Aenderung inzwischen auf YouTube steht.
+            detect_execution(session, video, now)
+        except Exception as exc:
+            log.warning("growth detect video=%r failed=%s", video.title, type(exc).__name__)
         running = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id, GrowthAction.status == RUNNING,
                                                             GrowthAction.version == VERSION,
                                                             GrowthAction.action != "produce_for_opportunity")
@@ -1480,12 +1557,26 @@ def run(session, now, contexts, base, budget=None):
                                                              GrowthAction.version == VERSION)
                                   .order_by(GrowthAction.created_day.desc()))
         if running is not None:
-            action, notes = running.action, [f"Bestätigt gestartet am {running.started_day}; läuft bis zur Auswertung am "
-                                             f"{running.evaluate_after}. Bis dahin nichts weiter an diesem Video ändern."]
+            # Der Loop urteilt laufend: eine Maßnahme ohne Entwicklung haelt ihr Video nicht fest.
+            progress = progress_of(session, running, history, base, now)
+            if progress["verdict"] == "weak":
+                cancel_action(session, running.id, progress["note"], now, actor="engine",
+                              detail={"progress": progress, "replaced": True})
+                log.info("growth replace video=%r was=%s reason=%r", video.title, running.action,
+                         progress["note"][:120])
+                running = None
+            elif progress["verdict"] in ("holding", "too_early"):
+                running.evaluation = {**(running.evaluation or {}), "progress": progress}
+                session.flush()
+        if running is not None:
+            action, notes = running.action, [f"Bestätigt gestartet am {running.started_day}. {progress['note']}"]
             details = {**running.payload, "notes": notes, "held_since": str(running.started_day)}
             current = running
         else:
             action, notes = choose_action(state, f, rev, base, c.get("experiments", []), record, external, channel)
+            if action in RETIRED or (action == "produce_for_opportunity" and not NEW_CONTENT_ACTIONS):
+                action, notes = "observe", ["Kein Reichweiten-Hebel an diesem Video belegt; das System "
+                                            "beobachtet weiter und meldet sich, sobald einer entsteht."]
             details = action_details(action, state, f, regime, base, board, rev, momentum, conf, notes, c.get("experiments", []), external,
                                      channel=channel, title=video.title)
             if proposed and proposed.action != action:
@@ -1869,7 +1960,7 @@ def youtube_id(raw):
     return None
 
 
-def cancel_action(session, action_id, reason=None, now=None):
+def cancel_action(session, action_id, reason=None, now=None, actor="channel_owner", detail=None):
     """Eine laufende Maßnahme abbrechen, damit sie eine staerkere Reichweitenaktion nicht aufhaelt.
 
     Die Zeile bleibt erhalten und wird als `superseded` protokolliert – mit Grund und Tag. Ihr
@@ -1885,9 +1976,9 @@ def cancel_action(session, action_id, reason=None, now=None):
     if row.status != RUNNING:
         raise ValueError(f"Nur eine laufende Maßnahme kann abgebrochen werden; diese ist {row.status}.")
     row.status = SUPERSEDED
-    row.evaluation = {**(row.evaluation or {}),
+    row.evaluation = {**(row.evaluation or {}), **(detail or {}),
                       "note": reason or "Abgebrochen: eine staerkere Reichweitenaktion hat Vorrang.",
-                      "cancelled_day": str(pacific_day(now)), "cancelled_by": "channel_owner",
+                      "cancelled_day": str(pacific_day(now)), "cancelled_by": actor,
                       "measured": False}
     session.flush()
     log.info("growth cancel action=%s video=%s was=%s", row.id, row.video_id, row.action)
@@ -2006,7 +2097,8 @@ def daily_plan(ranking, today, record, results=None):
             "queue": queue, "queue_limit": QUEUE_LIMIT, "running_experiments": running, "results": results or [],
             "not_testable": not_testable,
             "now_do": queue[0] if queue else None,
-            "queue_note": ("Ausführbare Experimente für heute – von dir auszuführen, das System ändert nichts auf YouTube. "
+            "queue_note": ("Die aktuell stärkste Reichweitenaktion – von dir auszuführen, weil der YouTube-Zugriff "
+                           "read-only ist. Alles andere entscheidet das System selbst. "
                            "Genau die aktuell staerkste ausfuehrbare Reichweitenaktion. Alles Weitere "
                            "entscheidet das System intern und meldet sich erst, wenn es wieder etwas zu tun gibt."
                            if queue else "Heute keine datenbegründete Reichweiten-Maßnahme: geschützte oder laufende "
@@ -2125,7 +2217,7 @@ def reconcile_plan(session, plan, titles):
                                "Momentaufnahme des letzten Laufs." if not notes else
                                "Status live abgeglichen: "+" ".join(notes))
     if not queue and running:
-        plan["queue_note"] = ("Alle offenen Vorschläge sind bestätigt und laufen. Bis zur Auswertung nichts weiter "
+        plan["queue_note"] = ("Die laufende Maßnahme zeigt Entwicklung und bleibt deshalb. Das System prüft das "
                               "an diesen Videos ändern.")
     return plan
 

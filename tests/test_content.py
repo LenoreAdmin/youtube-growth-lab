@@ -458,7 +458,7 @@ def test_an_open_recommendation_from_an_earlier_day_stays_executable(monkeypatch
                              state="needs_distribution", action="probe_missing_evidence",
                              target_metric="impressions_7d", window_days=14,
                              evaluate_after=T+timedelta(days=5), status="running",
-                             started_day=T-timedelta(days=9), started_at=NOW, lever_class="internal_link",
+                             started_day=T-timedelta(days=2), started_at=NOW, lever_class="internal_link",
                              payload=details_for("probe_missing_evidence", starved(), ["laeuft"])))
     # Und ein offener Produktionsvorschlag von gestern, nie gestartet.
     stale = GrowthAction(video_id="a", created_day=T-timedelta(days=1), created_at=NOW, version=ge.VERSION,
@@ -678,7 +678,7 @@ def test_a_running_publication_still_yields_the_next_action_in_the_plan(monkeypa
                              version=ge.VERSION, state="needs_distribution",
                              action="probe_missing_evidence", target_metric="impressions_7d",
                              window_days=14, evaluate_after=T+timedelta(days=5), status=ge.RUNNING,
-                             started_day=T-timedelta(days=9), started_at=NOW,
+                             started_day=T-timedelta(days=2), started_at=NOW,
                              lever_class="internal_link",
                              payload=details_for("probe_missing_evidence", starved(), ["laeuft"])))
     session.add(GrowthAction(video_id="a", created_day=T-timedelta(days=1), created_at=NOW,
