@@ -421,18 +421,22 @@ def selected(candidates):
     return None
 
 
-def youtube_title(video, candidate):
+def youtube_title(video, candidate, already=0):
     """Ein konkreter Titel, ausschliesslich aus belegtem eigenen Material.
 
     Grundlage ist der eigene Videotitel – unsere eigene Angabe, keine Behauptung. Ein gesungener Satz
     kommt nur davor, wenn er gegen den eigenen Songtext ausgerichtet ist. Eine maschinell erkannte
     Zeile taucht im Titel nie auf; sie koennte verhoert sein.
+
+    Gibt es aus demselben Video schon einen Short, bekommt der naechste eine Ordnungszahl. Zwei
+    gleichnamige eigene Videos wuerden sonst gegeneinander laufen – das ist die Kannibalisierung,
+    die wir vermeiden wollen. Die Zahl ist eine Zaehlung, keine erfundene Aussage ueber den Inhalt.
     """
     base = " ".join((video.title or "").split())
     if candidate.get("hook") and candidate.get("hook_source") == "aligned":
         title = f"„{candidate['hook'].strip()}“ – {base}"
     else:
-        title = f"{base} – {EXCERPT}"
+        title = f"{base} – {EXCERPT}" + (f" {already+1}" if already else "")
     return title[:TITLE_MAX]
 
 
@@ -461,8 +465,9 @@ def upload_package(video, candidates, context=None):
     candidate = selected(candidates)
     if candidate is None:
         return None
+    already = sum(1 for c in candidates or [] if c.get("published_video_id"))
     return {"candidate_id": candidate.get("candidate_id"), "file": candidate["render_path"],
-            "title": youtube_title(video, candidate),
+            "title": youtube_title(video, candidate, already),
             "description": youtube_description(video, candidate, context),
             "start_seconds": candidate["start_seconds"], "end_seconds": candidate["end_seconds"],
             "duration_seconds": candidate["duration_seconds"],

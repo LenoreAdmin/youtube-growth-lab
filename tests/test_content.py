@@ -646,6 +646,9 @@ def test_a_published_short_does_not_block_the_next_one(session):
     assert max(0.0, overlap)/shorter <= ci.DISTINCT_OVERLAP, "kein zweiter, praktisch gleicher Short"
     assert any(c.get("published_video_id") == "jZq_Cko_BCw" for c in again["candidates"]), \
         "die laufende Messung bleibt sichtbar"
+    # Zwei gleichnamige eigene Shorts wuerden gegeneinander laufen – der naechste wird unterschieden.
+    assert package["title"].endswith(" 2"), package["title"]
+    assert package["title"] != ci.youtube_title(video, first)
 
 
 def test_a_running_publication_still_yields_the_next_action_in_the_plan(monkeypatch, session):
