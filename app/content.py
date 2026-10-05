@@ -251,7 +251,12 @@ def candidates_for(session, asset, video=None, external=None, learned=None):
     gibt. Liegt eines vor, kommt die gemessene Retentionskurve als weiterer Faktor hinzu; fehlt sie,
     steht das in der Evidenz und wird nicht ersetzt.
     """
-    from .models import ContentSection, ContentLine
+    from .models import ContentCandidate, ContentSection, ContentLine
+    # Bereits veroeffentlichte Fenster: verbraucht, und ihr Bereich ist fuer neue Kandidaten belegt.
+    used = {(row.start_seconds, row.end_seconds): row.published_video_id
+            for row in session.scalars(select(ContentCandidate)
+                                       .where(ContentCandidate.asset_id == asset.id,
+                                              ContentCandidate.published_video_id.is_not(None)))}
     sections = list(session.scalars(select(ContentSection).where(ContentSection.asset_id == asset.id)
                                     .order_by(ContentSection.idx)))
     if not sections:
@@ -303,11 +308,16 @@ def candidates_for(session, asset, video=None, external=None, learned=None):
                      "hook_source": (hook or {}).get("source"),
                      "hook_confidence": (hook or {}).get("confidence"),
                      "retention": retention}
+        candidate["published_video_id"] = used.get((candidate["start_seconds"], candidate["end_seconds"]))
         candidate["score"] = _order(candidate, external, learned)
         built.append(candidate)
     built.sort(key=lambda c: -c["score"])
-    chosen = []
+    # Ein veroeffentlichtes Fenster bleibt in der Liste – seine Messung laeuft – und besetzt dabei
+    # seinen Bereich, damit aus demselben Material kein zweiter, praktisch gleicher Short entsteht.
+    chosen = [c for c in built if c.get("published_video_id")]
     for candidate in built:
+        if candidate.get("published_video_id"):
+            continue
         if distinct_enough(chosen, candidate):
             chosen.append(candidate)
         if len(chosen) == MAX_CANDIDATES:
@@ -339,7 +349,8 @@ def store(session, video, chosen, today):
         row.evidence = candidate["evidence"]
         row.hook, row.hook_source = candidate.get("hook"), candidate.get("hook_source")
         session.flush()
-        kept.append({**candidate, "candidate_id": row.id, "render_path": row.render_path})
+        kept.append({**candidate, "candidate_id": row.id, "render_path": row.render_path,
+                     "published_video_id": row.published_video_id})
     return kept
 
 
@@ -399,12 +410,13 @@ EXCERPT = "Short"        # Sachlicher Zusatz, der den Ausschnitt vom ganzen Vide
 def selected(candidates):
     """Genau ein Kandidat: der vorderste, der als fertig geschnittene Datei vorliegt.
 
-    Die Reihenfolge entsteht bereits aus Messung, Retention, Chance und Gelerntem. Hier kommt nur die
-    Ausfuehrbarkeit hinzu: ohne Datei gibt es nichts zu veroeffentlichen, und ein Vorschlag, der eine
-    nicht existierende Datei nennt, ist keine Maßnahme.
+    Die Reihenfolge entsteht bereits aus Messung, Retention, Chance und Gelerntem. Hier kommen zwei
+    Bedingungen hinzu: ohne geschnittene Datei gibt es nichts zu veroeffentlichen, und ein bereits
+    veroeffentlichtes Fenster ist verbraucht. Dessen Messung laeuft weiter, aber es wird kein zweites
+    Mal vorgeschlagen – der naechste Short kommt aus dem naechstbesten unbenutzten Ausschnitt.
     """
     for candidate in candidates or []:
-        if candidate.get("render_path"):
+        if candidate.get("render_path") and not candidate.get("published_video_id"):
             return candidate
     return None
 
@@ -464,23 +476,32 @@ def attach_pending(session, today=None):
     mit dem naechsten stuendlichen Sync in der Datenbank. Bis dahin liegt die ID in der Maßnahme und
     wird hier eingehaengt – danach erfasst die Engine die Auslieferung des Shorts wie bei jedem Video.
     """
-    from .models import GrowthAction, Video
+    from .models import ContentCandidate, GrowthAction, Video
     today = today or date.today()
     linked = []
     rows = session.scalars(select(GrowthAction).where(GrowthAction.action == "produce_for_opportunity"))
     for row in rows:
         payload = row.payload or {}
-        pending = payload.get("pending_video_id")
+        # Auch eine bereits vermerkte Veroeffentlichung wird geprueft: fehlt die Zuordnung, weil die
+        # Maßnahme vor einer Korrektur gestartet wurde, traegt dieser Lauf sie ohne Zutun nach.
+        pending = payload.get("pending_video_id") or payload.get("published_video_id")
         if not pending:
             continue
+        if session.get(Video, pending) is None:
+            continue                    # Noch nicht synchronisiert – beim naechsten Lauf erneut versuchen.
         # Die mitgefuehrte ID zuerst, dann der Brief, dann dieselbe Auswahl wie bei der Erzeugung.
         candidate_id = (payload.get("pending_candidate_id")
                         or ((payload.get("brief") or {}).get("upload") or {}).get("candidate_id")
                         or candidate_for(session, row.video_id))
         if not candidate_id:
             continue
-        if session.get(Video, pending) is None:
-            continue                    # Noch nicht synchronisiert – beim naechsten Lauf erneut versuchen.
+        candidate = session.get(ContentCandidate, candidate_id)
+        if candidate is not None and candidate.published_video_id == pending:
+            if payload.get("pending_video_id"):
+                row.payload = {**payload, "pending_video_id": None, "published_video_id": pending,
+                               "pending_candidate_id": candidate_id}
+                session.flush()
+            continue                    # Zuordnung steht bereits.
         # Das gemerkte Datum liegt als Zeichenkette in der Nutzlast; die Spalte will ein Datum.
         day = payload.get("pending_day")
         try:
@@ -489,7 +510,8 @@ def attach_pending(session, today=None):
             day = today
         if attach_published(session, candidate_id, pending, day) is None:
             continue
-        row.payload = {**payload, "pending_video_id": None, "published_video_id": pending}
+        row.payload = {**payload, "pending_video_id": None, "published_video_id": pending,
+                       "pending_candidate_id": candidate_id}
         session.flush()
         linked.append((candidate_id, pending))
     return linked

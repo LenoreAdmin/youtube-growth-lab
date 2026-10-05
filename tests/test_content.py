@@ -613,3 +613,128 @@ def test_an_action_without_the_candidate_in_its_payload_is_still_linked(session)
                       published_at=utcnow(), duration_seconds=56))
     session.commit()
     assert ci.attach_pending(session, TODAY) == [(expected, "jZq_Cko_BCw")]
+
+
+def _publish_candidate(session, candidate_id, short_id, video, day):
+    """Einen Kandidaten als veroeffentlicht markieren – wie nach dem Upload."""
+    session.add(Video(id=short_id, channel_id=video.channel_id, title=f"Short {short_id}",
+                      published_at=utcnow(), duration_seconds=40))
+    session.flush()
+    ci.attach_published(session, candidate_id, short_id, day)
+    session.commit()
+
+
+def test_a_published_short_does_not_block_the_next_one(session):
+    """Der Produktfehler: ein laufendes Messfenster legte die Produktion wochenlang still.
+
+    Gemessen wird weiter, aber der naechste Short entsteht parallel – aus dem naechstbesten
+    unbenutzten Ausschnitt, nicht aus demselben Fenster.
+    """
+    from app import growth_engine as ge
+    video = seed_asset(session)
+    stored = seed_renders(session, video)
+    first = ci.selected(stored)
+    _publish_candidate(session, first["candidate_id"], "jZq_Cko_BCw", video, TODAY)
+    again = ge.content_material(session, video, {"score": 70}, TODAY)
+    package = again["upload"]
+    assert package is not None, "die Produktion laeuft weiter"
+    assert package["candidate_id"] != first["candidate_id"]
+    assert package["start_seconds"] != first["start_seconds"]
+    overlap = (min(package["end_seconds"], first["end_seconds"])
+               - max(package["start_seconds"], first["start_seconds"]))
+    shorter = min(package["duration_seconds"], first["duration_seconds"])
+    assert max(0.0, overlap)/shorter <= ci.DISTINCT_OVERLAP, "kein zweiter, praktisch gleicher Short"
+    assert any(c.get("published_video_id") == "jZq_Cko_BCw" for c in again["candidates"]), \
+        "die laufende Messung bleibt sichtbar"
+
+
+def test_a_running_publication_still_yields_the_next_action_in_the_plan(monkeypatch, session):
+    """Der Abnahmetest: obwohl die erste Veroeffentlichung laeuft, steht die naechste Aktion bereit."""
+    from app import growth_engine as ge, history as hist, regimes as reg
+    from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
+    from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
+    from test_actionable_growth import CONF, details_for, starved
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=6, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)
+    video = seed_asset(session, curve=[{"at": round(i/40, 3), "ratio": 0.3+0.5*(i in range(20, 32))}
+                                       for i in range(41)])
+    stored = seed_renders(session, video)
+    first = ci.selected(stored)
+    _publish_candidate(session, first["candidate_id"], "jZq_Cko_BCw", video, T-timedelta(days=1))
+    # Wie in Production: das Quellvideo haelt zusaetzlich ein laufendes Experiment (#15).
+    session.add(GrowthAction(video_id="a", created_day=T-timedelta(days=9), created_at=NOW,
+                             version=ge.VERSION, state="needs_distribution",
+                             action="probe_missing_evidence", target_metric="impressions_7d",
+                             window_days=14, evaluate_after=T+timedelta(days=5), status=ge.RUNNING,
+                             started_day=T-timedelta(days=9), started_at=NOW,
+                             lever_class="internal_link",
+                             payload=details_for("probe_missing_evidence", starved(), ["laeuft"])))
+    session.add(GrowthAction(video_id="a", created_day=T-timedelta(days=1), created_at=NOW,
+                             version=ge.VERSION, state="needs_distribution",
+                             action="produce_for_opportunity", target_metric="views_7d", window_days=30,
+                             evaluate_after=T+timedelta(days=32), status=ge.RUNNING,
+                             started_day=T-timedelta(days=1), started_at=NOW, lever_class="content",
+                             payload={"brief": {"upload": {"candidate_id": first["candidate_id"]}},
+                                      "published_video_id": "jZq_Cko_BCw", "baseline": {},
+                                      "steps": ["hochladen"]}))
+    session.add(DiscoveryOpportunity(day=T, kind="suggested", key="nachbarschaft", video_id="a",
+                                     gap="suggested_opportunity",
+                                     scores={"external_audience_score": 70.0}, components={},
+                                     evidence={"evidence_level": "own_analytics", "actionable": True,
+                                               "context_usable": True, "title": "Nachbarcluster"},
+                                     status="open"))
+    session.commit()
+    rows, _ = hist.build(hist.load(session), 168, LAG)
+    base = reg.baselines(rows)
+    histories = {h.video.id: h for h in hist.load(session)}
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": hist.features_at(histories[v], T),
+                 "regime": reg.classify(hist.features_at(histories[v], T), base), "forecasts": [],
+                 "experiments": [], "recommendation": {"confidence": CONF}} for v in ("a", "b")]
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
+    entry = next((q for q in plan["queue"] if q["action"] == "produce_for_opportunity"), None)
+    assert entry is not None, f"die Produktion steht still: {[q['action'] for q in plan['queue']]}"
+    assert entry["brief"]["upload"]["candidate_id"] != first["candidate_id"], "nicht derselbe Ausschnitt"
+    assert session.get(ContentCandidate, first["candidate_id"]).published_video_id == "jZq_Cko_BCw"
+
+
+def test_when_every_window_is_used_no_short_is_proposed(session):
+    """Nicht blind alles veroeffentlichen: ist das Material verbraucht, gibt es keine Aufgabe."""
+    from app import growth_engine as ge
+    video = seed_asset(session)
+    stored = seed_renders(session, video)
+    for index, candidate in enumerate(stored):
+        _publish_candidate(session, candidate["candidate_id"], f"shortvid{index:03}", video, TODAY)
+    found = ge.content_material(session, video, {"score": 70}, TODAY)
+    assert found["upload"] is None
+    external = {"audience": "Nachbarcluster", "evidence_level": "own_analytics", "actionable": True,
+                "context_usable": True, "score": 70}
+    assert ge.brief_for(session, "produce_for_opportunity", video, external,
+                        {"content": found, "lifetime_views": 1200}) is None
+
+
+def test_a_missing_link_is_repaired_without_anyone_clicking(session):
+    """Production #17: gestartet vor der Korrektur, ohne Zuordnung – der naechste Lauf traegt sie nach."""
+    from app import growth_engine as ge
+    from app.models import GrowthAction
+    video = seed_asset(session)
+    stored = seed_renders(session, video)
+    expected = ci.selected(stored)["candidate_id"]
+    session.add(Video(id="jZq_Cko_BCw", channel_id=video.channel_id, title="Sealand Short",
+                      published_at=utcnow(), duration_seconds=56))
+    session.add(GrowthAction(video_id="a", created_day=TODAY-timedelta(days=1), created_at=utcnow(),
+                             version=ge.VERSION, state="needs_distribution",
+                             action="produce_for_opportunity", target_metric="views_7d", window_days=30,
+                             evaluate_after=TODAY+timedelta(days=32), status=ge.RUNNING,
+                             started_day=TODAY-timedelta(days=1), started_at=utcnow(),
+                             lever_class="content",
+                             payload={"pending_video_id": "jZq_Cko_BCw", "pending_day": str(TODAY),
+                                      "baseline": {}, "steps": ["hochladen"]}))
+    session.commit()
+    assert ci.attach_pending(session, TODAY) == [(expected, "jZq_Cko_BCw")]
+    session.commit()
+    assert session.get(ContentCandidate, expected).published_video_id == "jZq_Cko_BCw"
+    assert ci.attach_pending(session, TODAY) == [], "ein zweiter Lauf aendert nichts"

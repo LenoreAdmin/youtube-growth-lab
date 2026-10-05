@@ -1665,13 +1665,15 @@ def content_recommendation(session, video, state, f, regime, base, board, rev, m
         return None             # Ohne belegtes Material gibt es keine Schritte und damit keine Empfehlung.
     # Eine offene oder laufende Empfehlung je Video genuegt: sonst entstuende jeden Tag eine weitere
     # Produktionsaufgabe fuer dasselbe Quellmaterial.
+    # Nur ein noch nicht ausgefuehrter Vorschlag haelt den Platz. Eine bereits veroeffentlichte
+    # Maßnahme laeuft parallel weiter in der Messung, blockiert die Produktion aber nicht: sonst
+    # stuende der Kanal wochenlang still, obwohl geschnittenes Material bereitliegt. Welcher
+    # Ausschnitt als naechstes drankommt, entscheidet die Auswahl; verbrauchte Fenster entfallen.
     open_already = session.scalar(select(GrowthAction).where(GrowthAction.video_id == video.id,
                                                              GrowthAction.version == VERSION,
                                                              GrowthAction.action == action,
-                                                             GrowthAction.status.in_([PROPOSED, RUNNING]),
+                                                             GrowthAction.status == PROPOSED,
                                                              GrowthAction.created_day < today))
-    if open_already is not None and open_already.status == RUNNING:
-        return None             # Laeuft bereits bestaetigt – kein zweiter Vorschlag fuer dasselbe Material.
     # Ein offener Vorschlag aus einem frueheren Tag wird fortgeschrieben, nicht verdoppelt und nicht
     # verworfen: verworfen verschwaende er aus dem Plan und waere nicht mehr ausfuehrbar, verdoppelt
     # entstuende jeden Tag eine weitere Produktionsaufgabe fuer dasselbe Quellmaterial. Dieselbe Zeile
