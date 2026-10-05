@@ -176,7 +176,8 @@ def test_the_two_reach_levers_carry_a_production_brief_and_their_factors():
     video = SimpleNamespace(id="a", title="Sealand - Trainstories", duration_seconds=214)
     external = {"audience": "Nachbarcluster", "key": "nachbarschaft", "evidence_level": "own_analytics",
                 "actionable": True, "context_usable": True, "score": 61.1, "gap": "suggested_opportunity"}
-    channel = {"lifetime_views": 21081, "segment": None}
+    from test_actionable_growth import PACKAGING
+    channel = {"lifetime_views": 21081, "segment": None, "packaging": PACKAGING}
     from app.db import Session as DbSession
     with DbSession() as session:
         pack = ge.brief_for(session, "repackage_for_reach", video, external, channel)
@@ -185,7 +186,19 @@ def test_the_two_reach_levers_carry_a_production_brief_and_their_factors():
         assert "testet" not in pack["why"], "keine Behauptung ueber YouTubes Testverhalten"
         # Der Name des Nachbarvideos ist Evidenz, kein Packaging-Thema.
         assert "Evidenz, kein Packaging-Thema" in pack["audience_evidence"]
-        assert "Nachbarcluster" not in pack["packaging"]
+        rendered = pack["packaging"]["title"]+" "+" ".join(pack["packaging"]["description"])
+        assert "Nachbarcluster" not in rendered
+        # Die Maßnahme ist fertig ausfuehrbar: Titel, Zeilen und Thumbnail-Anweisung.
+        assert pack["action"] == "Packaging dieses Videos ersetzen"
+        assert pack["packaging"]["title"] and pack["packaging"]["description"]
+        steps = ge.experiment_steps("repackage_for_reach", video.title, starved(), external, channel)
+        assert any(pack["packaging"]["title"] in step for step in steps), steps
+        assert all("muss im Titel vorkommen" not in step for step in steps), "keine abstrakte Anweisung"
+        # Ohne belegtes Thema gibt es keine Aenderung und keinen Brief.
+        assert ge.brief_for(session, "repackage_for_reach", video, external,
+                            {**channel, "packaging": None}) is None
+        assert ge.experiment_steps("repackage_for_reach", video.title, starved(), external,
+                                   {**channel, "packaging": None}) is None
         # Geeigneter Startpunkt: wird benannt, der Schnitt bleibt redaktionell zu pruefen.
         ready = {"from_seconds": 42, "to_seconds": 70, "start_seconds": 42, "audience_ratio": 0.61,
                  "curve_points": 100, "review_required": False, "evidence": "Gemessene Retentionskurve (100 Punkte)"}

@@ -197,6 +197,26 @@ def start_growth_action(action_id: int, s=Depends(db)):
                              "note": "Messfenster gestartet. Das System hat nichts auf YouTube geändert."})
 
 
+class CancelReason(BaseModel):
+    """Warum eine laufende Maßnahme abgebrochen wird. Der Grund wird protokolliert."""
+    reason: str = Field(default="", max_length=400)
+
+
+@app.post("/api/growth/actions/{action_id}/cancel", dependencies=[Depends(authenticate)])
+def cancel_growth_action(action_id: int, body: CancelReason, s=Depends(db)):
+    """Abbrechen, damit eine alte Messung keine staerkere Reichweitenaktion aufhaelt."""
+    try:
+        row = growth_module.cancel_action(s, action_id, body.reason or None)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    s.commit()
+    return jsonable_encoder({"id": row.id, "video_id": row.video_id, "action": row.action,
+                             "status": row.status, "evaluation": row.evaluation,
+                             "note": "Abgebrochen und protokolliert. Der naechste Lauf plant dieses Video neu."})
+
+
 class PublishedVideo(BaseModel):
     """Die Video-ID oder der Link des gerade veroeffentlichten Shorts."""
     video: str = Field(min_length=1, max_length=200)

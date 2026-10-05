@@ -31,6 +31,8 @@ def action_row(session, video_id, action="repackage_for_reach", created_day=None
 def attested(session, video_id="a", score=70.0):
     """Eine belegte Audience-Chance – ohne sie gibt es keine Reichweitenaktion und damit keine Aufgabe."""
     from app.models import DiscoveryOpportunity
+    from test_actionable_growth import seed_profile
+    seed_profile(session, video_id)
     session.add(DiscoveryOpportunity(day=TODAY, kind="suggested", key=f"nachbarschaft-{video_id}",
                                      video_id=video_id, gap="suggested_opportunity",
                                      scores={"external_audience_score": score}, components={}, status="open",
@@ -215,3 +217,74 @@ def test_an_open_proposal_always_carries_the_current_steps(monkeypatch, session)
     plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
     entry = next(q for q in plan["queue"] if q["video_id"] == "a")
     assert entry["steps"] == row.payload["steps"], "Queue und gespeicherte Maßnahme zeigen dasselbe"
+
+
+def test_a_running_measure_can_be_cancelled_so_it_does_not_hold_up_reach(session):
+    """Eine alte Messung darf eine staerkere Reichweitenaktion nicht tagelang blockieren.
+
+    Abgebrochen wird protokolliert, nicht geloescht: die Zeile bleibt als `superseded` mit Grund und
+    Tag erhalten, und ihr Ergebnis gilt ausdruecklich als nicht gemessen.
+    """
+    row = action_row(session, "a", created_day=TODAY-timedelta(days=9), status=ge.RUNNING,
+                     started_day=TODAY-timedelta(days=9), started_at=NOW,
+                     evaluate_after=TODAY+timedelta(days=5))
+    cancelled = ge.cancel_action(session, row.id, "Reichweite hat Vorrang.", NOW)
+    session.commit()
+    assert cancelled.status == ge.SUPERSEDED
+    assert session.get(GrowthAction, row.id) is not None, "nicht geloescht"
+    assert cancelled.evaluation["note"] == "Reichweite hat Vorrang."
+    assert cancelled.evaluation["cancelled_by"] == "channel_owner"
+    assert cancelled.evaluation["measured"] is False
+    assert cancelled.evaluation["cancelled_day"] == str(ge.pacific_day(NOW))
+    # Ein zweiter Klick aendert nichts, und was nicht laeuft, kann nicht abgebrochen werden.
+    assert ge.cancel_action(session, row.id, None, NOW).status == ge.SUPERSEDED
+    open_row = action_row(session, "b", created_day=TODAY)
+    try:
+        ge.cancel_action(session, open_row.id, None, NOW)
+        raise AssertionError("ein Vorschlag ist nicht laufend")
+    except ValueError as exc:
+        assert "laufende" in str(exc)
+    try:
+        ge.cancel_action(session, 99999, None, NOW)
+        raise AssertionError("unbekannte Maßnahme")
+    except LookupError:
+        pass
+
+
+def test_after_cancelling_the_video_is_planned_again(monkeypatch, session):
+    """Nach dem Abbruch muss der naechste Lauf dieses Video unmittelbar neu planen koennen."""
+    from app.models import GrowthPlan
+    wire(monkeypatch, session)
+    seed_history(session, "a", days=400, base=6, trend=0)
+    seed_history(session, "b", days=400, base=120, seed=3)
+    attested(session, "a")       # legt auch die eigenen Videoangaben an
+    from test_actionable_growth import details_for, starved
+    blocking = action_row(session, "a", action="probe_missing_evidence",
+                          created_day=TODAY-timedelta(days=9), status=ge.RUNNING,
+                          started_day=TODAY-timedelta(days=9), started_at=NOW,
+                          evaluate_after=TODAY+timedelta(days=5),
+                          payload=details_for("probe_missing_evidence", starved(), ["laeuft"]))
+    rows, _ = history.build(history.load(session), 168, LAG)
+    base = regimes.baselines(rows)
+    histories = {h.video.id: h for h in history.load(session)}
+    contexts = [{"video": session.get(Video, v), "history": histories[v],
+                 "features": history.features_at(histories[v], TODAY),
+                 "regime": regimes.classify(history.features_at(histories[v], TODAY), base),
+                 "forecasts": [], "experiments": [],
+                 "recommendation": {"confidence": CONF}} for v in ("a", "b")]
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.id.desc())).plan
+    assert not any(q["video_id"] == "a" for q in plan["queue"]), "die laufende Messung haelt das Video"
+    # Abbrechen, dann neu planen – ohne Wartefrist.
+    ge.cancel_action(session, blocking.id, None, NOW)
+    session.commit()
+    ge.run(session, NOW, contexts, base)
+    session.expire_all()
+    plan = session.scalar(select(GrowthPlan).order_by(GrowthPlan.day.desc(), GrowthPlan.id.desc())).plan
+    entry = next((q for q in plan["queue"] if q["video_id"] == "a"), None)
+    assert entry is not None, f"nicht neu geplant: {[(q['video_id'], q['action']) for q in plan['queue']]}"
+    assert entry["action"] == "repackage_for_reach"
+    package = entry["brief"]["packaging"]
+    assert package["title"] and package["description"]
+    assert any(package["title"] in step for step in entry["steps"])

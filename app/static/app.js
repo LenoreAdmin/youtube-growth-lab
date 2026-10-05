@@ -102,12 +102,15 @@ function renderQueue(p){
  $("queueNote").textContent=(p&&p.queue_note)||"";
  $("queueList").innerHTML=q.map(e=>{
   // JETZT TUN zeigt genau die Handlung. Messwerte, Kandidaten, Scores und Evidenz bleiben intern.
-  const u=(e.brief&&e.brief.upload)||null;
+  const u=(e.brief&&e.brief.upload)||null,pk=(e.brief&&e.brief.packaging)||null;
   return `<article class="queue-item"><h3>${esc((e.brief&&e.brief.action)||ACTION_LABELS[e.action]||e.action)}</h3>
   <p><strong>${esc(e.title)}</strong>${e.brief&&e.brief.material?` · <small>${esc(e.brief.material)}</small>`:""}</p>
   ${u?`<p><strong>Datei:</strong> <code>${esc(u.file)}</code></p>
   <p><strong>Titel:</strong> ${esc(u.title)}</p>
   ${u.description?`<p><strong>Beschreibung:</strong></p><pre class="packaging">${esc(u.description)}</pre>`:""}`:""}
+  ${pk?`<p><strong>Neuer Titel:</strong> <code>${esc(pk.title)}</code></p>
+  <p><strong>Neue erste Beschreibungszeilen:</strong></p><pre class="packaging">${esc((pk.description||[]).join(String.fromCharCode(10)))}</pre>
+  ${pk.thumbnail?`<p><strong>Thumbnail:</strong> ${esc(pk.thumbnail)}</p>`:""}`:""}
   <ol>${(e.steps||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>
   <p><strong>Warum:</strong> ${esc(e.why||"")}</p>
   ${e.brief&&e.brief.after?`<p class="muted">${esc(e.brief.after)}</p>`:""}
@@ -117,7 +120,7 @@ function renderQueue(p){
   <button class="secondary publish-short" data-action-id="${e.action_id}">${esc(e.publish.label)}</button><small>${esc(e.publish.effect||"")}</small></div>`
   :e.action_id?`<button class="secondary start-experiment" data-action-id="${e.action_id}" title="Maßnahme #${e.action_id}">${esc((e.confirm&&e.confirm.label)||"Als durchgeführt markieren – Experiment starten")}</button><small>${esc((e.confirm&&e.confirm.effect)||"")}</small>`:""}
   </article>`}).join("")||"<p class='muted'>Gerade keine ausführbare Reichweitenaktion. Das System sucht weiter und meldet sich, sobald es eine gibt.</p>";
- $("queueRunning").innerHTML=running.length?`<h3>Läuft – von dir als durchgeführt bestätigt (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})</li>`).join("")}</ul>`:"";
+ $("queueRunning").innerHTML=running.length?`<h3>Läuft – von dir als durchgeführt bestätigt (nicht anfassen)</h3><ul>${running.map(r=>`<li>${esc(r.title)}: ${esc(ACTION_LABELS[r.action]||r.action)} – seit ${esc(r.held_since)}, Auswertung ${esc(r.evaluate_after)} (${esc(r.target_metric)})${r.action_id?` <button class="secondary cancel-experiment" data-action-id="${r.action_id}">Abbrechen – Reichweite hat Vorrang</button>`:""}</li>`).join("")}</ul>`:"";
  $("queueNotTestable").innerHTML=((p&&p.not_testable)||[]).length?`<h3>Derzeit nicht sinnvoll testbar</h3><ul>${p.not_testable.map(x=>`<li>${esc(x.title)}: ${esc(x.reason)}</li>`).join("")}</ul>`:"";
  $("queueResults").innerHTML=results.length?`<h3>Ergebnisse abgeschlossener Experimente</h3><ul>${results.map(r=>`<li>${esc(r.created_day)} ${esc(ACTION_LABELS[r.action]||r.action)} (${esc(r.video_id)}): <strong>${esc(OUTCOME_LABELS[r.outcome]||r.outcome||"offen")}</strong>${r.metric?` · ${esc(r.metric)} ${num(r.before)} → ${num(r.after)}${r.relative_change==null?"":" ("+(r.relative_change>=0?"+":"")+num(r.relative_change*100,0)+" %)"}`:""}${r.reason?" · "+esc(r.reason):""}<small>${esc(r.note||"")}</small></li>`).join("")}</ul>`:"";
 }
@@ -328,6 +331,25 @@ async function publishShort(button){
  }finally{button.disabled=false;button.textContent=label}
 }
 $("trafficQueue").addEventListener("click",e=>{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))});
+async function cancelExperiment(button){
+ const id=button.dataset.actionId;
+ const label=button.textContent;button.disabled=true;button.textContent="Wird abgebrochen…";
+ try{
+  let result;
+  try{
+   result=await api(`/api/growth/actions/${id}/cancel`,{reason:"Abgebrochen: eine stärkere Reichweitenaktion hat Vorrang."});
+  }catch(error){
+   startNotice={failed:true,text:`Abbrechen fehlgeschlagen (Maßnahme #${id}): ${error.message}`};
+   renderQueue(state&&state.growth_v5?state.growth_v5.plan:null);
+   throw error;
+  }
+  startNotice={failed:false,text:`Maßnahme #${result.id} abgebrochen (${result.status}). Der Plan wird neu gerechnet…`};
+  renderQueue(state&&state.growth_v5?state.growth_v5.plan:null);
+  await api("/api/sync",{});
+  await load();
+ }finally{button.disabled=false;button.textContent=label}
+}
+$("queueRunning").addEventListener("click",e=>{const c=e.target.closest(".cancel-experiment");if(c)guarded(()=>cancelExperiment(c))});
 $("queueList").addEventListener("click",e=>{const s=e.target.closest(".publish-short");if(s){guarded(()=>publishShort(s))}else{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))}});
 async function load(){
  state=await api("/api/dashboard");$("login").hidden=true;$("workspace").hidden=false;$("token").value="";

@@ -207,6 +207,8 @@ def test_a_locked_video_still_yields_a_content_recommendation(monkeypatch, sessi
     from app.models import DiscoveryOpportunity, VideoRetention, GrowthPlan as Plan
     from app import history as hist, regimes as reg
     from test_actionable_growth import CONF
+    from app import growth_engine as _ge_flag
+    monkeypatch.setattr(_ge_flag, "NEW_CONTENT_ACTIONS", True)
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)

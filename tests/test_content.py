@@ -297,6 +297,8 @@ def test_produce_for_opportunity_delivers_one_publishable_short(monkeypatch, ses
     from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
     from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
     from test_actionable_growth import CONF, details_for, starved
+    from app import growth_engine as _ge_flag
+    monkeypatch.setattr(_ge_flag, "NEW_CONTENT_ACTIONS", True)
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)
@@ -443,6 +445,8 @@ def test_an_open_recommendation_from_an_earlier_day_stays_executable(monkeypatch
     from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
     from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
     from test_actionable_growth import CONF, details_for, starved
+    from app import growth_engine as _ge_flag
+    monkeypatch.setattr(_ge_flag, "NEW_CONTENT_ACTIONS", True)
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)
@@ -545,6 +549,8 @@ def test_the_stored_action_carries_the_candidate_so_the_link_can_be_made(monkeyp
     from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
     from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
     from test_actionable_growth import CONF, details_for, starved
+    from app import growth_engine as _ge_flag
+    monkeypatch.setattr(_ge_flag, "NEW_CONTENT_ACTIONS", True)
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)
@@ -657,6 +663,8 @@ def test_a_running_publication_still_yields_the_next_action_in_the_plan(monkeypa
     from app.models import DiscoveryOpportunity, GrowthAction, GrowthPlan
     from test_learning_v4 import seed_history, wire, NOW, TODAY as T, LAG
     from test_actionable_growth import CONF, details_for, starved
+    from app import growth_engine as _ge_flag
+    monkeypatch.setattr(_ge_flag, "NEW_CONTENT_ACTIONS", True)
     wire(monkeypatch, session)
     seed_history(session, "a", days=400, base=6, trend=0)
     seed_history(session, "b", days=400, base=120, seed=3)

@@ -204,7 +204,7 @@ def test_external_opportunity_steers_v5_action_but_never_overrides_protection():
     from test_actionable_growth import CHANNEL as OWN
     # Belegte Chance plus Katalogvideo mit Leistung: das vollstaendige Packaging, kein Textmikrotest.
     action, notes = ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong, OWN)
-    assert action == "repackage_for_reach" and "own_analytics" in notes[0]
+    assert action == "repackage_for_reach" and any("own_analytics" in n for n in notes)
     # Ohne jede bekannte Verteilung und ohne Material entsteht keine Aufgabe.
     assert ge.choose_action("observe", f, {"signals": []}, base, [], {}, strong)[0] == "observe"
     # Proxy-only Chance (keine unabhaengige Evidenz) loest niemals eine aktive Massnahme aus.

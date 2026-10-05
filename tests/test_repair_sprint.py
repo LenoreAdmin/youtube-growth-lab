@@ -237,6 +237,8 @@ def test_observe_does_not_block_a_later_actionable_opportunity(monkeypatch, sess
     session.expire_all()
     first = session.scalar(select(GrowthAction).order_by(GrowthAction.id.desc()))
     assert first.action == "observe" and first.status == "proposed"
+    from test_actionable_growth import seed_profile
+    seed_profile(session, "a")      # eigene Videoangaben: ohne sie gibt es kein fertiges Packaging
     session.add(DiscoveryOpportunity(day=TODAY+timedelta(days=1), kind="suggested", key="ext_neighbour", video_id="a",
         gap="suggested_opportunity", scores={"external_audience_score": 82.0, "suggested_opportunity_score": 82.0},
         components={"components": []}, evidence={"demand_source": "own_analytics", "evidence_level": "own_analytics",

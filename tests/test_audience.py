@@ -363,3 +363,75 @@ def test_the_dashboard_puts_the_own_asset_actions_first():
     assert "JETZT TUN · ALGORITHMISCHE REICHWEITE" in html
     assert "BELEGE · AUDIENCES UND PLACEMENT-SIGNALE" in html
     assert "keine Anschreiben und keine Kommentare" in js
+
+
+# ---------------------------------------------------------------- Packaging fuer ein bestehendes Video
+REAL_TRAINSTORIES = ["Trans-mongolian", "long ride", "train", "sealandmusic", "trainstories",
+                     "www.sealandmusic.ch", "pop", "acoustic", "11 AM", "trans mongolian railway",
+                     "music", "landscape"]
+REAL_SHINE_ON = ["Shine On", "music", "musicvideo", "sealand", "band", "folk-pop", "new song",
+                 "happy", "melody", "good times"]
+
+
+def _own_video(session, video_id, title, tags, duration=237.0, sections=()):
+    """Ein eigenes Video mit genau den Angaben, die in Production dazu gespeichert sind."""
+    from datetime import date
+    from app.models import ContentSection, MediaAsset, Video, VideoProfile, utcnow
+    video = session.get(Video, video_id)
+    if video is None:
+        video = Video(id=video_id, channel_id="channel", title=title, published_at=utcnow(),
+                      duration_seconds=duration)
+        session.add(video)
+    video.title, video.duration_seconds = title, duration
+    session.add(VideoProfile(video_id=video_id, description="", tags=list(tags), topics=[],
+                             category_id="10", channel_title="Sealand", channel_description="",
+                             channel_keywords="", channel_topics=[], fetched_day=date.today()))
+    if sections:
+        session.add(MediaAsset(id=f"asset-{video_id}", video_id=video_id, path="x.mp4",
+                               duration_seconds=duration, has_video=True, has_audio=True,
+                               status="analysed", analysed_at=utcnow()))
+        session.flush()
+        for index, (start, end, brightness, cuts) in enumerate(sections):
+            session.add(ContentSection(asset_id=f"asset-{video_id}", idx=index, start_seconds=start,
+                                       end_seconds=end, brightness=brightness, visual_cuts=cuts))
+    session.commit()
+    return video
+
+
+def test_the_packaging_comes_from_the_videos_own_documented_subject(session):
+    """Eine vollstaendig ausfuehrbare Aktion: Titel, Beschreibungszeilen, Thumbnail – aus eigenen Angaben.
+
+    Keine abstrakte Anweisung, und nichts, was nicht in den Angaben zum Video steht.
+    """
+    from app.audience import packaging_for
+    video = _own_video(session, "a", "Sealand   Trainstories", REAL_TRAINSTORIES, 236.68,
+                       sections=[(10.1, 48.0, 0.36, 8), (87.6, 125.9, 0.42, 14),
+                                 (125.6, 144.5, 0.09, 10), (180.3, 223.7, 0.31, 19)])
+    pack = packaging_for(session, video)
+    assert pack is not None
+    # Das Thema kommt aus dem eigenen Tag, nicht aus einem Genre und nicht aus einem Nachbarvideo.
+    assert pack["subject"] == "Trans Mongolian Railway"
+    assert pack["title"] == "Trainstories – Trans Mongolian Railway | Sealand"
+    assert len(pack["title"]) <= 100
+    assert pack["description"][0] == "Trainstories by Sealand — Trans Mongolian Railway."
+    assert all(line.endswith(".") for line in pack["description"])
+    # Die Thumbnail-Anweisung nennt die gemessene Stelle, keine Kategorie.
+    assert "Sekunde 88–126" in pack["thumbnail"] and "0.42" in pack["thumbnail"]
+    assert "14 Schnitte" in pack["thumbnail"]
+    assert pack["evidence"].startswith("eigener Tag")
+    # Marke, Releasename, Verweise, Genres und Zahlen taugen nicht als Thema.
+    for forbidden in ("Sealandmusic", "Www", "Pop", "Acoustic", "Music", "11 Am", "Trainstories –"):
+        assert forbidden not in pack["subject"]
+
+
+def test_without_a_documented_subject_there_is_no_packaging(session):
+    """Shine On: nur Genre und Stimmung dokumentiert. Dann entscheidet die Engine: keine Aenderung."""
+    from app.audience import packaging_for
+    video = _own_video(session, "b", "Sealand - Shine On", REAL_SHINE_ON, 195.79)
+    assert packaging_for(session, video) is None, "ein Genre ist kein Thema und wird nicht erfunden"
+
+
+def test_a_video_without_its_own_details_yields_nothing(session):
+    from app.models import Video
+    from app.audience import packaging_for
+    assert packaging_for(session, session.get(Video, "a")) is None

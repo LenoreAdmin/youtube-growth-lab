@@ -606,3 +606,106 @@ def placement_opportunity(session, video_id, generic=None):
             "seed_quality": "attested_intent", "members": best["head"]+best["context"],
             "channel": None, "own_source_views_90d": {"intent_views": best["views"]},
             "audience": best["label"], "shared_tokens": best["head"]+best["context"]}
+
+
+# ---------------------------------------------------------------- Packaging fuer ein bestehendes Video
+PACKAGING_TITLE_MAX = 100       # YouTube-Grenze.
+PACKAGING_EXTRA = 2             # Wie viele weitere belegte Begriffe in die zweite Zeile duerfen.
+FILLER = MUSIC_WORDS | UMBRELLA_GENRES | HELPER_WORDS | LABEL_WORDS | GENRE_WORDS | MOOD_WORDS
+
+
+def _release_name(title, brand_words):
+    """Der Name der Veroeffentlichung: der eigene Titel ohne den Markennamen."""
+    parts = [word for word in " ".join((title or "").split()).replace("-", " ").split()
+             if word.lower() not in brand_words]
+    return " ".join(parts).strip(" -–|") or " ".join((title or "").split())
+
+
+def _subject_tags(profile_row, prof, brand_words, release_words):
+    """Welche eigenen Tags benennen ein Thema – und nicht Genre, Stimmung, Marke oder Verweis?
+
+    Beurteilt wird mit derselben Wortmaschinerie, die auch die Audience-Naehe prueft – aber nur die
+    beiden Kategorien, die ueberhaupt einen Themenkopf tragen duerfen: Ort/Motiv und mehrfach belegtes
+    Thema. `specific` ist bewusst nicht dabei: dort landet jedes unbekannte Wort, auch „happy“ oder
+    „folkpop“, und ein Genre oder eine Stimmung ist kein Thema. So zaehlt „trans mongolian railway“
+    und „folk-pop“ nicht.
+    """
+    qualifying = prof["places"] | prof["topics"]
+    found = []
+    for tag in (profile_row.tags or []):
+        text = " ".join(str(tag).split())
+        if not text or URL_PATTERN.search(text) or any(character.isdigit() for character in text):
+            continue
+        words = [word for word in _tokens(text)]
+        if not words or set(words) <= brand_words or set(words) <= release_words:
+            continue
+        # Bindestrichformen auftrennen, sonst rutscht „folk-pop“ als ein unbekanntes Wort durch.
+        parts = {part for word in words for part in word.replace("-", " ").split()} | set(words)
+        if parts <= FILLER or all(word in FILLER for word in words):
+            continue
+        hits = [word for word in words if word in qualifying]
+        if not hits:
+            continue
+        rare = len([word for word in words if word in prof["rare"]])
+        found.append({"tag": text, "words": set(words), "hits": len(hits),
+                      "score": (len(hits), rare, len(words), len(text))})
+    found.sort(key=lambda row: row["score"], reverse=True)
+    return found
+
+
+def _brightest_section(session, video):
+    """Der hellste gemessene Abschnitt – die konkrete Stelle, aus der ein Thumbnail kommen soll."""
+    from .models import ContentSection, MediaAsset
+    asset = session.scalar(select(MediaAsset).where(MediaAsset.video_id == video.id,
+                                                    MediaAsset.status == "analysed"))
+    if asset is None:
+        return None
+    rows = [row for row in session.scalars(select(ContentSection)
+                                           .where(ContentSection.asset_id == asset.id))
+            if row.brightness is not None]
+    if not rows:
+        return None
+    best = max(rows, key=lambda row: (row.brightness, -(row.visual_cuts or 0)))
+    return {"from_seconds": round(best.start_seconds, 1), "to_seconds": round(best.end_seconds, 1),
+            "brightness": best.brightness, "cuts": best.visual_cuts}
+
+
+def packaging_for(session, video):
+    """Ein vollstaendig ausfuehrbares Packaging – oder None, wenn nichts Belegtes dafuer da ist.
+
+    Erzeugt wird aus dem, was ueber dieses Video dokumentiert ist: den eigenen Tags, dem eigenen Titel
+    und dem Kanalnamen. Benennt kein Tag ein Thema, gibt es kein Packaging – dann ist die vorhandene
+    Aenderung nicht stark genug, und es wird nichts erfunden.
+    """
+    from .discovery import BRAND
+    row = session.get(VideoProfile, video.id)
+    if row is None:
+        return None
+    brand_name = " ".join((row.channel_title or "").split()) or next(iter(BRAND), "")
+    brand_words = set(BRAND) | set(_tokens(brand_name))
+    release = _release_name(video.title, brand_words)
+    release_words = set(_tokens(release))
+    try:
+        prof = music_profile(session, video)
+    except Exception:
+        return None
+    tags = _subject_tags(row, prof, brand_words, release_words)
+    if not tags:
+        return None
+    subject = tags[0]
+    others = [entry["tag"] for entry in tags[1:] if not entry["words"] <= subject["words"]][:PACKAGING_EXTRA]
+    headline = subject["tag"].title()
+    title = f"{release} – {headline}" + (f" | {brand_name}" if brand_name else "")
+    lines = [f"{release} by {brand_name} — {headline}." if brand_name else f"{release} — {headline}."]
+    if others:
+        lines.append(", ".join(tag.title() for tag in others)+".")
+    frame = _brightest_section(session, video)
+    thumbnail = None
+    if frame is not None:
+        thumbnail = (f"Standbild aus Sekunde {frame['from_seconds']:.0f}–{frame['to_seconds']:.0f} verwenden – "
+                     f"der hellste gemessene Abschnitt des Videos (Helligkeit {frame['brightness']:.2f}). "
+                     f"Auf das Hauptmotiv zuschneiden und die Belichtung anheben; in diesem Abschnitt liegen "
+                     f"{frame['cuts']} Schnitte, also ein scharfes Einzelbild auswaehlen.")
+    return {"subject": headline, "title": title[:PACKAGING_TITLE_MAX], "description": lines,
+            "thumbnail": thumbnail, "frame": frame,
+            "evidence": f"eigener Tag „{subject['tag']}“ aus den Videoangaben des Kanals"}

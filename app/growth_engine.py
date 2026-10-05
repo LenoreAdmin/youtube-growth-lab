@@ -133,6 +133,10 @@ DEFERRED_LEVERS = {"distribute_playlist_context": ["Beschreibungstext auf ein be
 # Die beiden Maßnahmen mit realistischer Wirkung auf zusaetzliche Auslieferung. Alles andere ist
 # entweder ein Mikrotest ohne Wirkungsgroesse oder interne Wegeleitung.
 REACH_LEVERS = ("repackage_for_reach", "produce_for_opportunity")
+# Produktentscheidung: es werden keine weiteren eigenen Inhalte veroeffentlicht. Der bereits
+# veroeffentlichte Short wird weiter gemessen, aber JETZT TUN schlaegt keinen neuen mehr vor. Die
+# Maschinerie bleibt vorhanden, damit diese Entscheidung umkehrbar ist.
+NEW_CONTENT_ACTIONS = False
 GROWTH_LEVERS = REACH_LEVERS+("test_title", "test_thumbnail", "test_title_thumbnail", "packaging_for_audience",
                               "revive_existing_video")
 # Mikromaßnahmen am Text allein: bleiben im Code fuer laufende Faelle, erscheinen aber nicht mehr als
@@ -667,16 +671,18 @@ def reach_options(state, f, external, channel=None):
     audience = (external or {}).get("audience") or (external or {}).get("key")
     options = []
     lifetime = channel.get("lifetime_views") or 0
-    if attested and lifetime > 0:
+    package = channel.get("packaging")
+    if attested and lifetime > 0 and package:
         options.append({"action": "repackage_for_reach", "notes": [
+            f"Fertiges Packaging liegt vor: „{package['title']}“ – abgeleitet aus {package['evidence']}.",
             f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und ein "
-            f"Katalogvideo mit {int(lifetime)} Views Gesamtleistung: das Paket ist der staerkste verfuegbare "
-            "Hebel an diesem Asset.",
+            f"Katalogvideo mit {int(lifetime)} Views Gesamtleistung; das Paket ist der staerkste "
+            "verfuegbare Hebel an diesem Asset.",
             "Ein besseres Paket verbessert die Zuschauerreaktion auf vorhandene und neu entstehende "
             "Impressions und kann damit weitere Auslieferung beguenstigen."]})
     segment = channel.get("segment")
     found = channel.get("content")
-    if attested and (segment or found):
+    if NEW_CONTENT_ACTIONS and attested and (segment or found):
         # Mit analysierter Originaldatei stehen mehrere messbar unterschiedliche Kandidaten zur Wahl;
         # ohne sie bleibt es beim retentionsbasierten Kandidatenmaterial.
         if found and found.get("upload"):
@@ -745,6 +751,16 @@ def strong_segment(session, video, minimum=0.35):
                          "der Schnitt selbst ist vor der Veroeffentlichung redaktionell zu pruefen.")}
 
 
+def packaging_material(session, video):
+    """Das fertige Packaging oder None. Ohne belegtes Thema gibt es keine ausfuehrbare Aenderung."""
+    from .audience import packaging_for
+    try:
+        return packaging_for(session, video)
+    except Exception as exc:                        # Eine Textausgabe ist kein Betriebsrisiko.
+        log.warning("packaging video=%r failed=%s", video.title, type(exc).__name__)
+        return None
+
+
 def content_material(session, video, external, today):
     """Kandidaten aus der eigenen Originaldatei – und sie festhalten, damit spaeter gelernt werden kann.
 
@@ -766,6 +782,22 @@ def content_material(session, video, external, today):
     package = ci.upload_package(video, stored, shared_context(session, video, external))
     return {**found, "candidates": stored, "primary": stored[0], "alternatives": stored[1:],
             "upload": package}
+
+
+def packaging_steps(title, channel, hold):
+    """Die fertige Marketingaktion am bestehenden Video: einsetzbarer Titel, Zeilen, Thumbnail."""
+    package = (channel or {}).get("packaging")
+    if not package:
+        return None
+    steps = [f"Titel von „{title}“ ersetzen durch: {package['title']}",
+             "Erste Beschreibungszeilen ersetzen (der Rest der Beschreibung bleibt):\n"
+             + "\n".join(package["description"])]
+    if package.get("thumbnail"):
+        steps.append("Thumbnail ersetzen. "+package["thumbnail"])
+    steps.append("Diese Teile gehoeren zu einer Maßnahme und werden gemeinsam umgesetzt. Danach am Video "
+                 "nichts weiter aendern: kein Endscreen, keine Playlist-Zuordnung, kein Schnitt.")
+    steps.append(hold)
+    return steps
 
 
 def content_steps(title, channel, topic, hold):
@@ -995,15 +1027,7 @@ def experiment_steps(action, title, f, external, channel):
             "Kapitelnamen aufnehmen, ohne Clickbait.",
             "Titel, Thumbnail und Playlist-Platzierung bleiben in diesem Fenster unverändert – das sind eigene Experimente.",
             hold],
-        "repackage_for_reach": [
-            f"Titel von „{title}“ neu fassen: der Themenkontext {topic} muss im Titel vorkommen, in der Sprache "
-            "der Zielgruppe, ohne Clickbait.",
-            "Thumbnail ersetzen: ein Motiv, das denselben Themenkontext sofort erkennbar macht und sich von den "
-            "Nachbarvideos unterscheidet.",
-            f"Erste zwei Beschreibungszeilen auf denselben Kontext und den belegten Suchintent ausrichten.",
-            "Diese drei Teile gehoeren zu einer Maßnahme und werden gemeinsam umgesetzt. Danach am Video nichts "
-            "weiter aendern: kein Endscreen, keine Playlist-Zuordnung, kein Schnitt.",
-            hold],
+        "repackage_for_reach": packaging_steps(title, channel, hold),
         "produce_for_opportunity": content_steps(title, channel, topic, hold),
         "target_suggested_cluster": [
             f"Nur den Wortlaut: Themenkontext {topic} in den ersten zwei Beschreibungszeilen von „{title}“ "
@@ -1442,6 +1466,9 @@ def run(session, now, contexts, base, budget=None):
                                                      .order_by(Snapshot.observed_at.desc()).limit(1))
                                       or sum(row.views for row in history.daily.values())),
                    "segment": strong_segment(session, video),
+                   # Das fertige Packaging fuer das bestehende Video: Titel, Beschreibungszeilen und
+                   # Thumbnail-Anweisung, erzeugt aus den eigenen Angaben zu diesem Video.
+                   "packaging": packaging_material(session, video),
                    # Inhaltswissen aus der eigenen Originaldatei, soweit lokal analysiert. Ohne Datei
                    # bleibt das None und die Engine entscheidet wie bisher aus Retention und Chance.
                    "content": content_material(session, video, external, today)}
@@ -1739,14 +1766,15 @@ def brief_for(session, action, video, external, channel):
     packaging = (f"Belegter gemeinsamer Themenkontext: {', '.join(context)}" if context else
                  "Kein belastbarer gemeinsamer Themenkontext ableitbar – keine Packaging-Vorgabe. Titel und "
                  "Thumbnail aus dem eigenen Inhalt entwickeln.")
+    package = channel.get("packaging")
     if action == "repackage_for_reach":
-        return {"audience": audience, "format": "Bestehendes Video, neues Packaging",
+        if not package:
+            return None     # Ohne belegtes Thema gibt es keine ausfuehrbare Aenderung.
+        return {"audience": None, "format": "Bestehendes Video, neues Packaging",
+                "action": "Packaging dieses Videos ersetzen",
+                "packaging": package,
                 "material": f"„{video.title}“ selbst ({int(channel.get('lifetime_views') or 0)} Views Gesamtleistung)",
-                "hook": None,
-                "concept": ("Titel, Thumbnail und die ersten Beschreibungszeilen auf denselben Themenkontext "
-                            "ausrichten, in dem dieses Video bereits ausgeliefert wird."),
                 "audience_evidence": f"Nachbarschaft: {audience} (Evidenz, kein Packaging-Thema)",
-                "packaging": packaging,
                 "why": ("Ein Paket, das den Themenkontext klar erkennbar macht, verbessert die Zuschauerreaktion "
                         "auf vorhandene und neu entstehende Impressions und kann damit weitere Auslieferung "
                         "beguenstigen.")}
@@ -1838,6 +1866,31 @@ def youtube_id(raw):
         if len(part) == 11 and all(character in ID_CHARACTERS for character in part):
             return part
     return None
+
+
+def cancel_action(session, action_id, reason=None, now=None):
+    """Eine laufende Maßnahme abbrechen, damit sie eine staerkere Reichweitenaktion nicht aufhaelt.
+
+    Die Zeile bleibt erhalten und wird als `superseded` protokolliert – mit Grund und Tag. Ihr
+    Messfenster endet damit ohne Ergebnis; das ist der Preis und wird so festgehalten, statt die
+    Messung spaeter als gueltig auszugeben. Danach plant der naechste Lauf dieses Video neu.
+    """
+    now = now or utcnow()
+    row = session.get(GrowthAction, action_id)
+    if row is None:
+        raise LookupError("Maßnahme nicht gefunden.")
+    if row.status == SUPERSEDED:
+        return row                      # Idempotent: ein zweiter Klick aendert nichts.
+    if row.status != RUNNING:
+        raise ValueError(f"Nur eine laufende Maßnahme kann abgebrochen werden; diese ist {row.status}.")
+    row.status = SUPERSEDED
+    row.evaluation = {**(row.evaluation or {}),
+                      "note": reason or "Abgebrochen: eine staerkere Reichweitenaktion hat Vorrang.",
+                      "cancelled_day": str(pacific_day(now)), "cancelled_by": "channel_owner",
+                      "measured": False}
+    session.flush()
+    log.info("growth cancel action=%s video=%s was=%s", row.id, row.video_id, row.action)
+    return row
 
 
 def publish_action(session, action_id, raw, now=None):

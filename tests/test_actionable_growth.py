@@ -24,11 +24,34 @@ def starved(**changes):
 SOURCE = {"video_id": "b", "title": "Shine On", "impressions_7d": 900, "views_7d": 120,
           "evidence": "120 Views und 900 Impressions in der letzten bekannten Woche"}
 # Belegte Ressourcenlage: genau ein deutlich bestausgeliefertes eigenes Video, Inventar geprueft, keine Playlist.
+PACKAGING = {"subject": "Trans Mongolian Railway",
+             "title": "Trainstories - Trans Mongolian Railway | Sealand",
+             "description": ["Trainstories by Sealand - Trans Mongolian Railway.",
+                             "Long Ride, Landscape."],
+             "thumbnail": "Standbild aus Sekunde 88-126 verwenden - der hellste gemessene Abschnitt.",
+             "frame": {"from_seconds": 87.6, "to_seconds": 125.9, "brightness": 0.42, "cuts": 14},
+             "evidence": "eigener Tag „trans mongolian railway“ aus den Videoangaben des Kanals"}
 CHANNEL = {"delivery_leader": SOURCE, "source_candidates": [SOURCE], "source": SOURCE,
            "playlists": {"state": "none", "items": [], "checked_day": str(TODAY),
                          "note": "Inventar geprueft: der Kanal hat keine Playlist."},
            # Reale Faktoren der Wirkungsabschaetzung: Gesamtleistung des Videos und verwendbares Material.
-           "lifetime_views": 21081, "segment": None}
+           "lifetime_views": 21081, "segment": None,
+           # Das fertige Packaging, wie die Engine es aus den eigenen Videoangaben ableitet.
+           "packaging": PACKAGING}
+
+
+REAL_TAGS = ["Trans-mongolian", "long ride", "train", "trans mongolian railway", "landscape",
+             "pop", "acoustic", "music"]
+
+
+def seed_profile(session, video_id="a", tags=None, channel_title="Sealand"):
+    """Die eigenen Angaben zum Video – ohne sie gibt es kein Packaging und damit keine Aktion."""
+    from datetime import date
+    from app.models import VideoProfile
+    session.add(VideoProfile(video_id=video_id, description="", tags=list(tags or REAL_TAGS), topics=[],
+                             category_id="10", channel_title=channel_title, channel_description="",
+                             channel_keywords="", channel_topics=[], fetched_day=date.today()))
+    session.commit()
 
 
 def details_for(action, f, notes, external=None, title="Trainstories", channel=None):
@@ -181,7 +204,7 @@ def test_multi_signal_proxy_may_steer_the_action_but_a_single_proxy_may_not():
               "audience": "train journey music", "families": ["own_traffic_mix", "search_probe"], "uncertainty": "mittel"}
     strong["context_usable"] = True
     action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, strong, CHANNEL)
-    assert action == "repackage_for_reach" and "multi_signal_proxy" in notes[0]
+    assert action == "repackage_for_reach" and any("multi_signal_proxy" in n for n in notes)
     # Dieselbe Chance ohne belegtes Thema: kein Wortlaut-Experiment, sondern der interne Verteilungstest.
     hypothesis = {**strong, "context_usable": False, "context_reason": "Nur 1 gemeinsames Stichwort", "key": "shine"}
     action, notes = ge.choose_action("needs_distribution", f, {"signals": []}, BASE, [], {}, hypothesis, CHANNEL)
@@ -334,8 +357,10 @@ def test_a_starved_video_produces_an_executable_experiment_in_the_plan(monkeypat
     # auch keine Ersatzaufgabe zum Datensammeln oder internen Verlinken.
     assert not any(q["video_id"] == "a" for q in plan["queue"])
     assert any(x["video_id"] == "a" for x in plan["not_testable"])
-    # Mit belegter Chance entsteht eine ausfuehrbare Reichweitenaktion, trotz niedriger Basis.
+    # Mit belegter Chance und eigenen Videoangaben entsteht eine ausfuehrbare Reichweitenaktion,
+    # trotz niedriger Basis.
     from app.models import DiscoveryOpportunity
+    seed_profile(session, "a")
     session.add(DiscoveryOpportunity(day=TODAY, kind="suggested", key="nachbarschaft", video_id="a",
                                      gap="suggested_opportunity", scores={"external_audience_score": 70.0},
                                      components={}, status="open",
