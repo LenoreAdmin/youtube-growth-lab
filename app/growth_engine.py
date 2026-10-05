@@ -1502,6 +1502,9 @@ def run(session, now, contexts, base, budget=None):
     record = track_record(session)
     locked = locked_resources(session)
     by_title = {c["history"].video.id: c["history"].video.title for c in contexts}
+    prepared = {c["video"].id: packaging_material(session, c["video"]) for c in contexts}
+    log.info("growth prepared %s", {by_title.get(vid, vid): ((pack or {}).get("title") or "kein Thema belegt")
+                                    for vid, pack in prepared.items()})
     ranking = []
     for c in contexts:
         if budget:
@@ -1540,7 +1543,7 @@ def run(session, now, contexts, base, budget=None):
                    "segment": strong_segment(session, video),
                    # Das fertige Packaging fuer das bestehende Video: Titel, Beschreibungszeilen und
                    # Thumbnail-Anweisung, erzeugt aus den eigenen Angaben zu diesem Video.
-                   "packaging": packaging_material(session, video),
+                   "packaging": prepared.get(video.id),
                    # Inhaltswissen aus der eigenen Originaldatei, soweit lokal analysiert. Ohne Datei
                    # bleibt das None und die Engine entscheidet wie bisher aus Retention und Chance.
                    "content": content_material(session, video, external, today)}
