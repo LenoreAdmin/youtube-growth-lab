@@ -1649,6 +1649,11 @@ def run(session, now, contexts, base, budget=None):
         # Ein laufendes Experiment haelt sein Video – aber nicht die Frage, ob eine belegte Audience-Chance
         # neuen Inhalt rechtfertigt. Eine Produktionsempfehlung veraendert das gesperrte Video nicht; es ist
         # nur Quellmaterial. Jede Maßnahme, die das Video selbst anfassen wuerde, bleibt gesperrt.
+        # Die Entscheidung je Video frueh protokollieren: Vercel schneidet die Logs eines Aufrufs nach
+        # den ersten Zeilen ab, und von aussen ist genau diese Zeile der Nachweis, was das System tut.
+        package = (channel.get("packaging") or {})
+        log.info("growth decide video=%r action=%s state=%s locked=%s title=%r",
+                 video.title, action, state, running is not None, (package.get("title") or "")[:120])
         options = reach_options(state, f, external, channel)
         content = next((o for o in options if o["action"] == "produce_for_opportunity"), None)
         # Nachvollziehbar, ob und warum eine Produktionsempfehlung entstanden ist.
