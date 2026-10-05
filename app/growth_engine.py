@@ -1589,7 +1589,7 @@ def run(session, now, contexts, base, budget=None):
     for entry in (plan.get("queue") or [])[:QUEUE_LIMIT]:
         external = entry.get("opportunity") or {}
         brief = entry.get("brief") or {}
-        upload = brief.get("upload") or {}
+        upload = brief.get("upload") or brief.get("packaging") or {}
         # Die Handlung selbst gehoert ins Log: Datei und Titel sind die Maßnahme, nicht ihre Begruendung.
         log.info("growth action rank=%s video=%r action=%s do=%r file=%r title=%r window=%s-%ss "
                  "chance=%s/%s score=%s evidence=%s material=%r why=%r",
