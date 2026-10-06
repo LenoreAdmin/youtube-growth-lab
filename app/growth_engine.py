@@ -1503,18 +1503,21 @@ def run(session, now, contexts, base, budget=None):
     locked = locked_resources(session)
     by_title = {c["history"].video.id: c["history"].video.title for c in contexts}
     prepared = {c["video"].id: packaging_material(session, c["video"]) for c in contexts}
-    log.info("growth prepared %s", {by_title.get(vid, vid): ((pack or {}).get("title") or "kein Thema belegt")
-                                    for vid, pack in prepared.items()})
-    # Was der vorige Lauf ausgegeben hat – frueh protokolliert, weil die Logkuerzung eines Aufrufs nur
-    # die ersten Zeilen behaelt und der Plan erst am Ende entsteht. Von aussen ist das der Nachweis.
+    # Alles, was von aussen nachpruefbar sein muss, in EINER Zeile: Vercel behaelt pro Aufruf nur
+    # die erste Logzeile, und der Plan entsteht erst am Ende des Durchlaufs.
     previous = session.scalar(select(GrowthPlan).order_by(GrowthPlan.day.desc(), GrowthPlan.id.desc()))
-    if previous is not None:
-        log.info("growth last_plan day=%s queue=%s", previous.day,
-                 [{"video": entry.get("title"), "action": entry.get("action"),
-                   "do": ((entry.get("brief") or {}).get("action")),
-                   "title": (lambda pack: pack.get("title") if isinstance(pack, dict) else None)(
-                       (entry.get("brief") or {}).get("packaging") or {})}
-                  for entry in (previous.plan or {}).get("queue") or []])
+
+    def _title(entry):
+        pack = (entry.get("brief") or {}).get("packaging") or {}
+        return pack.get("title") if isinstance(pack, dict) else None
+
+    log.info("growth state prepared=%s last_plan=%s queue=%s",
+             {by_title.get(vid, vid): ((pack or {}).get("title") or "kein Thema belegt")
+              for vid, pack in prepared.items()},
+             previous.day if previous is not None else None,
+             [{"video": entry.get("title"), "action": entry.get("action"),
+               "do": (entry.get("brief") or {}).get("action"), "title": _title(entry)}
+              for entry in ((previous.plan if previous is not None else None) or {}).get("queue") or []])
     ranking = []
     for c in contexts:
         if budget:
