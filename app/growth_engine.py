@@ -1,4 +1,4 @@
-"""V5 Active Organic Growth Engine: rank, decide, protect, measure – never write to YouTube.
+"""V5 Active Organic Growth Engine: rank, decide, execute safe existing-video packaging, protect, measure.
 
 Scores are relative priorities on this channel (0–100), assembled from components
 that are actually available; missing inputs are listed, never imputed. States and
@@ -1800,14 +1800,14 @@ def queue_entry(row, rank, today):
             "target_metric": row["target_metric"], "window_days": row["window_days"],
             "measure_from": str(today), "evaluate_after": row["next_evaluation"],
             "success_criterion": row["success_criterion"], "stop_criterion": row.get("stop_criterion"),
-            "do_not_change": row["do_not_change"], "executed_automatically": False,
+            "do_not_change": row["do_not_change"], "executed_automatically": row["action"] == "repackage_for_reach",
             "publish": ({"required": True, "label": "Veröffentlicht – Video-ID oder Link eintragen",
                          "endpoint": f"/api/growth/actions/{row.get('action_id')}/published",
                          "field": "video",
                          "effect": ("Danach misst das System die Auslieferung des neuen Shorts selbst und "
                                     "entscheidet daraus die nächste Maßnahme.")}
                         if row["action"] == "produce_for_opportunity" and row.get("action_id") else None),
-            "confirm": {"required": True, "label": "Als durchgeführt markieren – Experiment starten",
+            "confirm": {"required": False, "label": "Autonome Ausführung",
                         "endpoint": f"/api/growth/actions/{row.get('action_id')}/start" if row.get("action_id") else None,
                         "effect": "Erst danach werden Baseline eingefroren, Startzeitpunkt gesetzt, das Messfenster gestartet "
                                   "und weitere Experimente für dieses Video gesperrt."},
@@ -1910,7 +1910,7 @@ def brief_for(session, action, video, external, channel):
                 "packaging": package,
                 "material": f"„{video.title}“ selbst ({int(channel.get('lifetime_views') or 0)} Views Gesamtleistung)",
                 "audience_evidence": f"Nachbarschaft: {audience} (Evidenz, kein Packaging-Thema)",
-                "why": ("Ein Paket, das den Themenkontext klar erkennbar macht, verbessert die Zuschauerreaktion "
+                "why": ("Ein Paket aus verifizierten Song-/Release-Aussagen verbessert die Zuschauerreaktion "
                         "auf vorhandene und neu entstehende Impressions und kann damit weitere Auslieferung "
                         "beguenstigen.")}
     found = channel.get("content")
