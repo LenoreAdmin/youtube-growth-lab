@@ -398,10 +398,12 @@ def _own_video(session, video_id, title, tags, duration=237.0, sections=()):
     return video
 
 
-def test_the_packaging_comes_from_the_videos_own_documented_subject(session):
-    """Eine vollstaendig ausfuehrbare Aktion: Titel, Beschreibungszeilen, Thumbnail – aus eigenen Angaben.
+def test_footage_never_becomes_the_songs_subject(session):
+    """Der Produktionsfehler: aus dem Tag „trans mongolian railway“ wurde „a song from the
+    Trans-Mongolian Railway“. Reisematerial im Video macht die Bahn nicht zum Thema des Liedes.
 
-    Keine abstrakte Anweisung, und nichts, was nicht in den Angaben zum Video steht.
+    Bildinhalt darf das Thumbnail bestimmen und als Beschreibung des Videos erscheinen – niemals als
+    Aussage darueber, worum es im Song geht. Und solange darueber nichts belegt ist, bleibt der Titel.
     """
     from app.audience import packaging_for
     video = _own_video(session, "a", "Sealand   Trainstories", REAL_TRAINSTORIES, 236.68,
@@ -409,19 +411,49 @@ def test_the_packaging_comes_from_the_videos_own_documented_subject(session):
                                  (125.6, 144.5, 0.09, 10), (180.3, 223.7, 0.31, 19)])
     pack = packaging_for(session, video)
     assert pack is not None
-    # Das Thema kommt aus dem eigenen Tag, nicht aus einem Genre und nicht aus einem Nachbarvideo.
-    assert pack["subject"] == "Trans Mongolian Railway"
-    assert pack["title"] == "Trainstories – Trans Mongolian Railway | Sealand"
-    assert len(pack["title"]) <= 100
-    assert pack["description"][0] == "Trainstories by Sealand — Trans Mongolian Railway."
-    assert all(line.endswith(".") for line in pack["description"])
-    # Die Thumbnail-Anweisung nennt die gemessene Stelle, keine Kategorie.
-    assert "Sekunde 88–126" in pack["thumbnail"] and "0.42" in pack["thumbnail"]
-    assert "14 Schnitte" in pack["thumbnail"]
-    assert pack["evidence"].startswith("eigener Tag")
-    # Marke, Releasename, Verweise, Genres und Zahlen taugen nicht als Thema.
-    for forbidden in ("Sealandmusic", "Www", "Pop", "Acoustic", "Music", "11 Am", "Trainstories –"):
-        assert forbidden not in pack["subject"]
+    # Kein neuer Titel: ueber den Song selbst ist nichts belegt.
+    assert pack["title"] is None
+    assert pack["song"] is None
+    assert any("Keine belegte Aussage ueber den Song" in claim for claim in pack["claims"])
+    # Der Bildinhalt ist da, aber ausdruecklich als Bildinhalt.
+    assert "Trans Mongolian Railway" in pack["shown"]
+    first = pack["description"][0]
+    assert first.startswith("In this video:")
+    assert "Trans Mongolian Railway" in first
+    gesamt = " ".join(pack["description"])
+    for erfunden in ("a song from", "song about", "Song ueber", "Lied ueber"):
+        assert erfunden.lower() not in gesamt.lower(), erfunden
+    # Das Thumbnail nennt das Motiv und sagt ausdruecklich, dass es kein Songthema ist.
+    assert "Bildinhalt" in pack["thumbnail"] and "Sekunde 88" in pack["thumbnail"]
+    # Die Ausgangswerte fuer die Erkennung der Umsetzung sind mitgefuehrt.
+    assert pack["source_title"] == "Sealand Trainstories"
+    assert pack["source_description"] is not None
+
+
+def test_an_aligned_lyric_is_the_only_thing_that_may_name_the_song(session):
+    """Nur der eigene, gegen den Songtext ausgerichtete Wortlaut darf in den Titel."""
+    from datetime import date
+    from app.audience import packaging_for, song_statement
+    from app.models import ContentLine, MediaAsset, utcnow
+    video = _own_video(session, "b", "Sealand - Shine On", REAL_SHINE_ON, 195.79)
+    session.add(MediaAsset(id="asset-lyric", video_id="b", path="x.mp4", duration_seconds=195.79,
+                           has_video=True, has_audio=True, status="analysed", analysed_at=utcnow()))
+    session.flush()
+    # Eine maschinell erkannte Zeile zaehlt nicht – sie ist geraten.
+    session.add(ContentLine(asset_id="asset-lyric", idx=0, start_seconds=11.0, end_seconds=13.5,
+                            text="It feels just like friends", confidence=0.77, source="asr"))
+    session.commit()
+    assert song_statement(session, video) is None
+    assert (packaging_for(session, video) or {}).get("title") is None
+    # Gegen den eigenen Text ausgerichtet zaehlt sie.
+    session.add(ContentLine(asset_id="asset-lyric", idx=1, start_seconds=30.4, end_seconds=34.0,
+                            text="Shine on through the night", confidence=0.95, source="aligned"))
+    session.commit()
+    found = song_statement(session, video)
+    assert found["line"] == "Shine on through the night"
+    pack = packaging_for(session, video)
+    assert pack["title"] == "„Shine on through the night“ – Shine On"
+    assert any("Songaussage belegt" in claim for claim in pack["claims"])
 
 
 def test_without_a_documented_subject_there_is_no_packaging(session):

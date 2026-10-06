@@ -108,7 +108,7 @@ function renderQueue(p){
   ${u?`<p><strong>Datei:</strong> <code>${esc(u.file)}</code></p>
   <p><strong>Titel:</strong> ${esc(u.title)}</p>
   ${u.description?`<p><strong>Beschreibung:</strong></p><pre class="packaging">${esc(u.description)}</pre>`:""}`:""}
-  ${pk?`<p><strong>Neuer Titel:</strong> <code>${esc(pk.title)}</code></p>
+  ${pk?`${pk.title?`<p><strong>Neuer Titel:</strong> <code>${esc(pk.title)}</code></p>`:`<p><strong>Titel:</strong> unverändert – über den Song selbst ist nichts belegt.</p>`}
   <p><strong>Neue erste Beschreibungszeilen:</strong></p><pre class="packaging">${esc((pk.description||[]).join(String.fromCharCode(10)))}</pre>
   ${pk.thumbnail?`<p><strong>Thumbnail:</strong> ${esc(pk.thumbnail)}</p>`:""}`:""}
   <ol>${(e.steps||[]).map(x=>"<li>"+esc(x)+"</li>").join("")}</ol>

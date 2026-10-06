@@ -670,12 +670,42 @@ def _brightest_section(session, video):
             "brightness": best.brightness, "cuts": best.visual_cuts}
 
 
-def packaging_for(session, video):
-    """Ein vollstaendig ausfuehrbares Packaging – oder None, wenn nichts Belegtes dafuer da ist.
+def song_statement(session, video):
+    """Was ueber den Song selbst belegt ist – und nur das.
 
-    Erzeugt wird aus dem, was ueber dieses Video dokumentiert ist: den eigenen Tags, dem eigenen Titel
-    und dem Kanalnamen. Benennt kein Tag ein Thema, gibt es kein Packaging – dann ist die vorhandene
-    Aenderung nicht stark genug, und es wird nichts erfunden.
+    Belegt ist ausschliesslich, was die Band selbst gesagt hat: eine gegen den eigenen Songtext
+    ausgerichtete Zeile. Tags beschreiben, was im Video zu *sehen* ist, und eine maschinell erkannte
+    Zeile ist geraten; beides sagt nichts darueber, worum es im Lied geht. Ohne eine solche Zeile
+    gibt es keine Aussage ueber den Song, und es wird keine erfunden.
+    """
+    from .models import ContentLine, MediaAsset
+    asset = session.scalar(select(MediaAsset).where(MediaAsset.video_id == video.id,
+                                                    MediaAsset.status == "analysed"))
+    if asset is None:
+        return None
+    row = session.scalar(select(ContentLine).where(ContentLine.asset_id == asset.id,
+                                                   ContentLine.source == "aligned")
+                         .order_by(ContentLine.idx))
+    if row is None or not (row.text or "").strip():
+        return None
+    return {"line": row.text.strip(), "at_seconds": row.start_seconds,
+            "evidence": "gegen den eigenen Songtext ausgerichtete Zeile"}
+
+
+def packaging_for(session, video):
+    """Ein ausfuehrbares Packaging aus belegten Angaben – mit der Grenze zwischen Bild und Thema.
+
+    Zwei Arten von Aussagen, die nie vermischt werden duerfen:
+
+    Bildinhalt   Was im Video zu sehen ist: aus den eigenen Tags des Kanals und aus den gemessenen
+                 Abschnitten. Taugt fuer das Thumbnail und fuer eine Beschreibungszeile, die
+                 ausdruecklich das Video beschreibt – niemals fuer eine Aussage ueber den Song.
+    Songinhalt   Worum es im Lied geht. Dafuer zaehlt nur der eigene, gegen den Songtext
+                 ausgerichtete Wortlaut. Fehlt er, gibt es keinen neuen Titel.
+
+    Der Produktionsfehler, der dazu fuehrte: aus dem Tag „trans mongolian railway“ wurde der Titel
+    „a song from the Trans-Mongolian Railway“. Das Reisematerial im Video macht die Bahn nicht zum
+    Thema des Liedes. Genau diese Verwechslung ist hier ausgeschlossen.
     """
     from .discovery import BRAND
     row = session.get(VideoProfile, video.id)
@@ -689,26 +719,44 @@ def packaging_for(session, video):
         prof = music_profile(session, video)
     except Exception:
         return None
-    tags = _subject_tags(row, prof, brand_words, release_words)
-    if not tags:
-        return None
-    subject = tags[0]
-    others = [entry["tag"] for entry in tags[1:] if not entry["words"] <= subject["words"]][:PACKAGING_EXTRA]
-    headline = subject["tag"].title()
-    title = f"{release} – {headline}" + (f" | {brand_name}" if brand_name else "")
-    lines = [f"{release} by {brand_name} — {headline}." if brand_name else f"{release} — {headline}."]
-    if others:
-        lines.append(", ".join(tag.title() for tag in others)+".")
+    footage = _subject_tags(row, prof, brand_words, release_words)
+    song = song_statement(session, video)
+    shown = [entry["tag"].title() for entry in footage[:1+PACKAGING_EXTRA]]
+    # Der Titel aendert sich nur, wenn es etwas ueber den Song zu sagen gibt. Ein Bildmotiv kommt
+    # dort nicht vor: in einem Titel liest sich jede Beifuegung als Thema des Liedes.
+    title = f"„{song['line']}“ – {release}"[:PACKAGING_TITLE_MAX] if song else None
+    lines, claims = [], []
+    if shown:
+        # „In this video“ sagt, was zu sehen ist, und behauptet nichts ueber die Bedeutung des Songs.
+        lines.append("In this video: "+", ".join(shown)+".")
+        claims.append(f"Bildinhalt belegt durch eigene Tags: {', '.join(shown)}")
+    genre = sorted((prof["genres"]-UMBRELLA_GENRES) | prof["moods"])[:2]
+    second = f"{release} by {brand_name}." if brand_name else f"{release}."
+    if genre:
+        second += " "+", ".join(word.title() for word in genre)+"."
+        claims.append(f"Genre belegt durch eigene Angaben: {', '.join(genre)}")
+    lines.append(second)
+    if song:
+        claims.append("Songaussage belegt: "+song["evidence"])
+    else:
+        claims.append("Keine belegte Aussage ueber den Song – deshalb kein neuer Titel.")
     frame = _brightest_section(session, video)
     thumbnail = None
     if frame is not None:
-        thumbnail = (f"Standbild aus Sekunde {frame['from_seconds']:.0f}–{frame['to_seconds']:.0f} verwenden – "
-                     f"der hellste gemessene Abschnitt des Videos (Helligkeit {frame['brightness']:.2f}). "
-                     f"Auf das Hauptmotiv zuschneiden und die Belichtung anheben; in diesem Abschnitt liegen "
-                     f"{frame['cuts']} Schnitte, also ein scharfes Einzelbild auswaehlen.")
-    return {"subject": headline, "title": title[:PACKAGING_TITLE_MAX], "description": lines,
+        thumbnail = (f"Standbild aus dem Bereich Sekunde {frame['from_seconds']:.0f}–"
+                     f"{frame['to_seconds']:.0f} waehlen – der hellste gemessene Abschnitt "
+                     f"(Helligkeit {frame['brightness']:.2f}, {frame['cuts']} Schnitte). Das Motiv ist "
+                     "Bildinhalt und sagt nichts ueber das Thema des Songs; es muss nur auf Daumennagel"
+                     "-Groesse eindeutig erkennbar sein. Scharfes Einzelbild, auf das Hauptmotiv "
+                     "zuschneiden, Letterbox-Balken wegschneiden.")
+    if not shown and title is None:
+        return None     # Weder belegter Bildinhalt noch belegte Songaussage: keine Aenderung.
+    return {"title": title, "shown": shown, "song": song, "description": lines, "claims": claims,
             # Der Titel, der heute auf YouTube steht. Weicht er spaeter ab, wurde die Aenderung
             # umgesetzt – das erkennt das System selbst, ohne Bestaetigung durch den Kanalinhaber.
             "source_title": " ".join((video.title or "").split()),
+            # Auch die Beschreibung wird mitsynchronisiert. Aendert sich nur sie – weil diese Maßnahme
+            # keinen neuen Titel verlangt –, erkennt das System die Umsetzung daran.
+            "source_description": " ".join((row.description or "").split())[:200],
             "thumbnail": thumbnail, "frame": frame,
-            "evidence": f"eigener Tag „{subject['tag']}“ aus den Videoangaben des Kanals"}
+            "evidence": ("eigener Songtext" if song else "eigene Tags zum Bildinhalt")}

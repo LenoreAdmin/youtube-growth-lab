@@ -290,8 +290,10 @@ def test_a_measure_without_development_is_replaced_without_a_click(monkeypatch, 
     assert entry is not None, f"nicht neu geplant: {[(q['video_id'], q['action']) for q in plan['queue']]}"
     assert entry["action"] == "repackage_for_reach"
     package = entry["brief"]["packaging"]
-    assert package["title"] and package["description"]
-    assert any(package["title"] in step for step in entry["steps"])
+    # Ohne belegte Aussage ueber den Song gibt es keinen neuen Titel, aber Beschreibung und Thumbnail.
+    assert package["title"] is None and package["description"]
+    assert any("In this video:" in line for line in package["description"])
+    assert package["thumbnail"] is None or "Bildinhalt" in package["thumbnail"]
 
 
 def test_the_executed_change_is_recognised_without_a_confirmation_click(monkeypatch, session):
@@ -320,18 +322,20 @@ def test_the_executed_change_is_recognised_without_a_confirmation_click(monkeypa
     assert proposed is not None, "es gibt eine vorbereitete Packaging-Aktion"
     package = proposed.payload["brief"]["packaging"]
     assert package["source_title"] == "a", "der heutige Titel wird mitgefuehrt"
-    # Der Kanalinhaber setzt den Titel auf YouTube um; der Sync liefert ihn beim naechsten Lauf.
-    video = session.get(Video, "a")
-    video.title = package["title"]
+    assert package["source_description"] is not None, "und die heutige Beschreibung"
+    # Diese Maßnahme verlangt keinen neuen Titel. Der Kanalinhaber ersetzt die Beschreibungszeilen;
+    # der Sync holt die Beschreibung mit, also faellt die Aenderung von selbst auf.
+    from app.models import VideoProfile
+    profile = session.get(VideoProfile, "a")
+    profile.description = "In this video: Trans Mongolian Railway, Landscape."
     session.commit()
-    histories = {h.video.id: h for h in history.load(session)}
     ge.run(session, NOW, contexts(), base)
     session.expire_all()
     started = session.get(GrowthAction, proposed.id)
     assert started.status == ge.RUNNING, "das Messfenster laeuft ohne Bestaetigungsklick"
     assert started.started_day == TODAY
-    assert started.payload["executed_as_proposed"] is True
-    assert started.payload["executed_title"] == package["title"]
+    assert started.payload["executed_change"] == "description"
+    assert started.payload["executed_as_proposed"] is False, "kein Titel vorgeschlagen, also kein Abgleich"
 
 
 def test_a_measure_that_moves_something_is_kept(session):

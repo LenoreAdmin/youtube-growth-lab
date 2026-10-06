@@ -674,7 +674,11 @@ def reach_options(state, f, external, channel=None):
     package = channel.get("packaging")
     if attested and lifetime > 0 and package:
         options.append({"action": "repackage_for_reach", "notes": [
-            f"Fertiges Packaging liegt vor: „{package['title']}“ – abgeleitet aus {package['evidence']}.",
+            ("Fertiges Packaging liegt vor: neuer Titel „{}“ – Grundlage: {}.".format(package["title"],
+                                                                                     package["evidence"])
+             if package.get("title") else
+             "Fertiges Packaging liegt vor: Beschreibung und Thumbnail. Kein neuer Titel, weil ueber den "
+             "Song selbst nichts belegt ist – Bildinhalt ist kein Songthema."),
             f"Belegte Audience-Chance ({audience}, Evidenz: {(external or {}).get('evidence_level')}) und ein "
             f"Katalogvideo mit {int(lifetime)} Views Gesamtleistung; das Paket ist der staerkste "
             "verfuegbare Hebel an diesem Asset.",
@@ -789,9 +793,14 @@ def packaging_steps(title, channel, hold):
     package = (channel or {}).get("packaging")
     if not package:
         return None
-    steps = [f"Titel von „{title}“ ersetzen durch: {package['title']}",
-             "Erste Beschreibungszeilen ersetzen (der Rest der Beschreibung bleibt):\n"
-             + "\n".join(package["description"])]
+    steps = []
+    if package.get("title"):
+        steps.append(f"Titel von „{title}“ ersetzen durch: {package['title']}")
+    else:
+        steps.append("Titel unveraendert lassen: ueber den Song selbst ist nichts belegt, und was im Video "
+                     "zu sehen ist, ist nicht sein Thema.")
+    steps.append("Erste Beschreibungszeilen ersetzen (der Rest der Beschreibung bleibt):\n"
+                 + "\n".join(package["description"]))
     if package.get("thumbnail"):
         steps.append("Thumbnail ersetzen. "+package["thumbnail"])
     steps.append("Diese Teile gehoeren zu einer Maßnahme und werden gemeinsam umgesetzt. Danach am Video "
@@ -1261,16 +1270,28 @@ def detect_execution(session, video, now=None):
     if row is None:
         return None
     package = ((row.payload or {}).get("brief") or {}).get("packaging") or {}
-    before = package.get("source_title")
     current = " ".join((video.title or "").split())
-    if not before or current == before:
+    changed, seen = None, None
+    if package.get("source_title") and current != package["source_title"]:
+        changed, seen = "title", current
+    else:
+        # Verlangt die Maßnahme keinen neuen Titel, ist die Beschreibung das Signal: sie wird im
+        # Sync mitgeholt, also faellt ihre Aenderung ohne Zutun des Kanalinhabers auf.
+        from .models import VideoProfile
+        with session.no_autoflush:      # Lesen darf keine halb gebaute Zeile schreiben.
+            profile = session.get(VideoProfile, video.id)
+        live = " ".join(((profile.description if profile else None) or "").split())[:200]
+        if package.get("source_description") is not None and live and live != package["source_description"]:
+            changed, seen = "description", live[:120]
+    if changed is None:
         return None                 # Unveraendert: es gibt nichts zu starten.
     started = start_action(session, row.id, now)
-    started.payload = {**(row.payload or {}), "executed_title": current,
-                       "executed_as_proposed": current == package.get("title")}
+    started.payload = {**(row.payload or {}), "executed_change": changed, "executed_value": seen,
+                       "executed_as_proposed": bool(package.get("title")) and seen == package.get("title")}
     session.flush()
-    log.info("growth executed action=%s video=%r title=%r as_proposed=%s",
-             started.id, video.title, current[:80], current == package.get("title"))
+    log.info("growth executed action=%s video=%r changed=%s seen=%r as_proposed=%s",
+             started.id, video.title, changed, (seen or "")[:80],
+             started.payload["executed_as_proposed"])
     return started
 
 
@@ -1512,7 +1533,8 @@ def run(session, now, contexts, base, budget=None):
         return pack.get("title") if isinstance(pack, dict) else None
 
     log.info("growth state prepared=%s last_plan=%s queue=%s",
-             {by_title.get(vid, vid): ((pack or {}).get("title") or "kein Thema belegt")
+             {by_title.get(vid, vid): ((pack or {}).get("title") or
+                                       ("Beschreibung+Thumbnail" if pack else "nichts belegt"))
               for vid, pack in prepared.items()},
              previous.day if previous is not None else None,
              [{"video": entry.get("title"), "action": entry.get("action"),
