@@ -24,7 +24,7 @@ def redacted(exc):
     message = " ".join(str(exc).split())
     message = SECRET_PATTERN.sub("//<entfernt>@", message)
     message = HOST_PATTERN.sub("<host>", message)
-    return message[:400] or type(exc).__name__
+    return message[:1200] or type(exc).__name__
 
 
 def migration_config():
