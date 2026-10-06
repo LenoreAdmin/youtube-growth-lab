@@ -1,4 +1,4 @@
-"""Official Google clients. No scraping and no channel write permissions."""
+"""Official Google clients for analytics plus autonomous updates to existing channel videos."""
 import csv
 import io
 import json
@@ -15,7 +15,7 @@ from .config import settings
 from .budget import Budget
 
 SCOPES = [
-    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 
@@ -196,6 +196,22 @@ class YouTube:
             result = self.execute(self.data.videos().list(part=part, id=",".join(ids[offset:offset+50])))
             rows.extend(result.get("items", []))
         return rows
+
+    def update_video_packaging(self, video_id, title=None, description=None):
+        """Update only title/description on an existing owned video, preserving all other snippet fields."""
+        rows = self.videos_by_id([video_id], part="snippet")
+        if len(rows) != 1:
+            raise ValueError("Existing owned video not found.")
+        item = rows[0]
+        snippet = item["snippet"]
+        body = {"id": video_id, "snippet": {
+            "title": title if title is not None else snippet["title"],
+            "description": description if description is not None else snippet.get("description", ""),
+            "categoryId": snippet["categoryId"],
+        }}
+        if "defaultLanguage" in snippet:
+            body["snippet"]["defaultLanguage"] = snippet["defaultLanguage"]
+        return self.execute(self.data.videos().update(part="snippet", body=body))
 
     def own_playlists(self, max_pages=4):
         """Die eigenen Playlists (read-only, 1 Einheit je Seite). Ohne diese Liste ist ihre Existenz unbekannt,
