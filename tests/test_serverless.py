@@ -189,7 +189,7 @@ def test_vercel_config_matches_route_budget_and_entrypoint():
     value=json.loads(Path("vercel.json").read_text(encoding="utf-8-sig"))
     # Ein einziger Lauf: zwei getrennte Crons weckten die Datenbank zweimal pro Stunde und
     # erschoepften damit das Free-Tier-Kontingent. Derselbe Inhalt laeuft jetzt in einem Aufruf.
-    assert value["crons"] == [{"path":"/api/cron/sync","schedule":"0 */3 * * *"}]
+    assert value["crons"] == [{"path":"/api/cron/sync","schedule":"0 */6 * * *"}]
     assert value["functions"]["app/main.py"]["maxDuration"] == 300
     project=tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8-sig"))
     assert project["tool"]["vercel"]["entrypoint"] == "app.main:app"

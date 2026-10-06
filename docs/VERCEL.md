@@ -62,7 +62,7 @@ Lokale Tests prüfen Migrationen und Datenerhalt mit SQLite. Der CI-Workflow hat
 ## Cron-Vertrag
 
 ```json
-{"path": "/api/cron/sync", "schedule": "0 */3 * * *"}
+{"path": "/api/cron/sync", "schedule": "0 */6 * * *"}
 ```
 
 **Genau ein geplanter Lauf.** Das Free-Tier der Datenbank bezahlt Wachzeit, nicht Arbeit: zwei
@@ -72,10 +72,20 @@ Lauf enthält deshalb alles, was vorher auf zwei verteilt war: Kernimport, Learn
 Growth-Entscheidung, Discovery und Acquisition – nacheinander im gemeinsamen Zeitbudget von 210
 Sekunden. Keine zweite Cron-Definition hinzufügen; sie kostet Kontingent, nicht Geschwindigkeit.
 
-Acht Läufe am Tag ergeben acht Growth-Entscheidungen täglich und erkennen eine von Hand umgesetzte
-Packaging-Änderung innerhalb von drei Stunden. Bei 10 Minuten Wachzeit je Lauf kostet das rund 34
-Betriebsstunden im Monat, also etwa 8 % des Kontingents; auch bei pessimistischen 20 Minuten bleibt
-es unter 20 %. Der Rest ist Reserve für Dashboard-Aufrufe, die die Datenbank ebenfalls aufwecken.
+Vier Läufe am Tag ergeben vier Growth-Entscheidungen täglich und erkennen eine von Hand umgesetzte
+Packaging-Änderung innerhalb von sechs Stunden – die Anforderung lautet mindestens täglich.
+
+Gerechnet wird mit dem schlechtesten Fall, weil ein zweites Erschöpfen des Kontingents das ganze
+System für den Rest des Abrechnungszeitraums abschaltet. Die Free-Compute skaliert bis 2 CU, und
+Neon suspendiert nach rund fünf Minuten Ruhe; ein Lauf kostet damit etwa 10 Minuten Wachzeit
+(bis 210 Sekunden Arbeit plus Suspend-Verzögerung). Vier Läufe: 40 Minuten pro Tag, also 0,67
+Betriebsstunden, bei 2 CU rund 1,3 CU-Stunden pro Tag und **etwa 41 der 100 CU-Stunden im Monat**.
+Der Rest ist Reserve für Dashboard-Aufrufe, die die Datenbank ebenfalls aufwecken.
+
+Zum Vergleich der Ausfall: zwei Läufe pro Stunde ergaben 48 Aufwachvorgänge täglich, rund 8
+Betriebsstunden pro Tag und bei 2 CU etwa 16 CU-Stunden täglich – das Kontingent war in gut sechs
+Tagen aufgebraucht. Genau so ist es passiert. Alle vier Stunden wären 62 CU-Stunden im Monat; das
+geht, lässt aber deutlich weniger Luft.
 
 Vercel ruft die Route alle drei Stunden per GET auf. Der Scheduler setzt automatisch `Authorization: Bearer <CRON_SECRET>`. Queryparameter, User-Agent oder Dashboard-Token reichen nicht aus. Vergleiche erfolgen zeitkonstant. Antworten sind nicht cachebar.
 
