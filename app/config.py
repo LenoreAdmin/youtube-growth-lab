@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     vercel_env: str = ""
     database_url: str = Field(default="sqlite:///work.db", repr=False)
     migration_database_url: str = Field(default="", repr=False)
+    # Die Neon-Integration pflegt diese Variable selbst. Ein von Hand eingetragener Wert veraltet,
+    # sobald die Zugangsdaten rotieren – deshalb ist sie die Rueckfalloption fuer Migrationen.
+    database_url_unpooled: str = Field(default="", repr=False)
     app_token: str = Field(default="", repr=False)
     cron_secret: str = Field(default="", repr=False)
     channel_id: str = ""
@@ -24,6 +27,11 @@ class Settings(BaseSettings):
     sync_interval_seconds: int = 3600
     analytics_lag_days: int = 3
     sync_budget_seconds: int = Field(default=210, ge=30, le=210)
+
+    @property
+    def direct_database_url(self):
+        """Der direkte Endpunkt fuer DDL: eigene Angabe zuerst, sonst der von der Integration gepflegte."""
+        return self.migration_database_url or self.database_url_unpooled
 
     @property
     def hosted(self):

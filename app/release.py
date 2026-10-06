@@ -57,13 +57,14 @@ def build():
     if settings.hosted and settings.vercel_env not in ("production", "preview", "development"):
         raise ValueError("Hosted build requires VERCEL_ENV; expose Vercel system environment variables.")
     if settings.vercel_env == "production":
-        if not settings.migration_database_url:
-            raise ValueError("Production build requires MIGRATION_DATABASE_URL (direct PostgreSQL connection).")
+        if not settings.direct_database_url:
+            raise ValueError("Production build requires a direct PostgreSQL connection: "
+                             "MIGRATION_DATABASE_URL or DATABASE_URL_UNPOOLED.")
         for name in ("google_client_id", "google_client_secret", "google_refresh_token", "channel_id"):
             value = getattr(settings, name)
             if not value or value.startswith("REPLACE_"):
                 raise ValueError("Production build requires complete Google OAuth environment and CHANNEL_ID.")
-        migrate(settings.migration_database_url, hosted=True)
+        migrate(settings.direct_database_url, hosted=True)
         check_schema(settings.database_url)
         print("Production schema upgraded and verified.")
     else:
@@ -79,9 +80,10 @@ def main():
         if args.command == "build":
             build()
         elif args.command == "migrate":
-            if settings.hosted and not settings.migration_database_url:
-                raise ValueError("MIGRATION_DATABASE_URL is required for hosted migrations.")
-            migrate(settings.migration_database_url or settings.database_url, hosted=settings.hosted)
+            if settings.hosted and not settings.direct_database_url:
+                raise ValueError("MIGRATION_DATABASE_URL or DATABASE_URL_UNPOOLED is required for hosted "
+                                 "migrations.")
+            migrate(settings.direct_database_url or settings.database_url, hosted=settings.hosted)
             print("Schema upgraded.")
         else:
             check_schema(settings.database_url)
