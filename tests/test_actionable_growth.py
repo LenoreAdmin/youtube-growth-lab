@@ -266,7 +266,8 @@ def test_queue_is_short_one_per_video_and_leaves_winners_and_running_tests_alone
     assert plan["running_experiments"][0]["started_day"] == str(TODAY-timedelta(days=3))
     assert "nichts weiter an diesem Video" in plan["running_experiments"][0]["note"]
     assert plan["results"][0]["outcome"] == "positive"
-    assert "staerkste ausfuehrbare Reichweitenaktion" in plan["queue_note"]
+    assert "stärkste Reichweitenaktion" in plan["queue_note"]
+    assert "read-only" in plan["queue_note"], "der Grund fuer die manuelle Ausfuehrung steht dabei"
     # Geschuetztes Video bleibt sichtbar geschuetzt und taucht nicht als Aufgabe auf.
     assert [p["video_id"] for p in plan["protected"]] == ["c"]
 

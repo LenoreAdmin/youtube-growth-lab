@@ -2119,9 +2119,9 @@ def daily_plan(ranking, today, record, results=None):
             "not_testable": not_testable,
             "now_do": queue[0] if queue else None,
             "queue_note": ("Die aktuell stärkste Reichweitenaktion – von dir auszuführen, weil der YouTube-Zugriff "
-                           "read-only ist. Alles andere entscheidet das System selbst. "
-                           "Genau die aktuell staerkste ausfuehrbare Reichweitenaktion. Alles Weitere "
-                           "entscheidet das System intern und meldet sich erst, wenn es wieder etwas zu tun gibt."
+                           "read-only ist. "
+                           "Alles andere entscheidet das System selbst und meldet sich, wenn es wieder "
+                           "etwas zu tun gibt."
                            if queue else "Heute keine datenbegründete Reichweiten-Maßnahme: geschützte oder laufende "
                                         "Videos, oder für kein Video liegt eine belegte Audience-/Placement-Chance vor."),
             "momentum_top": {"video_id": momentum_top["video_id"], "title": momentum_top["title"], "state": momentum_top["state"],
