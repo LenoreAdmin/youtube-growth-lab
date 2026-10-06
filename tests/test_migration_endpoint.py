@@ -64,3 +64,21 @@ def test_the_production_build_migrates_through_the_fallback(monkeypatch):
     release.build()
     assert used["url"] == "postgresql://user:pw@direct/db" and used["hosted"] is True
     assert used["checked"] == settings.database_url
+
+
+def test_the_failure_reason_is_readable_but_carries_no_credentials():
+    """Ohne Meldung ist eine Stoerung nicht diagnostizierbar; mit Zugangsdaten ist sie ein Leck."""
+    from app.release import redacted
+
+    class Failure(Exception):
+        pass
+
+    host = redacted(Failure('connection to server at "ep-a-1.eu-central-1.aws.neon.tech" (1.2.3.4), '
+                            'port 5432 failed: FATAL: password authentication failed'))
+    assert "neon.tech" not in host and "<host>" in host
+    assert "password authentication failed" in host, "der Grund bleibt lesbar"
+    url = redacted(Failure("connection failed: postgresql://neondb_owner:topsecret@ep-b.neon.tech/neondb"))
+    assert "topsecret" not in url and "neondb_owner" not in url and "neon.tech" not in url
+    quota = redacted(Failure("ERROR: Your project has exceeded the compute time quota."))
+    assert quota.endswith("compute time quota.")
+    assert redacted(Failure("")) == "Failure"

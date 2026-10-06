@@ -1,5 +1,6 @@
 """Deploy-time migrations only: never execute DDL in a request or at import."""
 import argparse
+import re
 from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -11,6 +12,19 @@ from .config import settings
 from .db import make_engine
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+SECRET_PATTERN = re.compile(r"(//)[^@\s]*@|(?<=host=)\S+|(?<=user=)\S+|(?<=password=)\S+|(?<=dbname=)\S+",
+                            re.IGNORECASE)
+HOST_PATTERN = re.compile(r"[\w.-]*(?:neon\.tech|amazonaws\.com)", re.IGNORECASE)
+
+
+def redacted(exc):
+    """Die Fehlerursache ohne Zugangsdaten und ohne Hostnamen – lesbar, aber nicht verraeterisch."""
+    message = " ".join(str(exc).split())
+    message = SECRET_PATTERN.sub("//<entfernt>@", message)
+    message = HOST_PATTERN.sub("<host>", message)
+    return message[:400] or type(exc).__name__
 
 
 def migration_config():
@@ -90,7 +104,10 @@ def main():
             print("Schema verified.")
     except Exception as exc:
         # SQLAlchemy/psycopg errors may contain connection details: never print raw exceptions.
+        # Ohne jede Meldung ist eine Stoerung aber nicht diagnostizierbar, deshalb eine bereinigte
+        # Fassung: Zugangsdaten und Hostnamen werden entfernt, der Grund bleibt lesbar.
         print(f"Release step failed ({type(exc).__name__}); check database configuration and migration state.")
+        print(f"Reason: {redacted(exc)}")
         raise SystemExit(1) from None
 
 
