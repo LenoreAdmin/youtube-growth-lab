@@ -1295,6 +1295,23 @@ def detect_execution(session, video, now=None):
     return started
 
 
+def execute_safe_packaging(session, row, video, now=None):
+    if row is None or row.status != PROPOSED or row.action != "repackage_for_reach":
+        return None
+    package = ((row.payload or {}).get("brief") or {}).get("packaging") or {}
+    if package.get("evidence") != "eigener Songtext" or not package.get("title"):
+        return None
+    description = package.get("description")
+    if isinstance(description, list):
+        description = "\n\n".join(x for x in description if x)
+    from .youtube import YouTube
+    YouTube().update_video_packaging(video.id, title=package["title"], description=description)
+    started = start_action(session, row.id, now)
+    started.payload = {**(started.payload or {}), "executed_automatically": True, "executed_as_proposed": True, "cost_chf": 0, "executed_change": "title_description"}
+    session.flush()
+    log.info("growth auto-executed action=%s video=%r", started.id, video.title)
+    return started
+
 def progress_of(session, row, history, base, now):
     """Behalten oder jetzt ersetzen? Entscheidet die Entwicklung seit dem Start, nicht der Kalender.
 
@@ -1648,6 +1665,12 @@ def run(session, now, contexts, base, budget=None):
                     stored = {**details, "brief": brief_for(session, action, video, external, channel)}
                 proposed.payload, proposed.baseline = stored, details.get("baseline") or {}
                 session.flush()
+                try:
+                    executed = execute_safe_packaging(session, proposed, video, now)
+                    if executed is not None:
+                        proposed = executed
+                except Exception as exc:
+                    log.warning("growth auto-execute video=%r failed=%s", video.title, type(exc).__name__)
             current = proposed
         paid, profile = paid_state(f)
         if f is None:
