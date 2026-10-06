@@ -329,6 +329,8 @@ def _collect(client, budget=None):
         if end is not None:
             with steps.step("optional_lifetime"):
                 optional_lifetime(client, now, end, budget, issues)
+    with steps.step("optional_acquisition"):
+        optional_acquisition(now, budget, issues)
     # V3 zuletzt: gemessen der teuerste Schritt (~10.400 Abfragen je Lauf). Als abgeleitete Arbeit
     # darf er den Kernimport nicht mehr auf deferred setzen und V4/V5/V6 nicht verdraengen.
     with steps.step("v3_predictions"):
@@ -419,6 +421,27 @@ def optional_discovery(client, now, budget, issues):
     except Exception as exc:
         issues.append(f"optional/discovery: {type(exc).__name__}; retry next sync")
         log.error("Optional discovery failed (%s); raw data omitted", type(exc).__name__)
+
+
+def optional_acquisition(now, budget, issues):
+    """Audience- und Placement-Signale im verbleibenden Budget – fruehen eigener Stundenlauf.
+
+    Der zweite Cron-Lauf existierte im Wesentlichen nur dafuer und hielt die Datenbank ein zweites
+    Mal pro Stunde wach. Zusammengelegt kostet derselbe Inhalt einen Aufwachvorgang statt zwei; das
+    Zeitbudget dieses Laufs begrenzt beide Teile gemeinsam.
+    """
+    try:
+        budget.check()
+        from .acquisition import run as acquisition_run
+        with Session() as s:
+            result = acquisition_run(s, now, budget)
+        for issue in result.get("issues") or []:
+            issues.append(f"optional/acquisition: {issue}")
+    except SyncBudgetExceeded:
+        return
+    except Exception as exc:
+        issues.append(f"optional/acquisition: {type(exc).__name__}; retry next sync")
+        log.error("Optional acquisition failed (%s); raw data omitted", type(exc).__name__)
 
 
 def optional_lifetime(client, now, end, budget, issues):

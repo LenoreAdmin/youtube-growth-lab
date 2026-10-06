@@ -187,8 +187,9 @@ def test_vercel_config_matches_route_budget_and_entrypoint():
     from pathlib import Path
     import tomllib
     value=json.loads(Path("vercel.json").read_text(encoding="utf-8-sig"))
-    assert value["crons"] == [{"path":"/api/cron/sync","schedule":"0 * * * *"},
-                              {"path":"/api/cron/jobs","schedule":"30 * * * *"}]
+    # Ein einziger Lauf: zwei getrennte Crons weckten die Datenbank zweimal pro Stunde und
+    # erschoepften damit das Free-Tier-Kontingent. Derselbe Inhalt laeuft jetzt in einem Aufruf.
+    assert value["crons"] == [{"path":"/api/cron/sync","schedule":"0 */3 * * *"}]
     assert value["functions"]["app/main.py"]["maxDuration"] == 300
     project=tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8-sig"))
     assert project["tool"]["vercel"]["entrypoint"] == "app.main:app"
@@ -226,3 +227,25 @@ def test_unicode_bad_cron_token_is_rejected_not_crashed(monkeypatch):
     with pytest.raises(HTTPException) as error:
         cron_authenticate(HTTPAuthorizationCredentials(scheme='Bearer',credentials='ungültig'))
     assert error.value.status_code == 401
+
+
+def test_one_wake_up_carries_every_scheduled_job():
+    """Das Free-Tier bezahlt Wachzeit, nicht Arbeit: zwei Laeufe pro Stunde waren der Ausfallgrund.
+
+    Deshalb muss der eine geplante Lauf alles enthalten, was vorher auf zwei verteilt war – Learning
+    mit der Growth-Entscheidung, Discovery und Acquisition – und zwar innerhalb eines Zeitbudgets.
+    """
+    from pathlib import Path
+    import json as _json
+    import inspect
+    from app import pipeline
+    config = _json.loads(Path("vercel.json").read_text(encoding="utf-8-sig"))
+    assert len(config["crons"]) == 1, "nur ein geplanter Lauf"
+    source = inspect.getsource(pipeline._collect)
+    for step in ("optional_learning", "optional_discovery", "optional_acquisition"):
+        assert step in source, step
+    # Alles teilt dasselbe Budget, sonst sprengt der gebuendelte Lauf die Funktionslaufzeit.
+    assert "budget" in inspect.signature(pipeline.optional_acquisition).parameters
+    assert config["functions"]["app/main.py"]["maxDuration"] == 300
+    from app.config import Settings
+    assert Settings(_env_file=None).sync_budget_seconds < 300

@@ -62,10 +62,22 @@ Lokale Tests prüfen Migrationen und Datenerhalt mit SQLite. Der CI-Workflow hat
 ## Cron-Vertrag
 
 ```json
-{"path": "/api/cron/sync", "schedule": "0 * * * *"}
+{"path": "/api/cron/sync", "schedule": "0 */3 * * *"}
 ```
 
-Vercel ruft die Route stündlich per GET auf. Der Scheduler setzt automatisch `Authorization: Bearer <CRON_SECRET>`. Queryparameter, User-Agent oder Dashboard-Token reichen nicht aus. Vergleiche erfolgen zeitkonstant. Antworten sind nicht cachebar.
+**Genau ein geplanter Lauf.** Das Free-Tier der Datenbank bezahlt Wachzeit, nicht Arbeit: zwei
+getrennte Cron-Läufe pro Stunde hielten die Neon-Compute fast durchgehend wach und erschöpften das
+Monatskontingent von 100 CU-Stunden (≈ 400 Betriebsstunden bei 0,25 CU) vor dem Zyklusende. Der eine
+Lauf enthält deshalb alles, was vorher auf zwei verteilt war: Kernimport, Learning mit der
+Growth-Entscheidung, Discovery und Acquisition – nacheinander im gemeinsamen Zeitbudget von 210
+Sekunden. Keine zweite Cron-Definition hinzufügen; sie kostet Kontingent, nicht Geschwindigkeit.
+
+Acht Läufe am Tag ergeben acht Growth-Entscheidungen täglich und erkennen eine von Hand umgesetzte
+Packaging-Änderung innerhalb von drei Stunden. Bei 10 Minuten Wachzeit je Lauf kostet das rund 34
+Betriebsstunden im Monat, also etwa 8 % des Kontingents; auch bei pessimistischen 20 Minuten bleibt
+es unter 20 %. Der Rest ist Reserve für Dashboard-Aufrufe, die die Datenbank ebenfalls aufwecken.
+
+Vercel ruft die Route alle drei Stunden per GET auf. Der Scheduler setzt automatisch `Authorization: Bearer <CRON_SECRET>`. Queryparameter, User-Agent oder Dashboard-Token reichen nicht aus. Vergleiche erfolgen zeitkonstant. Antworten sind nicht cachebar.
 
 Status:
 - `ok`: abgeschlossen, HTTP 200.
