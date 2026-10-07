@@ -1,4 +1,4 @@
-"""Official Google clients for analytics plus autonomous updates to existing channel videos."""
+"""Official Google clients for analytics and autonomous updates to existing channel videos."""
 import csv
 import io
 import json
