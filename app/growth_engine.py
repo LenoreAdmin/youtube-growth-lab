@@ -623,9 +623,11 @@ def start_action(session, action_id, now=None):
     features_now = features_at(hist, today) if hist is not None else None
     row.status, row.started_at, row.started_day = RUNNING, now, today
     row.evaluate_after = today+timedelta(days=row.window_days+lag_days())
+    auto = bool((row.payload or {}).get("executed_automatically"))
     row.baseline = {**baseline_snapshot(features_now), "frozen_day": str(today), "frozen_at": aware(now).isoformat(),
-                    "confirmed_by": "channel_owner",
-                    "note": "Vom Kanalinhaber als durchgeführt bestätigt; das System hat nichts auf YouTube geändert."}
+                    "confirmed_by": "engine" if auto else "external_detection",
+                    "note": ("Vom Growth-Engine autonom auf YouTube ausgeführt." if auto else
+                             "Ausführung auf YouTube automatisch erkannt; keine manuelle Bestätigung erforderlich.")}
     session.commit()
     return row
 
