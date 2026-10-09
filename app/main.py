@@ -78,13 +78,20 @@ def cron_sync():
         result = collect(bucket=bucket)
     except Exception:
         return JSONResponse({"status": "failed", "detail": "Sync unavailable; check server configuration."}, status_code=503)
-    # Expose real outreach readiness on the scheduled production sync.
-    # Do not mislabel discovered leads as sent submissions or placements.
+    # Fail-closed eligibility report: do not confuse research leads with permission.
     from .distribution_leads import LEADS
+    from .distribution_discovery import Lead, filter_leads
+    leads = [
+        Lead(name=x.name, homepage=x.source_url,
+             official_submission_url=x.source_url, terms_evidence_url=x.source_url,
+             video_id="Xb-tYP9_Ah4")
+        for x in LEADS if x.status == "verify"
+    ]
+    eligible, rejected = filter_leads(leads)
     result["distribution"] = {
         "research_leads": len(LEADS),
-        "candidates_to_verify": sum(x.status == "verify" for x in LEADS),
-        "excluded": sum(x.status == "exclude" for x in LEADS),
+        "eligible_candidates": len(eligible),
+        "rejections": rejected,
         "authorized_transports": 0,
         "confirmed_submissions": 0,
         "confirmed_placements": 0,
