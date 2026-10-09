@@ -49,6 +49,12 @@ def submit(candidate: Submission, *, provider: str,
         raise ValueError("No authorized provider-specific submission transport configured.")
     # Provider-specific adapters must independently validate current terms and
     # endpoint ownership before network delivery; generic web forms are not supported.
+    # Require an explicit, provider-owned transport with independent policy verification.
+    # A generic callable supplied by discovery is not proof of authorization.
+    if not getattr(transport, "verified_provider_adapter", False):
+        raise ValueError("Transport lacks verified provider authorization.")
+    if not getattr(transport, "checks_live_terms", False):
+        raise ValueError("Transport must re-check live terms before delivery.")
     external_id = transport(candidate.official_submission_url, payload)
     if not isinstance(external_id, str) or not external_id.strip():
         raise ValueError("Provider did not acknowledge submission; do not claim delivery.")
