@@ -15,9 +15,9 @@ class ResearchLead:
 
 LEADS = (
     ResearchLead("ATC Sound", "https://blog.atcsound.com/indie-artists-free-music-submission/",
-                 "verify", "Official form accepts YouTube links; free use, current terms and automation permission unverified."),
-    ResearchLead("Right Chord Music", "https://www.rightchordmusic.com/",
-                 "verify", "Free submissions advertised; official submission endpoint and automation terms unverified."),
+                 "verify", "Official free form accepts YouTube URLs, but requires contact email and artist context; automated form submission not authorized."),
+    ResearchLead("Right Chord Music", "https://www.rightchordmusic.com/submit-music",
+                 "exclude", "Official free form requires contact email, artist photo and bio; published music must also be on Spotify or Bandcamp; automated submission not authorized."),
     ResearchLead("Indie Rock Cafe", "https://www.indierockcafe.com/labels/About%20IRC.html",
                  "exclude", "Requests explicit permission to post music and other requirements; no automated consent."),
     ResearchLead("Groover", "https://groover.co/en/",
