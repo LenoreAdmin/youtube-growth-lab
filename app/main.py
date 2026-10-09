@@ -9,7 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, AwareDatetime
 from typing import Literal
 from sqlalchemy import select, text
-from .db import Session
+from .db import Session, engine
 from .config import settings
 from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview, GrowthAssessment, ExperimentChange, PredictionAudit, ModelRun, utcnow
 from .pipeline import dashboard_rows, collect
@@ -78,25 +78,57 @@ def cron_sync():
         result = collect(bucket=bucket)
     except Exception:
         return JSONResponse({"status": "failed", "detail": "Sync unavailable; check server configuration."}, status_code=503)
-    # Fail-closed eligibility report: do not confuse research leads with permission.
+    # Run the real eligibility gate; only provider-specific authorized adapters
+    # can ever deliver. The production registry is deliberately empty until
+    # official automation permission and an adapter are verified.
     from .distribution_leads import LEADS
-    from .distribution_discovery import Lead, filter_leads
-    leads = [
-        Lead(name=x.name, homepage=x.source_url,
-             official_submission_url=x.source_url, terms_evidence_url=x.source_url,
-             video_id="Xb-tYP9_Ah4")
-        for x in LEADS if x.status == "verify"
-    ]
-    eligible, rejected = filter_leads(leads)
+    from .distribution_discovery import Lead, assess
+    from .distribution import submit
+    from sqlalchemy import text as sql_text
+    authorized_transports = {}
+    attempts = []
+    submitted = 0
+    for item in LEADS:
+        if item.status != "verify":
+            continue
+        lead = Lead(name=item.name, homepage=item.source_url,
+                    official_submission_url=item.source_url,
+                    terms_evidence_url=item.source_url, video_id="Xb-tYP9_Ah4")
+        candidate, reason = assess(lead)
+        if candidate is None:
+            attempts.append({"name": item.name, "status": "rejected", "reason": reason})
+            continue
+        if item.name not in authorized_transports:
+            attempts.append({"name": item.name, "status": "blocked",
+                             "reason": "No authorized provider-specific transport"})
+            continue
+        # Persist before allowing subsequent runs to consider the same endpoint.
+        with engine.begin() as conn:
+            conn.execute(sql_text("""CREATE TABLE IF NOT EXISTS distribution_submissions (
+                endpoint TEXT NOT NULL, video_id VARCHAR(24) NOT NULL,
+                provider TEXT NOT NULL, provider_submission_id TEXT NOT NULL,
+                submitted_at TIMESTAMPTZ NOT NULL, status TEXT NOT NULL,
+                PRIMARY KEY(endpoint, video_id))"""))
+            previous = set(conn.execute(sql_text(
+                "SELECT endpoint, video_id FROM distribution_submissions")).all())
+        try:
+            receipt = submit(candidate, provider=item.name,
+                             authorized_transports=authorized_transports,
+                             previously_submitted=previous)
+            with engine.begin() as conn:
+                conn.execute(sql_text("""INSERT INTO distribution_submissions
+                    (endpoint, video_id, provider, provider_submission_id, submitted_at, status)
+                    VALUES (:endpoint, :video_id, :provider, :submission_id, :submitted_at, :status)
+                    ON CONFLICT (endpoint, video_id) DO NOTHING"""),
+                    vars(receipt))
+            submitted += 1
+            attempts.append({"name": item.name, "status": "submitted_not_placed"})
+        except (ValueError, RuntimeError) as exc:
+            attempts.append({"name": item.name, "status": "blocked",
+                             "reason": str(exc)})
     result["distribution"] = {
-        "research_leads": len(LEADS),
-        "eligible_candidates": len(eligible),
-        "rejections": rejected,
-        "authorized_transports": 0,
-        "confirmed_submissions": 0,
-        "confirmed_placements": 0,
-        "status": "blocked_no_authorized_transport",
-    }
+        "status": "submitted" if submitted else "no_authorized_submissions",
+        "attempts": attempts, "submitted": submitted, "placements_confirmed": 0}
     code = 503 if result["status"] in ("failed", "partial") else 200
     return JSONResponse(result, status_code=code)
 
