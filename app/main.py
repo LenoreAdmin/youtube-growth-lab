@@ -78,6 +78,18 @@ def cron_sync():
         result = collect(bucket=bucket)
     except Exception:
         return JSONResponse({"status": "failed", "detail": "Sync unavailable; check server configuration."}, status_code=503)
+    # Expose real outreach readiness on the scheduled production sync.
+    # Do not mislabel discovered leads as sent submissions or placements.
+    from .distribution_leads import LEADS
+    result["distribution"] = {
+        "research_leads": len(LEADS),
+        "candidates_to_verify": sum(x.status == "verify" for x in LEADS),
+        "excluded": sum(x.status == "exclude" for x in LEADS),
+        "authorized_transports": 0,
+        "confirmed_submissions": 0,
+        "confirmed_placements": 0,
+        "status": "blocked_no_authorized_transport",
+    }
     code = 503 if result["status"] in ("failed", "partial") else 200
     return JSONResponse(result, status_code=code)
 
