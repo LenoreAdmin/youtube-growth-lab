@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta, time
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -11,7 +11,7 @@ from typing import Literal
 from sqlalchemy import select, text
 from .db import Session, engine
 from .config import settings
-from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, Decision, MemoryReview, GrowthAssessment, ExperimentChange, PredictionAudit, ModelRun, utcnow
+from .models import Channel, Video, Snapshot, Daily, Reach, Report, Forecast, SyncRun, GrowthAction, Decision, MemoryReview, GrowthAssessment, ExperimentChange, PredictionAudit, ModelRun, utcnow
 from .pipeline import dashboard_rows, collect
 from .memory import DecisionInput, create_decision, activate, evidence
 from . import backfill as backfill_module
@@ -354,6 +354,62 @@ def dashboard(s=Depends(db)):
             "availability": {"returning_viewers": "Nicht Ã¼ber die verwendeten APIs verfÃ¼gbar",
                              "reach": "YouTube Reporting API; historische VerfÃ¼gbarkeit begrenzt",
                              "probabilities": "Horizontbezogen; erst ab 30 unabhÃ¤ngigen Modellfehlern"}}
+
+
+@app.get("/api/subscriber-diagnostics", dependencies=[Depends(authenticate)])
+def subscriber_diagnostics(days: int = 45, s=Depends(db)):
+    """Read-only video-attributed subscriber changes and action audit.
+
+    This is not a channel-wide subscriber count and does not establish causation.
+    """
+    if not 1 <= days <= 365:
+        raise HTTPException(422, "days must be between 1 and 365")
+    through = datetime.now(timezone.utc).date()
+    since = through - timedelta(days=days - 1)
+    rows = list(s.scalars(select(Daily).where(Daily.day.between(since, through))
+                          .order_by(Daily.day, Daily.video_id)))
+    totals = {}
+    videos = {}
+    for item in rows:
+        day = item.day.isoformat()
+        d = totals.setdefault(day, {"gained": 0, "lost": 0, "views": 0, "video_rows": 0})
+        v = videos.setdefault(item.video_id, {"gained": 0, "lost": 0, "views": 0})
+        for target in (d, v):
+            target["gained"] += item.subscribers_gained
+            target["lost"] += item.subscribers_lost
+            target["views"] += item.views
+        d["video_rows"] += 1
+    actions = list(s.scalars(select(GrowthAction).where(
+        GrowthAction.created_day.between(since, through)
+    ).order_by(GrowthAction.created_at)))
+    runs = list(s.scalars(select(SyncRun).where(
+        SyncRun.started_at >= datetime.combine(since, time.min, tzinfo=timezone.utc)
+    ).order_by(SyncRun.started_at.desc()).limit(20)))
+    return {
+        "period": {"from": since.isoformat(), "through": through.isoformat()},
+        "scope": "Video-attributed YouTube Analytics, not channel-wide subscriber totals",
+        "days_with_data": len(totals),
+        "daily": [{"day": day, **v, "net": v["gained"] - v["lost"]}
+                  for day, v in sorted(totals.items())],
+        "videos": {video_id: {**v, "net": v["gained"] - v["lost"]}
+                   for video_id, v in sorted(videos.items())},
+        "growth_actions": [{
+            "id": a.id, "video_id": a.video_id, "action": a.action,
+            "status": a.status,
+            "started_at": a.started_at.isoformat() if a.started_at else None,
+            "evaluated_at": a.evaluated_at.isoformat() if a.evaluated_at else None,
+            "youtube_change_verified": False,
+        } for a in actions],
+        "sync": [{"started_at": r.started_at.isoformat(), "status": r.status,
+                  "finished_at": r.finished_at.isoformat() if r.finished_at else None}
+                 for r in runs],
+        "caveats": [
+            "Missing days are missing data, not zero subscriber changes.",
+            "Video-attributed subscriber changes may differ from channel-wide totals.",
+            "An action status is not proof of a YouTube API write.",
+            "Timing alone does not establish causation.",
+        ],
+    }
 
 
 @app.get("/api/videos/{video_id}", dependencies=[Depends(authenticate)])
