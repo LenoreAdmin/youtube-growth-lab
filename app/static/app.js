@@ -351,7 +351,42 @@ async function cancelExperiment(button){
 }
 $("queueRunning").addEventListener("click",e=>{const c=e.target.closest(".cancel-experiment");if(c)guarded(()=>cancelExperiment(c))});
 $("queueList").addEventListener("click",e=>{const s=e.target.closest(".publish-short");if(s){guarded(()=>publishShort(s))}else{const b=e.target.closest(".start-experiment");if(b)guarded(()=>startExperiment(b))}});
+async function loadSubscriberDiagnostics(){
+ const workspace=$("workspace"), queue=$("queueCard");
+ if(!workspace||!queue)return;
+ let panel=$("subscriberDiagnostics");
+ if(!panel){
+  panel=document.createElement("section");
+  panel.id="subscriberDiagnostics";
+  panel.className="card";
+  panel.setAttribute("aria-label","Abonnenten-Diagnose");
+  panel.innerHTML='<div class="section-heading"><div><p class="eyebrow">BELEGE · ABONNENTEN</p><h2>Gewinne und Verluste pro Tag</h2></div></div><div id="subscriberDiagnosticsContent" aria-live="polite"></div>';
+  queue.parentNode.insertBefore(panel,queue);
+ }
+ const content=$("subscriberDiagnosticsContent");
+ content.textContent="Lade tägliche Abonnentendaten…";
+ try{
+  const d=await api("/api/subscriber-diagnostics?days=45");
+  if(!d.days_with_data){
+   content.textContent="Keine Tagesdaten vorhanden. Fehlende Daten sind nicht null Abonnenten.";
+   return;
+  }
+  const days=d.daily||[];
+  const gained=days.reduce((n,x)=>n+x.gained,0);
+  const lost=days.reduce((n,x)=>n+x.lost,0);
+  const net=gained-lost;
+  const rows=days.slice(-14).reverse().map(x=>`<tr><td>${esc(x.day)}</td><td>${num(x.gained)}</td><td>${num(x.lost)}</td><td>${num(x.net)}</td><td>${num(x.views)}</td></tr>`).join("");
+  content.innerHTML=`<p><strong>Video-bezogen:</strong> ${num(gained)} gewonnen · ${num(lost)} verloren · Netto ${num(net)} (nur Tage mit Daten)</p>
+   <p>Dies ist keine kanalweite Abonnentenbilanz. Eine zeitliche Übereinstimmung beweist keine Ursache.</p>
+   <p>Datentage: ${num(d.days_with_data)} · Growth-Aktionen: ${num((d.growth_actions||[]).length)} · letzte Syncs: ${num((d.sync||[]).length)}</p>
+   <div style="overflow-x:auto"><table><thead><tr><th>Tag</th><th>Gewonnen</th><th>Verloren</th><th>Netto</th><th>Aufrufe</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+ }catch(error){
+  content.textContent="Diagnose nicht verfügbar: "+error.message;
+ }
+}
+
 async function load(){
+ loadSubscriberDiagnostics();
  state=await api("/api/dashboard");$("login").hidden=true;$("workspace").hidden=false;$("token").value="";
  $("connection").textContent=state.channels.map(c=>c.title).join(" · ")||"Wartet auf erste Synchronisierung";
  $("banner").textContent=state.demo?"DEMO · Alle gezeigten Werte sind synthetische Testdaten.":state.sync?
