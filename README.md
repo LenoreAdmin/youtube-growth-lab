@@ -103,3 +103,7 @@ V4 Historical Learning, Backtesting & Strategy Engine (leakage-freie Trainingsda
 V5 Active Organic Growth Engine (Opportunity-/Viewer-/Subscriber-Scores, Growth States, Revival, eine Aktion je Video, Feedback-Loop, Daily Growth Plan – read-only gegenüber YouTube): [docs/V5.md](docs/V5.md).
 
 V6 External Audience Discovery (eigene Traffic-Source-Details, budgetierte Data-API-Suchproben, Audience-Cluster, Search-/Suggested-/Content-Gap-Opportunities mit Discovery-Gedächtnis, integriert in den Growth Plan): [docs/V6.md](docs/V6.md).
+
+## Production OAuth recovery (2026-11-13)
+
+After renewing Google OAuth locally with `python -m app.cli oauth`, update only the `GOOGLE_REFRESH_TOKEN` environment variable in Vercel Production. Never commit or paste the token into logs, issues, or chat. Vercel environment changes need a new production deployment to take effect. Verify the subsequent `/api/cron/sync` result and dashboard import status before declaring recovery; a successful deployment alone does not prove that Google authentication works. The sync endpoint requires the configured cron authorization and should not be called without it.
