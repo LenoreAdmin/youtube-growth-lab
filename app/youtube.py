@@ -48,8 +48,9 @@ class YouTube:
                 raise ValueError("All three Google OAuth environment variables are required.")
             self.credentials = Credentials(token=None, refresh_token=settings.google_refresh_token,
                 token_uri="https://oauth2.googleapis.com/token",
-                client_id=settings.google_client_id, client_secret=settings.google_client_secret,
-                scopes=scopes())
+                client_id=settings.google_client_id, client_secret=settings.google_client_secret)
+            # A refresh token already has its granted scopes. Re-requesting scopes
+            # at refresh time can trigger invalid_scope in hosted environments.
         elif settings.hosted:
             raise ValueError("Google OAuth environment variables are required; secret files are forbidden on Vercel.")
         else:
