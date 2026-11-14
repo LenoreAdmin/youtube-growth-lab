@@ -107,3 +107,7 @@ V6 External Audience Discovery (eigene Traffic-Source-Details, budgetierte Data-
 ## Production OAuth recovery (2026-11-13)
 
 After renewing Google OAuth locally with `python -m app.cli oauth`, update only the `GOOGLE_REFRESH_TOKEN` environment variable in Vercel Production. Never commit or paste the token into logs, issues, or chat. Vercel environment changes need a new production deployment to take effect. Verify the subsequent `/api/cron/sync` result and dashboard import status before declaring recovery; a successful deployment alone does not prove that Google authentication works. The sync endpoint requires the configured cron authorization and should not be called without it.
+
+### OAuth client consistency check (2026-11-14)
+
+The production `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN` must belong to the same Google OAuth client. After changing an environment variable, a new Vercel production deployment is required. Confirm a subsequent successful sync in the authenticated dashboard before declaring recovery. Never commit credentials or token values.
