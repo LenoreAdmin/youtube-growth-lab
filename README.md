@@ -113,3 +113,5 @@ After renewing Google OAuth locally with `python -m app.cli oauth`, update only 
 The production `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN` must belong to the same Google OAuth client. After changing an environment variable, a new Vercel production deployment is required. Confirm a subsequent successful sync in the authenticated dashboard before declaring recovery. Never commit credentials or token values.
 
 <!-- Production environment refresh deployment: 2026-11-14, after GOOGLE_CLIENT_SECRET update. No credentials stored. -->
+
+<!-- Production redeploy after GOOGLE_REFRESH_TOKEN environment update (2026-11-14); no credentials stored. -->
