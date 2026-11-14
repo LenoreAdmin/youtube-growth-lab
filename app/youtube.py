@@ -67,10 +67,26 @@ class YouTube:
         return request.execute(num_retries=0, http=http) if http is not None else request.execute(num_retries=0)
 
     def channel(self):
-        items = self.execute(self.data.channels().list(part="snippet,statistics,contentDetails", mine=True))["items"]
-        matches = [item for item in items if not settings.channel_id or item["id"] == settings.channel_id]
+        response = self.execute(self.data.channels().list(
+            part="snippet,statistics,contentDetails", mine=True))
+        if not isinstance(response, dict):
+            raise ValueError("YouTube channel API: unexpected_response_type")
+        if "error" in response:
+            # Never log raw Google responses or credentials.
+            raise ValueError("YouTube channel API: error_response")
+        if "items" not in response:
+            if isinstance(response.get("pageInfo"), dict) and response["pageInfo"].get("totalResults") == 0:
+                raise ValueError("YouTube channel API: no_accessible_channel")
+            raise ValueError("YouTube channel API: missing_items")
+        items = response["items"]
+        if not isinstance(items, list):
+            raise ValueError("YouTube channel API: invalid_items")
+        if not items:
+            raise ValueError("YouTube channel API: no_accessible_channel")
+        matches = [item for item in items if isinstance(item, dict)
+                   and (not settings.channel_id or item.get("id") == settings.channel_id)]
         if len(matches) != 1:
-            raise ValueError("OAuth channel does not match CHANNEL_ID; authorize the correct channel.")
+            raise ValueError("YouTube channel API: channel_id_mismatch_or_multiple")
         return matches[0]
 
     def videos(self, playlist):
