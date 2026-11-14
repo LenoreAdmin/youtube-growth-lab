@@ -16,6 +16,28 @@ from .youtube import YouTube
 from .budget import Budget, SyncBudgetExceeded
 from .jobs import acquire, release
 
+
+
+def safe_oauth_failure(exc):
+    """Allowlisted OAuth error code only; never persist raw provider messages or credentials."""
+    from google.auth.exceptions import RefreshError
+    import re
+    if not isinstance(exc, RefreshError):
+        return type(exc).__name__
+    known = ("invalid_grant", "invalid_client", "unauthorized_client",
+             "invalid_scope", "access_denied", "temporarily_unavailable",
+             "server_error", "deleted_client")
+    # Google-auth may wrap the OAuth JSON response in a string or tuple.
+    # Only fixed error identifiers are ever returned to the dashboard.
+    for arg in exc.args:
+        if isinstance(arg, dict) and arg.get("error") in known:
+            return f"RefreshError/{arg['error']}"
+        if isinstance(arg, str):
+            for code in known:
+                if re.search(r"(?<![A-Za-z0-9_])" + code + r"(?![A-Za-z0-9_])", arg):
+                    return f"RefreshError/{code}"
+    return "RefreshError/unknown"
+
 log = logging.getLogger(__name__)
 OPTIONAL_RESERVE_SECONDS = 90  # Withheld from the core import so V4/V5/V6 always get a slot.
 
@@ -316,7 +338,7 @@ def _collect(client, budget=None):
         deferred = True
         issues.append("Zeitbudget erreicht; gespeicherter Fortschritt wird beim nÃ¤chsten Cron fortgesetzt.")
     except Exception as exc:
-        issues.append(f"pipeline: {type(exc).__name__}")
+        issues.append(f"pipeline: {safe_oauth_failure(exc)}")
         log.error("Collection failed (%s); secrets and raw API responses omitted", type(exc).__name__)
     # Optional phase runs even after a deferred core: its seconds were reserved up front,
     # so an oversized import can no longer keep V4/V5/V6 from running for days.
